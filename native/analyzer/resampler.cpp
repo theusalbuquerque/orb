@@ -122,4 +122,4 @@ std::vector<float> Resample(
   return output;
 }
 
-}  // namespace bitchord::smart
+}  // namespace orb::smart

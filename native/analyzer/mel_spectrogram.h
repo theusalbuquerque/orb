@@ -76,4 +76,4 @@ BeatSpectrogram ComputeBeatSpectrogram(
   double sample_rate
 );
 
-}  // namespace bitchord::smart
+}  // namespace orb::smart

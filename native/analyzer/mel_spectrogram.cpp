@@ -216,4 +216,4 @@ BeatSpectrogram ComputeBeatSpectrogram(
   return result;
 }
 
-}  // namespace bitchord::smart
+}  // namespace orb::smart

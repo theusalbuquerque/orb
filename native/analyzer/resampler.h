@@ -60,4 +60,4 @@ std::vector<float> Resample(
   double output_rate
 );
 
-}  // namespace bitchord::smart
+}  // namespace orb::smart

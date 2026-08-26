@@ -147,4 +147,4 @@ TempoResult AnalyzeTempo(
   double audible_start
 );
 
-}  // namespace bitchord::smart
+}  // namespace orb::smart

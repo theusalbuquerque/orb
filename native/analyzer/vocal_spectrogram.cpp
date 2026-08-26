@@ -134,4 +134,4 @@ VocalSpectrogram ComputeVocalSpectrogram(
   return result;
 }
 
-}  // namespace bitchord::smart
+}  // namespace orb::smart
