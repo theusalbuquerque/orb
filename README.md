@@ -1,10 +1,9 @@
 <div align="center">
 
-<img src="Logo.png" alt="Orb Logo" width="150" />
 
 # Orb
 
-Um player de música minimalista para Android.
+YouTube Music Backend for Android.
 
 [![Latest release](https://img.shields.io/github/v/release/theusalbuquerque/orb?style=for-the-badge&labelColor=0d1117)](https://github.com/theusalbuquerque/orb/releases)
 [![License](https://img.shields.io/github/license/theusalbuquerque/orb?style=for-the-badge&labelColor=0d1117)](https://github.com/theusalbuquerque/orb/blob/main/LICENSE)
@@ -16,4 +15,4 @@ Um player de música minimalista para Android.
 ---
 
 ### Notas
-Este aplicativo foi construído inspirado no BitChord.
+This app is built inspired by BitChord.
