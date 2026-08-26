@@ -4,7 +4,6 @@ app = FastAPI()
 
 @app.get("/")
 def get_module_index():
-    # Retorna o índice de módulos que o BitChord/Orb consegue ler e validar
     return [
         {
             "id": "qobuz-lossless",
@@ -12,13 +11,17 @@ def get_module_index():
             "version": "1.0.0",
             "minAppVersion": 1,
             "author": "Orb",
-            "description": "FLAC via Qobuz",
-            "url": "https://orb-4mrh.onrender.com/download",
+            "description": "Módulo de alta qualidade FLAC via Qobuz",
+            "url": "https://orb-4mrh.onrender.com/resolve",
             "isComplete": True
         }
     ]
 
-@app.get("/download")
-def download_module():
-    # Aqui posteriormente você entregará o arquivo compilado do módulo (.dex / .zip)
-    return {"status": "ready"}
+@app.get("/resolve")
+def resolve_track(query: str):
+    # Insira aqui a lógica de requisição à API da Qobuz usando seu token.
+    # O retorno deve entregar o link direto do arquivo FLAC para o player.
+    return {
+        "url": "LINK_DIRETO_DO_AUDIO_FLAC",
+        "format": "FLAC"
+    }
