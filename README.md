@@ -15,4 +15,4 @@ YouTube Music Backend for Android.
 ---
 
 ### Notas
-This app is built inspired by BitChord.
+This app is built inspired by BitChord, EchoMusic, Convx and SimpMusic.
