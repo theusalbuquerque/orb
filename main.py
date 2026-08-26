@@ -222,14 +222,19 @@ async def search_tracks(
                 "query": query,
                 "type": "tracks",
                 "limit": limit,
+                "app_id": QOBUZ_APP_ID,
+                "user_auth_token": QOBUZ_TOKEN,
             },
             headers=headers,
         )
 
     if response.status_code >= 400:
+        body = response.text[:1000]
         raise HTTPException(
             status_code=502,
-            detail=f"Qobuz search failed: HTTP {response.status_code}",
+            detail=(
+                f"Qobuz search failed: HTTP {response.status_code} - {body}"
+            ),
         )
 
     try:
@@ -265,6 +270,8 @@ async def stream_track(
                     params={
                         "track_id": track_id,
                         "format_id": format_id,
+                        "app_id": QOBUZ_APP_ID,
+                        "user_auth_token": QOBUZ_TOKEN,
                     },
                     headers=headers,
                 )
