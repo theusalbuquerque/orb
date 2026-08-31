@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#111111">
+  <title>Orb — Ouça no Orb</title>
+  <style>
+    :root{color-scheme:light dark;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0d0d0f;color:#fff;padding:24px}
+    main{width:min(100%,480px);text-align:center}.orb{font-size:42px;font-weight:800;letter-spacing:-2px;margin-bottom:12px}
+    h1{font-size:26px;margin:0 0 10px}p{color:#b9b9c1;line-height:1.5;margin:0 0 24px}
+    .actions{display:grid;gap:12px}a,button{appearance:none;border:0;border-radius:999px;padding:14px 18px;font:inherit;font-weight:700;cursor:pointer;text-decoration:none}
+    .primary{background:#fff;color:#111}.secondary{background:#25252a;color:#fff}.small{font-size:13px;color:#8d8d96;margin-top:20px}
+    [hidden]{display:none!important}
+  </style>
+</head>
+<body>
+<main>
+  <div class="orb">Orb</div>
+  <h1 id="title">Abrindo no Orb…</h1>
+  <p id="status">Se o Orb estiver instalado, a música será aberta diretamente.</p>
+  <div class="actions">
+    <a id="openApp" class="primary" href="#">Abrir no Orb</a>
+    <a id="download" class="secondary" href="#" hidden>Baixar o Orb mais recente</a>
+  </div>
+  <div class="small">O APK é obtido diretamente do GitHub Releases oficial do Orb.</div>
+</main>
+<script>
+(() => {
+  const repository = 'theusalbuquerque/orb';
+  const packageName = 'com.music.orb';
+  const params = new URLSearchParams(location.search);
+  const track = (params.get('track') || '').trim();
+  const forceDownload = params.get('download') === '1';
+  const title = document.getElementById('title');
+  const status = document.getElementById('status');
+  const openApp = document.getElementById('openApp');
+  const download = document.getElementById('download');
+  const safeTrack = /^[A-Za-z0-9_-]{3,128}$/.test(track) ? track : '';
+
+  const fallbackUrl = new URL(location.href);
+  fallbackUrl.searchParams.set('download', '1');
+  const appIntent = safeTrack
+    ? `intent://track/${encodeURIComponent(safeTrack)}#Intent;scheme=orb;package=${packageName};S.browser_fallback_url=${encodeURIComponent(fallbackUrl.toString())};end`
+    : `intent://home#Intent;scheme=orb;package=${packageName};end`;
+  openApp.href = appIntent;
+
+  async function latestStableApk() {
+    const response = await fetch(`https://api.github.com/repos/${repository}/releases?per_page=30`, {
+      headers: { 'Accept': 'application/vnd.github+json' }
+    });
+    if (!response.ok) throw new Error(`GitHub HTTP ${response.status}`);
+    const releases = await response.json();
+    for (const release of releases) {
+      if (release.draft || release.prerelease) continue;
+      const apks = (release.assets || []).filter(a => /\.apk$/i.test(a.name || '') && a.browser_download_url);
+      if (!apks.length) continue;
+      apks.sort((a,b) => score(b.name)-score(a.name));
+      return apks[0].browser_download_url;
+    }
+    throw new Error('Nenhum APK Stable encontrado');
+  }
+
+  function score(name) {
+    const n = String(name || '').toLowerCase();
+    let s = 0;
+    if (n.includes('stable') || n.includes('release') || n.includes('prod')) s += 100;
+    if (n.includes('universal')) s += 30;
+    if (n.includes('beta') || n.includes('dev') || n.includes('pre')) s -= 150;
+    return s;
+  }
+
+  async function prepareDownload(autoStart) {
+    title.textContent = 'Preparando o Orb…';
+    status.textContent = 'Buscando a versão Stable mais recente no GitHub Releases.';
+    try {
+      const apk = await latestStableApk();
+      download.href = apk;
+      download.hidden = false;
+      title.textContent = 'Baixe o Orb';
+      status.textContent = safeTrack
+        ? 'Depois de instalar, volte a este link e toque em “Abrir no Orb” para abrir a música.'
+        : 'A versão Stable mais recente está pronta para baixar.';
+      if (autoStart) {
+        // Top-level navigation to GitHub's asset URL is intentionally used
+        // instead of the browser download API: GitHub responds with an APK
+        // attachment, so Android/Chrome starts the download while keeping the
+        // normal security confirmation in charge.
+        location.href = apk;
+      }
+    } catch (error) {
+      title.textContent = 'Não foi possível localizar o APK';
+      status.textContent = 'Abra a página de Releases do Orb no GitHub e tente novamente.';
+      download.href = `https://github.com/${repository}/releases`;
+      download.textContent = 'Abrir GitHub Releases';
+      download.hidden = false;
+    }
+  }
+
+  if (forceDownload) {
+    prepareDownload(true);
+    return;
+  }
+
+  if (!safeTrack) {
+    title.textContent = 'Orb';
+    status.textContent = 'Abra o app ou baixe a versão Stable mais recente.';
+    prepareDownload(false);
+    return;
+  }
+
+  // First try the installed app. Chrome understands browser_fallback_url and
+  // returns here with download=1 when Orb is absent. Other in-app browsers keep
+  // the visible download button as a manual fallback.
+  let bridgeFallback = setTimeout(() => {
+    if (document.hidden) return;
+    const url = new URL(location.href);
+    url.searchParams.set('download', '1');
+    location.replace(url.toString());
+  }, 1500);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && bridgeFallback) {
+      clearTimeout(bridgeFallback);
+      bridgeFallback = null;
+    }
+  });
+  setTimeout(() => { location.href = appIntent; }, 80);
+  prepareDownload(false);
+})();
+</script>
+</body>
+</html>
