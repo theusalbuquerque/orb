@@ -1,5 +1,7 @@
 <div align="center">
-
+<p align="center">
+  <img src="app/src/main/assets/orb_banner.png" alt="Orb Music" width="100%">
+</p>
 
 # Orb
 
