@@ -5,8 +5,10 @@ from urllib.parse import quote
 import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import PlainTextResponse
+from orb_automix_api import router as automix_router
 
 app = FastAPI(title="Orb Play Qobuz Module", version="2.0.0")
+app.include_router(automix_router)
 
 QOBUZ_TOKEN = os.getenv("QOBUZ_TOKEN", "").strip()
 QOBUZ_APP_ID = os.getenv("QOBUZ_APP_ID", "243542385").strip()
