@@ -329,7 +329,7 @@ def _analyze(path: str, track_id: str, declared_duration: float) -> dict[str, An
 
 @router.get("/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "version": API_VERSION, "analyzer": "orb-remote-dsp-v1"}
+    return {"ok": True, "version": API_VERSION, "analyzer": "orb-remote-dsp-v2"}
 
 
 @router.get("/analysis/{track_id}")
@@ -390,6 +390,17 @@ async def analyze(
 
 @router.post("/plan")
 async def plan(request: PlanRequest) -> dict[str, Any]:
+    """Choose the broad A -> B treatment; Android remains authoritative on safety/timing.
+
+    v2 adds two deliberately non-DJ options inspired by the Spotify reference:
+      * INTRO_BED: B has a long, measured low-vocal intro, so it can arrive quietly
+        under A and only take over when its arrangement/vocal starts.
+      * CUT: a long overlap would mostly stack two vocals/incompatible grooves, so
+        prefer a phrase-boundary micro-handoff instead of forcing a filter/crossfade.
+
+    These are only nominations. The Android planner independently proves the
+    instrumental runway / anchor and degrades to its local plan when evidence is weak.
+    """
     if request.version > API_VERSION:
         raise HTTPException(status_code=409, detail="unsupported Automix protocol version")
     a, b = request.outgoing, request.incoming
@@ -400,27 +411,67 @@ async def plan(request: PlanRequest) -> dict[str, Any]:
     a_vocal = _clamp(_finite(a.get("vocalProbability")), 0.0, 1.0)
     b_vocal = _clamp(_finite(b.get("vocalProbability")), 0.0, 1.0)
 
-    if not (40.0 <= a_bpm <= 220.0 and 40.0 <= b_bpm <= 220.0):
-        style = "EQUAL_POWER"
-        reason = "missing-tempo"
-    elif min(a_conf, b_conf) < 0.18:
-        style = "EQUAL_POWER"
-        reason = "weak-grid"
-    else:
+    # The client derives these from the full 500 ms vocal mask. Fall back to
+    # whole-track likelihoods for older clients, which keeps the endpoint
+    # backwards compatible but makes the new styles appropriately conservative.
+    intro_runway = max(0.0, _finite(b.get("introRunwaySeconds")))
+    intro_vocal = _clamp(_finite(b.get("introVocalProbability"), b_vocal), 0.0, 1.0)
+    opening_vocal = _clamp(_finite(b.get("openingVocalProbability"), b_vocal), 0.0, 1.0)
+    tail_vocal = _clamp(_finite(a.get("tailVocalProbability"), a_vocal), 0.0, 1.0)
+
+    ratio = 0.0
+    delta = 1.0
+    valid_tempi = 40.0 <= a_bpm <= 220.0 and 40.0 <= b_bpm <= 220.0
+    if valid_tempi:
         ratio = b_bpm / a_bpm
         while ratio > 1.5:
             ratio /= 2.0
         while ratio < 0.67:
             ratio *= 2.0
         delta = abs(1.0 - ratio)
-        vocal_clash = a_vocal >= 0.68 and b_vocal >= 0.68
+
+    # First choice: the reference-style instrumental bed. It does not need a
+    # shared beat grid, only a genuinely long/quiet incoming runway.
+    if intro_runway >= 10.0 and intro_vocal <= 0.42:
+        style = "INTRO_BED"
+        reason = "long-instrumental-intro"
+
+    # If both sides are already singing and there is no meaningful intro runway,
+    # a long overlap is the *wrong* thing to do. A short cut avoids the clash.
+    elif tail_vocal >= 0.64 and opening_vocal >= 0.64 and intro_runway < 5.0 and (
+        not valid_tempi or delta > 0.06 or min(a_conf, b_conf) < 0.35
+    ):
+        style = "CUT"
+        reason = "avoid-vocal-overlap"
+
+    elif not valid_tempi:
+        style = "EQUAL_POWER"
+        reason = "missing-tempo"
+    elif min(a_conf, b_conf) < 0.18:
+        style = "EQUAL_POWER"
+        reason = "weak-grid"
+    else:
+        vocal_clash = tail_vocal >= 0.68 and opening_vocal >= 0.68
         if delta <= 0.05 and min(a_conf, b_conf) >= 0.35 and not vocal_clash:
             style = "DJ_BLEND"
             reason = "compatible-grid"
         elif vocal_clash and delta > 0.08:
-            style = "EQUAL_POWER"
-            reason = "vocal-clash"
+            # Prefer the new cut only when the opening is immediate; otherwise a
+            # plain fade remains the conservative fallback for this pair.
+            style = "CUT" if intro_runway < 5.0 else "EQUAL_POWER"
+            reason = "vocal-clash-cut" if style == "CUT" else "vocal-clash"
         else:
             style = "DJ_FILTER"
             reason = "assisted-transition"
-    return {"version": API_VERSION, "style": style, "reason": reason}
+    return {
+        "version": API_VERSION,
+        "style": style,
+        "reason": reason,
+        "evidence": {
+            "introRunwaySeconds": round(intro_runway, 3),
+            "introVocalProbability": round(intro_vocal, 4),
+            "openingVocalProbability": round(opening_vocal, 4),
+            "tailVocalProbability": round(tail_vocal, 4),
+            "tempoDelta": round(delta, 5) if valid_tempi else None,
+        },
+    }
