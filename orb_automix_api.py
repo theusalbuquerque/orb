@@ -329,7 +329,7 @@ def _analyze(path: str, track_id: str, declared_duration: float) -> dict[str, An
 
 @router.get("/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "version": API_VERSION, "analyzer": "orb-remote-dsp-v3"}
+    return {"ok": True, "version": API_VERSION, "analyzer": "orb-remote-dsp-v1"}
 
 
 @router.get("/analysis/{track_id}")
@@ -390,21 +390,8 @@ async def analyze(
 
 @router.post("/plan")
 async def plan(request: PlanRequest) -> dict[str, Any]:
-    """Choose the broad A -> B treatment; Android remains authoritative on safety/timing.
-
-    v3 keeps every existing treatment and adds three reference-inspired options:
-      * INTRO_BRIDGE_FILTER: the same long intro-bed idea with a subtle spectral carve
-        when the two records are dense.
-      * PHRASE_CUT: align a strong B phrase/drop with a vocal-safe phrase boundary in A.
-      * EQ_SWAP: on a trusted shared grid, exchange the low end around a measured beat
-        instead of treating the whole transition as a gain crossfade.
-
-    These are nominations only. Android independently validates runway, vocal safety,
-    beat confidence and the actual local renderer before executing a style.
-    """
     if request.version > API_VERSION:
         raise HTTPException(status_code=409, detail="unsupported Automix protocol version")
-
     a, b = request.outgoing, request.incoming
     a_bpm = _finite(a.get("bpm"))
     b_bpm = _finite(b.get("bpm"))
@@ -412,109 +399,51 @@ async def plan(request: PlanRequest) -> dict[str, Any]:
     b_conf = _clamp(_finite(b.get("beatConfidence")), 0.0, 1.0)
     a_vocal = _clamp(_finite(a.get("vocalProbability")), 0.0, 1.0)
     b_vocal = _clamp(_finite(b.get("vocalProbability")), 0.0, 1.0)
+    a_tail_vocal = _clamp(_finite(a.get("tailVocalProbability"), a_vocal), 0.0, 1.0)
+    a_tail_activity = _clamp(_finite(a.get("tailActivity")), 0.0, 1.0)
+    b_intro_vocal = _clamp(_finite(b.get("introVocalProbability"), b_vocal), 0.0, 1.0)
+    b_intro_activity = _clamp(_finite(b.get("introActivity")), 0.0, 1.0)
+    b_intro_runway = max(0.0, _finite(b.get("introRunwaySeconds")))
 
-    intro_runway = max(0.0, _finite(b.get("introRunwaySeconds")))
-    intro_vocal = _clamp(_finite(b.get("introVocalProbability"), b_vocal), 0.0, 1.0)
-    opening_vocal = _clamp(_finite(b.get("openingVocalProbability"), b_vocal), 0.0, 1.0)
-    tail_vocal = _clamp(_finite(a.get("tailVocalProbability"), a_vocal), 0.0, 1.0)
+    # Instrumental Overlay does not require a shared beat grid: its defining evidence is a long,
+    # measured low-vocal runway on B that can sit under A until A reaches a safe structural exit.
+    # Exact cue, handoff, activity protection and any tempo correction remain authoritative on the
+    # Android planner. The server only nominates the broad treatment.
+    overlay_candidate = (
+        b_intro_runway >= 10.0
+        and b_intro_vocal <= 0.42
+        and (b_intro_activity <= 0.92 or b_intro_runway >= 18.0)
+        and (a_tail_activity >= 0.34 or a_tail_vocal >= 0.30 or b_intro_runway >= 18.0)
+    )
 
-    a_tail_energy = _clamp(_finite(a.get("tailEnergy")), 0.0, 1.0)
-    b_intro_energy = _clamp(_finite(b.get("introEnergy")), 0.0, 1.0)
-    a_tail_low = _clamp(_finite(a.get("tailLowEnergy")), 0.0, 1.0)
-    b_intro_low = _clamp(_finite(b.get("introLowEnergy")), 0.0, 1.0)
-
-    ratio = 0.0
-    delta = 1.0
-    valid_tempi = 40.0 <= a_bpm <= 220.0 and 40.0 <= b_bpm <= 220.0
-    if valid_tempi:
+    if overlay_candidate:
+        style = "DJ_INSTRUMENTAL_OVERLAY"
+        reason = (
+            "instrumental-runway-active-tail"
+            if (a_tail_activity >= 0.34 or a_tail_vocal >= 0.30)
+            else "long-instrumental-runway"
+        )
+    elif not (40.0 <= a_bpm <= 220.0 and 40.0 <= b_bpm <= 220.0):
+        style = "EQUAL_POWER"
+        reason = "missing-tempo"
+    elif min(a_conf, b_conf) < 0.18:
+        style = "EQUAL_POWER"
+        reason = "weak-grid"
+    else:
         ratio = b_bpm / a_bpm
         while ratio > 1.5:
             ratio /= 2.0
         while ratio < 0.67:
             ratio *= 2.0
         delta = abs(1.0 - ratio)
-
-    shared_grid = valid_tempi and delta <= 0.05 and min(a_conf, b_conf) >= 0.35
-    vocal_clash = tail_vocal >= 0.68 and opening_vocal >= 0.68
-
-    # Long intros are always considered before conventional DJ blends. If B has
-    # enough runway, Android can start it at 0:00/first audible audio and align its
-    # structural arrival with A's natural end instead of cutting A early.
-    if intro_runway >= 10.0 and intro_vocal <= 0.42:
-        dense_overlap = (
-            tail_vocal >= 0.48
-            and a_tail_energy >= 0.30
-            and b_intro_energy >= 0.24
-        )
-        if dense_overlap and intro_vocal <= 0.34:
-            style = "INTRO_BRIDGE_FILTER"
-            reason = "long-intro-dense-overlap"
+        vocal_clash = a_vocal >= 0.68 and b_vocal >= 0.68
+        if delta <= 0.05 and min(a_conf, b_conf) >= 0.35 and not vocal_clash:
+            style = "DJ_BLEND"
+            reason = "compatible-grid"
+        elif vocal_clash and delta > 0.08:
+            style = "EQUAL_POWER"
+            reason = "vocal-clash"
         else:
-            style = "INTRO_BED"
-            reason = "long-instrumental-intro"
-
-    # Head-on vocals with no usable B runway are a bad candidate for any long
-    # overlap. A short cut remains the conservative escape hatch.
-    elif vocal_clash and intro_runway < 5.0 and (
-        not valid_tempi or delta > 0.06 or min(a_conf, b_conf) < 0.35
-    ):
-        style = "CUT"
-        reason = "avoid-vocal-overlap"
-
-    elif not valid_tempi:
-        style = "EQUAL_POWER"
-        reason = "missing-tempo"
-    elif min(a_conf, b_conf) < 0.18:
-        style = "EQUAL_POWER"
-        reason = "weak-grid"
-
-    # Trusted shared-grid material with real low-end on both records can sound
-    # cleaner when bass changes hands on a beat rather than both kicks overlapping.
-    elif (
-        shared_grid
-        and a_tail_low >= 0.20
-        and b_intro_low >= 0.20
-        and not vocal_clash
-        and intro_runway < 10.0
-    ):
-        style = "EQ_SWAP"
-        reason = "shared-grid-low-end-swap"
-
-    # A short/strong B opening can be treated as an intentional phrase edit:
-    # cue into its structural entry and land it on A's next vocal-safe boundary.
-    elif (
-        min(a_conf, b_conf) >= 0.32
-        and delta <= 0.08
-        and intro_runway < 6.0
-        and b_intro_energy >= 0.36
-        and opening_vocal <= 0.66
-    ):
-        style = "PHRASE_CUT"
-        reason = "strong-phrase-entry"
-
-    elif shared_grid and not vocal_clash:
-        style = "DJ_BLEND"
-        reason = "compatible-grid"
-    elif vocal_clash and delta > 0.08:
-        style = "CUT" if intro_runway < 5.0 else "EQUAL_POWER"
-        reason = "vocal-clash-cut" if style == "CUT" else "vocal-clash"
-    else:
-        style = "DJ_FILTER"
-        reason = "assisted-transition"
-
-    return {
-        "version": API_VERSION,
-        "style": style,
-        "reason": reason,
-        "evidence": {
-            "introRunwaySeconds": round(intro_runway, 3),
-            "introVocalProbability": round(intro_vocal, 4),
-            "openingVocalProbability": round(opening_vocal, 4),
-            "tailVocalProbability": round(tail_vocal, 4),
-            "tailEnergy": round(a_tail_energy, 4),
-            "introEnergy": round(b_intro_energy, 4),
-            "tailLowEnergy": round(a_tail_low, 4),
-            "introLowEnergy": round(b_intro_low, 4),
-            "tempoDelta": round(delta, 5) if valid_tempi else None,
-        },
-    }
+            style = "DJ_FILTER"
+            reason = "assisted-transition"
+    return {"version": API_VERSION, "style": style, "reason": reason}
