@@ -22,7 +22,7 @@ from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/automix", tags=["automix"])
 
-API_VERSION = 1
+API_VERSION = 2
 SAMPLE_RATE = int(os.getenv("AUTOMIX_SAMPLE_RATE", "22050"))
 MAX_UPLOAD_BYTES = int(os.getenv("AUTOMIX_MAX_UPLOAD_BYTES", str(24 * 1024 * 1024)))
 MAX_DURATION_SECONDS = float(os.getenv("AUTOMIX_MAX_DURATION_SECONDS", "900"))
@@ -329,7 +329,7 @@ def _analyze(path: str, track_id: str, declared_duration: float) -> dict[str, An
 
 @router.get("/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "version": API_VERSION, "analyzer": "orb-remote-dsp-v1"}
+    return {"ok": True, "version": API_VERSION, "analyzer": "orb-remote-dsp-v2"}
 
 
 @router.get("/analysis/{track_id}")
@@ -388,62 +388,482 @@ async def analyze(
                 pass
 
 
+def _plan_track(payload: dict[str, Any]) -> dict[str, Any]:
+    """Prefer the server's full cached analysis, then overlay client evidence."""
+    track_id = str(payload.get("trackId") or "").strip()
+    cached = _cache_get(track_id) if track_id else None
+    if cached is None:
+        return dict(payload)
+    merged = dict(cached)
+    # The client may have a newer duration/source-specific scalar landmark than the cache, but do
+    # not replace the server's dense structural curves with the compact transport fallback.
+    structural = {
+        "energyCurve", "lowEnergyCurve", "vocalActivityMask", "downbeats",
+        "phraseBoundaries", "mixInCandidates", "mixOutCandidates",
+    }
+    for key, value in payload.items():
+        if value is not None and (key not in structural or key not in merged):
+            merged[key] = value
+    return merged
+
+
+def _curve(track: dict[str, Any], name: str) -> list[tuple[float, float]]:
+    raw = track.get(name)
+    if not isinstance(raw, list):
+        return []
+    out: list[tuple[float, float]] = []
+    for point in raw:
+        if not isinstance(point, dict):
+            continue
+        t = _finite(point.get("time"), float("nan"))
+        e = _finite(point.get("energy"), float("nan"))
+        if math.isfinite(t) and math.isfinite(e):
+            out.append((max(0.0, t), _clamp(e, 0.0, 1.0)))
+    return out
+
+
+def _vocal_curve(track: dict[str, Any]) -> list[tuple[float, float]]:
+    energy = _curve(track, "energyCurve")
+    raw = track.get("vocalActivityMask")
+    if not isinstance(raw, list) or not energy:
+        return []
+    n = min(len(energy), len(raw))
+    return [
+        (energy[i][0], _clamp(_finite(raw[i]), 0.0, 1.0))
+        for i in range(n)
+    ]
+
+
+def _mean_window(points: list[tuple[float, float]], start: float, end: float, default: float) -> float:
+    if end <= start:
+        return default
+    values = [v for t, v in points if start <= t < end]
+    return float(sum(values) / len(values)) if values else default
+
+
+def _value_near(points: list[tuple[float, float]], time_s: float, default: float = 0.0) -> float:
+    if not points:
+        return default
+    return min(points, key=lambda p: abs(p[0] - time_s))[1]
+
+
+def _first_sustained_vocal(track: dict[str, Any]) -> float | None:
+    points = _vocal_curve(track)
+    streak = 0
+    for i, (t, value) in enumerate(points):
+        if value >= 0.40:
+            streak += 1
+            if streak >= 3:
+                return points[i - 2][0]
+        else:
+            streak = 0
+    return None
+
+
+def _audible_start(track: dict[str, Any]) -> float:
+    explicit = _finite(track.get("audibleStartTime"), -1.0)
+    if explicit >= 0.0:
+        return explicit
+    energy = _curve(track, "energyCurve")
+    for t, value in energy:
+        if value >= 0.05:
+            return t
+    return 0.0
+
+
+def _content_end(track: dict[str, Any]) -> float:
+    duration = max(0.0, _finite(track.get("duration")))
+    explicit = _finite(track.get("contentEndTime"), 0.0)
+    if explicit > 0.0:
+        return min(explicit, duration) if duration > 0.0 else explicit
+    return duration
+
+
+def _low_curve(track: dict[str, Any]) -> list[tuple[float, float]]:
+    return _curve(track, "lowEnergyCurve")
+
+
+def _impact_time(track: dict[str, Any]) -> float:
+    """Find a useful structural arrival in B without jumping over its opening arrangement."""
+    start = _audible_start(track)
+    end = _content_end(track)
+    energy = _curve(track, "energyCurve")
+    low = _low_curve(track)
+    if not energy or end <= start:
+        candidates = track.get("mixInCandidates") or []
+        if isinstance(candidates, list):
+            valid = [_finite(x.get("time"), -1.0) for x in candidates if isinstance(x, dict)]
+            valid = [x for x in valid if x >= start]
+            if valid:
+                return min(valid)
+        return max(start, _finite(track.get("mixInTime"), start))
+
+    max_search = min(end, start + 95.0)
+    structural: list[float] = []
+    for key in ("phraseBoundaries", "downbeats"):
+        raw = track.get(key)
+        if isinstance(raw, list):
+            structural.extend(_finite(x, -1.0) for x in raw)
+    structural = [x for x in structural if start + 4.0 <= x <= max_search]
+
+    first_vocal = _first_sustained_vocal(track)
+    candidates = set(structural)
+    if first_vocal is not None and first_vocal <= max_search:
+        candidates.add(first_vocal)
+    mix_in = _finite(track.get("mixInTime"), -1.0)
+    if start + 4.0 <= mix_in <= max_search:
+        candidates.add(mix_in)
+    for item in track.get("mixInCandidates") or []:
+        if isinstance(item, dict):
+            t = _finite(item.get("time"), -1.0)
+            if start + 4.0 <= t <= max_search:
+                candidates.add(t)
+
+    # Energy-rise candidates every ~2 seconds. This catches a drop/first strong section even when
+    # the generic mixIn detector nominated a much earlier downbeat.
+    for t, value in energy:
+        if t < start + 6.0 or t > max_search or value < 0.28:
+            continue
+        pre = _mean_window(energy, max(start, t - 6.0), t, value)
+        post = _mean_window(energy, t, min(max_search, t + 4.0), value)
+        low_pre = _mean_window(low, max(start, t - 6.0), t, 0.0)
+        low_post = _mean_window(low, t, min(max_search, t + 4.0), 0.0)
+        if post - pre >= 0.08 or low_post - low_pre >= 0.10:
+            candidates.add(t)
+
+    if not candidates:
+        intro_end = _finite(track.get("introEndTime"), 0.0)
+        return intro_end if intro_end > start else min(max_search, start + 8.0)
+
+    def score(t: float) -> float:
+        pre = _mean_window(energy, max(start, t - 6.0), t, 0.0)
+        post = _mean_window(energy, t, min(max_search, t + 4.0), 0.0)
+        low_pre = _mean_window(low, max(start, t - 6.0), t, 0.0)
+        low_post = _mean_window(low, t, min(max_search, t + 4.0), 0.0)
+        vocal = _value_near(_vocal_curve(track), t, 0.0)
+        structural_bonus = 0.08 if any(abs(t - s) <= 1.25 for s in structural) else 0.0
+        vocal_arrival = 0.08 if first_vocal is not None and abs(t - first_vocal) <= 1.0 else 0.0
+        # Prefer meaningful later arrivals over tiny early bumps, but do not chase a chorus deep
+        # into the song simply because it is louder.
+        timing = _clamp((t - start) / 45.0, 0.0, 1.0)
+        late_penalty = _clamp((t - start - 62.0) / 28.0, 0.0, 1.0)
+        return (
+            0.28 * post +
+            0.24 * max(0.0, post - pre) +
+            0.18 * max(0.0, low_post - low_pre) +
+            0.09 * vocal + structural_bonus + vocal_arrival +
+            0.06 * timing - 0.18 * late_penalty
+        )
+
+    return max(candidates, key=score)
+
+
+def _release_landmarks(track: dict[str, Any]) -> tuple[float, float, bool]:
+    """Return (foreground release, content end, protected-to-end)."""
+    end = _content_end(track)
+    if end <= 0.0:
+        return 0.0, 0.0, False
+    energy = _curve(track, "energyCurve")
+    vocal = _vocal_curve(track)
+    search_start = max(0.0, min(
+        _finite(track.get("outroStartTime"), end - 24.0) or end - 24.0,
+        end - 8.0,
+    ))
+    search_start = max(search_start, end - 40.0)
+
+    # A genuine release is a sustained opening in the arrangement, not merely one quiet frame.
+    candidate: float | None = None
+    for t, _ in energy:
+        if t < search_start or t > end - 0.75:
+            continue
+        e = _mean_window(energy, t, min(end, t + 2.0), 0.5)
+        v = _mean_window(vocal, t, min(end, t + 2.0), _finite(track.get("vocalProbability"), 0.5))
+        if e <= 0.52 and v <= 0.42:
+            candidate = t
+            break
+
+    tail_start = max(0.0, end - 10.0)
+    tail_energy = _mean_window(energy, tail_start, end, 0.5)
+    tail_vocal = _mean_window(vocal, tail_start, end, _finite(track.get("vocalProbability"), 0.5))
+    protected = candidate is None and tail_energy >= 0.66 and tail_vocal >= 0.48
+    if candidate is None:
+        # Keep the last phrase whole. A sub-second release is enough for a click-safe handoff.
+        candidate = max(0.0, end - (0.70 if protected else 2.0))
+    return candidate, end, protected
+
+
+def _tempo_pair(a: dict[str, Any], b: dict[str, Any]) -> tuple[float, float, float]:
+    a_bpm = _finite(a.get("bpm"))
+    b_bpm = _finite(b.get("bpm"))
+    if not (40.0 <= a_bpm <= 220.0 and 40.0 <= b_bpm <= 220.0):
+        return a_bpm, b_bpm, 0.0
+    aligned = b_bpm
+    while aligned / a_bpm > 1.5:
+        aligned /= 2.0
+    while aligned / a_bpm < 0.67:
+        aligned *= 2.0
+    compatibility = _clamp(1.0 - abs(aligned / a_bpm - 1.0) / 0.14, 0.0, 1.0)
+    return a_bpm, aligned, compatibility
+
+
+def _gain_envelope(style: str, handoff_fraction: float, protected: bool) -> list[dict[str, float]]:
+    h = _clamp(handoff_fraction, 0.10, 0.97)
+    if style in {"INTRO_BED", "INTRO_BRIDGE_FILTER"}:
+        bed = 0.10 if protected else 0.14
+        return [
+            {"progress": 0.0, "incomingGain": 0.0, "outgoingGain": 1.0},
+            {"progress": min(0.10, h * 0.22), "incomingGain": bed * 0.55, "outgoingGain": 1.0},
+            {"progress": max(0.12, h * 0.55), "incomingGain": bed, "outgoingGain": 1.0},
+            {"progress": max(0.15, h - 0.08), "incomingGain": min(0.22, bed + 0.05), "outgoingGain": 1.0},
+            {"progress": h, "incomingGain": 0.34, "outgoingGain": 0.92},
+            {"progress": min(0.985, h + (1.0 - h) * 0.55), "incomingGain": 0.76, "outgoingGain": 0.46},
+            {"progress": 1.0, "incomingGain": 1.0, "outgoingGain": 0.0},
+        ]
+    if style == "FOREGROUND_TAKEOVER":
+        return [
+            {"progress": 0.0, "incomingGain": 0.0, "outgoingGain": 1.0},
+            {"progress": 0.12, "incomingGain": 0.48, "outgoingGain": 1.0},
+            {"progress": 0.24, "incomingGain": 0.84, "outgoingGain": 0.92},
+            {"progress": 0.38, "incomingGain": 1.0, "outgoingGain": 0.74},
+            {"progress": 0.70, "incomingGain": 1.0, "outgoingGain": 0.32},
+            {"progress": 1.0, "incomingGain": 1.0, "outgoingGain": 0.0},
+        ]
+    return []
+
+
+def _candidate_plan(style: str, score: float, reason: str, **kwargs: Any) -> dict[str, Any]:
+    plan: dict[str, Any] = {
+        "style": style,
+        "score": round(_clamp(score, 0.0, 1.0), 4),
+        "reason": reason,
+    }
+    plan.update(kwargs)
+    return plan
+
+
+def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    a_release, a_end, protected = _release_landmarks(a)
+    b_start = _audible_start(b)
+    b_end = _content_end(b)
+    b_impact = _impact_time(b)
+    b_first_vocal = _first_sustained_vocal(b)
+    # The safe underlay runway ends at B's first sustained vocal when one exists. A later chorus
+    # may be a stronger structural impact, but it must never justify hiding an entire first verse
+    # underneath A. If B is instrumental for longer, the energy/structure impact is the landmark.
+    b_underlay_handoff = b_first_vocal if b_first_vocal is not None else b_impact
+    b_runway = max(0.0, b_underlay_handoff - b_start)
+    b_vocal = _vocal_curve(b)
+    b_energy = _curve(b, "energyCurve")
+    a_vocal_curve = _vocal_curve(a)
+    a_energy = _curve(a, "energyCurve")
+
+    b_open_end = min(b_end if b_end > 0 else b_start + 8.0, b_start + 8.0)
+    b_open_vocal = _mean_window(b_vocal, b_start, b_open_end, _finite(b.get("vocalProbability"), 0.5))
+    b_open_activity = _mean_window(b_energy, b_start, b_open_end, 0.5)
+    a_tail_start = max(0.0, a_end - 10.0)
+    a_tail_vocal = _mean_window(a_vocal_curve, a_tail_start, a_end, _finite(a.get("vocalProbability"), 0.5))
+    a_tail_activity = _mean_window(a_energy, a_tail_start, a_end, 0.5)
+    a_bpm, b_bpm, tempo = _tempo_pair(a, b)
+    conf = min(_clamp(_finite(a.get("beatConfidence")), 0.0, 1.0), _clamp(_finite(b.get("beatConfidence")), 0.0, 1.0))
+    vocal_clash = min(a_tail_vocal, b_open_vocal)
+    candidates: list[dict[str, Any]] = []
+
+    # 1) Long/medium intro underlay. Preserve B's arrangement and align its structural impact to
+    # A's release/end rather than shortening A to satisfy B.
+    bed_safe = b_runway >= 6.0 and b_open_vocal <= 0.46
+    if bed_safe and a_end > 0.0:
+        desired_wall = b_runway
+        available = max(0.1, a_end)
+        rate = 1.0
+        if desired_wall > available:
+            rate = _clamp(desired_wall / available, 1.0, 1.07)
+        wall = desired_wall / rate if rate > 0 else desired_wall
+        start = max(0.0, a_end - wall)
+        if start <= a_end - 0.35:
+            release_fraction = _clamp((a_release - start) / max(0.1, a_end - start), 0.55, 0.985)
+            long_intro = _clamp((b_runway - 6.0) / 42.0, 0.0, 1.0)
+            score = (
+                0.46 + 0.22 * long_intro + 0.13 * (1.0 - b_open_vocal) +
+                0.08 * a_tail_activity + 0.06 * tempo + (0.06 if protected else 0.0)
+            )
+            # Filter only when the *overlap itself* is dense on both sides. A loud/important A
+            # paired with a genuinely light B bed should keep A spectrally intact.
+            style = "INTRO_BRIDGE_FILTER" if (a_tail_activity >= 0.78 and b_open_activity >= 0.62) else "INTRO_BED"
+            candidates.append(_candidate_plan(
+                style, score, "server-intro-underlay",
+                transitionStart=round(start, 4), transitionEnd=round(a_end, 4),
+                incomingCueTime=round(b_start, 4), incomingHandoffTime=round(b_underlay_handoff, 4),
+                outgoingPlaybackRate=1.0, incomingPlaybackRate=round(rate, 5),
+                handoffFraction=round(release_fraction, 5),
+                bassSwap=bool(_low_curve(a) and _low_curve(b)),
+                bassSwapFraction=round(_clamp(release_fraction + 0.04, 0.58, 0.94), 5),
+                filterSweep=0.58 if style == "INTRO_BRIDGE_FILTER" else 0.0,
+                gainEnvelope=_gain_envelope(style, release_fraction, protected),
+            ))
+
+    # 2) Foreground takeover. B can arrive decisively while A remains as a tail if A has already
+    # opened enough room. Strongly penalized when A is still protected to the end.
+    outgoing_release = _clamp(1.0 - (0.62 * a_tail_activity + 0.38 * a_tail_vocal), 0.0, 1.0)
+    incoming_assert = _clamp(0.68 * b_open_activity + 0.32 * b_open_vocal, 0.0, 1.0)
+    short_intro = _clamp(1.0 - b_runway / 18.0, 0.0, 1.0)
+    takeover_score = 0.32 + 0.24 * outgoing_release + 0.22 * incoming_assert + 0.15 * short_intro + 0.05 * tempo
+    # When B arrives assertively and A has genuinely opened a lane, letting B take authority while
+    # A becomes the tail is often more natural than a symmetric blend (the second reference-video
+    # behaviour). This bonus is conditional, not a global preference.
+    if outgoing_release >= 0.60 and incoming_assert >= 0.65 and short_intro >= 0.55:
+        takeover_score += 0.15
+    if protected:
+        takeover_score -= 0.38
+    if a_end > 0.0 and takeover_score >= 0.42:
+        span = _clamp((12.0 - 5.0 * outgoing_release), 6.0, 18.0)
+        start = max(0.0, a_end - span)
+        handoff_fraction = _clamp(0.20 + 0.16 * (1.0 - outgoing_release), 0.18, 0.42)
+        candidates.append(_candidate_plan(
+            "FOREGROUND_TAKEOVER", takeover_score, "server-foreground-takeover",
+            transitionStart=round(start, 4), transitionEnd=round(a_end, 4),
+            incomingCueTime=round(b_start, 4), incomingHandoffTime=round(max(b_start, _finite(b.get("mixInTime"), b_start)), 4),
+            outgoingPlaybackRate=1.0, incomingPlaybackRate=1.0,
+            handoffFraction=round(handoff_fraction, 5),
+            bassSwap=bool(_low_curve(a) and _low_curve(b)), bassSwapFraction=0.46,
+            filterSweep=0.0,
+            gainEnvelope=_gain_envelope("FOREGROUND_TAKEOVER", handoff_fraction, protected),
+        ))
+
+    # 3) Conventional DJ mix. It competes with the special plans rather than being a mandatory
+    # fallback. A good shared grid with limited vocal collision should beat an unnecessary overlay.
+    if a_end > 0.0 and 40.0 <= a_bpm <= 220.0 and 40.0 <= b_bpm <= 220.0:
+        beat = 60.0 / a_bpm
+        span = _clamp((16.0 if tempo >= 0.78 else 8.0) * beat, 4.0, 18.0)
+        # Preserve A's remaining arrangement: a release point authorizes the overlap to begin, it
+        # does not authorize throwing away everything after it. The deck reaches zero at content end.
+        start = max(0.0, max(a_release, a_end - span))
+        style = "DJ_BLEND" if tempo >= 0.70 and conf >= 0.35 and vocal_clash < 0.58 else "DJ_FILTER"
+        score = 0.34 + 0.27 * tempo + 0.13 * conf + 0.15 * (1.0 - vocal_clash)
+        if protected and style != "DJ_FILTER":
+            score -= 0.18
+        rate = 1.0
+        if style == "DJ_BLEND" and b_bpm > 0:
+            rate = _clamp(a_bpm / b_bpm, 0.90, 1.10)
+        candidates.append(_candidate_plan(
+            style, score, "server-grid-mix",
+            transitionStart=round(start, 4), transitionEnd=round(a_end, 4),
+            incomingCueTime=round(b_start, 4), incomingHandoffTime=round(max(b_start, _finite(b.get("mixInTime"), b_start)), 4),
+            outgoingPlaybackRate=1.0, incomingPlaybackRate=round(rate, 5),
+            handoffFraction=0.50, bassSwap=bool(_low_curve(a) and _low_curve(b)), bassSwapFraction=0.70,
+            filterSweep=0.0 if style == "DJ_BLEND" else 0.72,
+            gainEnvelope=[],
+        ))
+
+    # 4) EQ swap is a separate candidate, not a synonym for blend. It earns a place only when
+    # both low-band curves exist and the shared grid is trustworthy enough to exchange the bass.
+    if a_end > 0.0 and tempo >= 0.68 and conf >= 0.38 and _low_curve(a) and _low_curve(b):
+        beat = 60.0 / a_bpm if a_bpm > 0 else 0.5
+        span = _clamp(16.0 * beat, 5.0, 14.0)
+        start = max(0.0, max(a_release, a_end - span))
+        eq_score = 0.35 + 0.24 * tempo + 0.14 * conf + 0.13 * (1.0 - vocal_clash)
+        if protected:
+            eq_score -= 0.16
+        rate = _clamp(a_bpm / b_bpm, 0.90, 1.10) if b_bpm > 0 else 1.0
+        candidates.append(_candidate_plan(
+            "EQ_SWAP", eq_score, "server-eq-swap",
+            transitionStart=round(start, 4), transitionEnd=round(a_end, 4),
+            incomingCueTime=round(b_start, 4), incomingHandoffTime=round(max(b_start, _finite(b.get("mixInTime"), b_start)), 4),
+            outgoingPlaybackRate=1.0, incomingPlaybackRate=round(rate, 5),
+            handoffFraction=0.50, bassSwap=True, bassSwapFraction=0.56,
+            filterSweep=0.0, gainEnvelope=[],
+        ))
+
+    # 5) Phrase cut: useful for a strong, immediate B entrance when a long overlap would create a
+    # vocal/tempo collision. A valuable long B intro is a strong negative so this cannot become
+    # the old "jump to the chorus" behaviour again.
+    strong_entry = max(b_start, _finite(b.get("mixInTime"), b_impact))
+    if b_end > 0.0 and strong_entry < b_end - 0.25 and a_end > 0.0:
+        skipped = max(0.0, strong_entry - b_start)
+        long_intro_penalty = _clamp((skipped - 8.0) / 24.0, 0.0, 1.0)
+        phrase_need = _clamp(0.55 * vocal_clash + 0.45 * (1.0 - tempo), 0.0, 1.0)
+        phrase_score = 0.24 + 0.28 * phrase_need + 0.12 * b_open_activity - 0.40 * long_intro_penalty
+        if skipped <= 8.0 and phrase_score >= 0.34:
+            span = _clamp(60.0 / a_bpm if a_bpm > 0 else 0.70, 0.45, 1.15)
+            candidates.append(_candidate_plan(
+                "PHRASE_CUT", phrase_score, "server-phrase-handoff",
+                transitionStart=round(max(0.0, a_end - span), 4), transitionEnd=round(a_end, 4),
+                incomingCueTime=round(strong_entry, 4), incomingHandoffTime=round(strong_entry, 4),
+                outgoingPlaybackRate=1.0, incomingPlaybackRate=1.0,
+                handoffFraction=0.50, bassSwap=False, bassSwapFraction=0.70,
+                filterSweep=0.0, gainEnvelope=[],
+            ))
+
+    # 6) Preserve a protected A when B cannot sit underneath it. This is not a failure: a DJ-like
+    # clean downbeat handoff is preferable to chewing off the final chorus.
+    if a_end > 0.0:
+        cut_score = 0.28 + (0.38 if protected else 0.10) + 0.16 * b_open_vocal + 0.08 * b_open_activity
+        if bed_safe:
+            cut_score -= 0.16
+        span = _clamp(60.0 / a_bpm if a_bpm > 0 else 0.55, 0.35, 0.90)
+        candidates.append(_candidate_plan(
+            "CUT", cut_score, "server-protected-handoff" if protected else "server-clean-handoff",
+            transitionStart=round(max(0.0, a_end - span), 4), transitionEnd=round(a_end, 4),
+            incomingCueTime=round(b_start, 4), incomingHandoffTime=round(b_start, 4),
+            outgoingPlaybackRate=1.0, incomingPlaybackRate=1.0,
+            handoffFraction=0.50, bassSwap=False, bassSwapFraction=0.70,
+            filterSweep=0.0, gainEnvelope=[],
+        ))
+
+    # 7) Plain equal-power remains in the competition at low confidence. It is deliberately a low
+    # score when richer evidence exists, but it wins cleanly on weak grids/missing structure.
+    if a_end > 0.0:
+        weak_evidence = 1.0 - _clamp(0.55 * conf + 0.45 * tempo, 0.0, 1.0)
+        eqp_score = 0.22 + 0.28 * weak_evidence + 0.10 * (1.0 - vocal_clash)
+        span = _clamp(6.0, 3.0, 8.0)
+        candidates.append(_candidate_plan(
+            "EQUAL_POWER", eqp_score, "server-plain-fallback",
+            transitionStart=round(max(0.0, a_end - span), 4), transitionEnd=round(a_end, 4),
+            incomingCueTime=round(b_start, 4), incomingHandoffTime=round(b_start, 4),
+            outgoingPlaybackRate=1.0, incomingPlaybackRate=1.0,
+            handoffFraction=0.50, bassSwap=False, bassSwapFraction=0.70,
+            filterSweep=0.0, gainEnvelope=[],
+        ))
+
+    if not candidates:
+        return _candidate_plan(
+            "EQUAL_POWER", 0.35, "server-minimal-fallback",
+            transitionStart=max(0.0, a_end - 6.0), transitionEnd=a_end,
+            incomingCueTime=b_start, incomingHandoffTime=b_start,
+            outgoingPlaybackRate=1.0, incomingPlaybackRate=1.0,
+            handoffFraction=0.50, bassSwap=False, bassSwapFraction=0.70,
+            filterSweep=0.0, gainEnvelope=[],
+        ), []
+
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+    best = candidates[0]
+    second = candidates[1]["score"] if len(candidates) > 1 else 0.0
+    # Confidence describes confidence in the *choice among candidates*, not analysis quality alone.
+    confidence = _clamp(0.48 + 0.36 * best["score"] + 0.28 * max(0.0, best["score"] - second), 0.0, 0.99)
+    best = dict(best)
+    best["confidence"] = round(confidence, 4)
+    best["protectedOutgoing"] = protected
+    best["outgoingReleaseTime"] = round(a_release, 4)
+    best["incomingImpactTime"] = round(b_impact, 4)
+    best["planner"] = "orb-adaptive-dj-v2"
+    return best, candidates[:5]
+
+
 @router.post("/plan")
 async def plan(request: PlanRequest) -> dict[str, Any]:
     if request.version > API_VERSION:
         raise HTTPException(status_code=409, detail="unsupported Automix protocol version")
-    a, b = request.outgoing, request.incoming
-    a_bpm = _finite(a.get("bpm"))
-    b_bpm = _finite(b.get("bpm"))
-    a_conf = _clamp(_finite(a.get("beatConfidence")), 0.0, 1.0)
-    b_conf = _clamp(_finite(b.get("beatConfidence")), 0.0, 1.0)
-    a_vocal = _clamp(_finite(a.get("vocalProbability")), 0.0, 1.0)
-    b_vocal = _clamp(_finite(b.get("vocalProbability")), 0.0, 1.0)
-    a_tail_vocal = _clamp(_finite(a.get("tailVocalProbability"), a_vocal), 0.0, 1.0)
-    a_tail_activity = _clamp(_finite(a.get("tailActivity")), 0.0, 1.0)
-    b_intro_vocal = _clamp(_finite(b.get("introVocalProbability"), b_vocal), 0.0, 1.0)
-    b_intro_activity = _clamp(_finite(b.get("introActivity")), 0.0, 1.0)
-    b_intro_runway = max(0.0, _finite(b.get("introRunwaySeconds")))
+    outgoing = _plan_track(request.outgoing)
+    incoming = _plan_track(request.incoming)
+    plan_result, candidates = _remote_plan(outgoing, incoming)
+    # Keep top-level style/reason for v1-era diagnostics while v2 clients consume the full plan.
+    return {
+        "version": API_VERSION,
+        "style": plan_result.get("style", "EQUAL_POWER"),
+        "reason": plan_result.get("reason", "server-plan"),
+        "plan": plan_result,
+        "candidates": [
+            {"style": c.get("style"), "score": c.get("score"), "reason": c.get("reason")}
+            for c in candidates
+        ],
+    }
 
-    # Instrumental Overlay does not require a shared beat grid: its defining evidence is a long,
-    # measured low-vocal runway on B that can sit under A until A reaches a safe structural exit.
-    # Exact cue, handoff, activity protection and any tempo correction remain authoritative on the
-    # Android planner. The server only nominates the broad treatment.
-    overlay_candidate = (
-        b_intro_runway >= 10.0
-        and b_intro_vocal <= 0.42
-        and (b_intro_activity <= 0.92 or b_intro_runway >= 18.0)
-        and (a_tail_activity >= 0.34 or a_tail_vocal >= 0.30 or b_intro_runway >= 18.0)
-    )
-
-    if overlay_candidate:
-        style = "DJ_INSTRUMENTAL_OVERLAY"
-        reason = (
-            "instrumental-runway-active-tail"
-            if (a_tail_activity >= 0.34 or a_tail_vocal >= 0.30)
-            else "long-instrumental-runway"
-        )
-    elif not (40.0 <= a_bpm <= 220.0 and 40.0 <= b_bpm <= 220.0):
-        style = "EQUAL_POWER"
-        reason = "missing-tempo"
-    elif min(a_conf, b_conf) < 0.18:
-        style = "EQUAL_POWER"
-        reason = "weak-grid"
-    else:
-        ratio = b_bpm / a_bpm
-        while ratio > 1.5:
-            ratio /= 2.0
-        while ratio < 0.67:
-            ratio *= 2.0
-        delta = abs(1.0 - ratio)
-        vocal_clash = a_vocal >= 0.68 and b_vocal >= 0.68
-        if delta <= 0.05 and min(a_conf, b_conf) >= 0.35 and not vocal_clash:
-            style = "DJ_BLEND"
-            reason = "compatible-grid"
-        elif vocal_clash and delta > 0.08:
-            style = "EQUAL_POWER"
-            reason = "vocal-clash"
-        else:
-            style = "DJ_FILTER"
-            reason = "assisted-transition"
-    return {"version": API_VERSION, "style": style, "reason": reason}
