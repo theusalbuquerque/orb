@@ -22,7 +22,7 @@ from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/automix", tags=["automix"])
 
-API_VERSION = 2
+API_VERSION = 3
 SAMPLE_RATE = int(os.getenv("AUTOMIX_SAMPLE_RATE", "22050"))
 MAX_UPLOAD_BYTES = int(os.getenv("AUTOMIX_MAX_UPLOAD_BYTES", str(24 * 1024 * 1024)))
 MAX_DURATION_SECONDS = float(os.getenv("AUTOMIX_MAX_DURATION_SECONDS", "900"))
@@ -329,7 +329,7 @@ def _analyze(path: str, track_id: str, declared_duration: float) -> dict[str, An
 
 @router.get("/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "version": API_VERSION, "analyzer": "orb-remote-dsp-v2"}
+    return {"ok": True, "version": API_VERSION, "analyzer": "orb-remote-dsp-v3"}
 
 
 @router.get("/analysis/{track_id}")
@@ -471,6 +471,48 @@ def _audible_start(track: dict[str, Any]) -> float:
     return 0.0
 
 
+def _bed_cue_start(track: dict[str, Any]) -> float:
+    """Earliest safe cue for a quiet instrumental bed, independent from audibleStartTime.
+
+    A thresholded audible-start estimate is not a track-start estimate. Very soft pads/filtered
+    drums can remain below that threshold for tens of seconds and are often exactly the material
+    we want underneath A. Prefer the real 0:00 head whenever its first few seconds are low-vocal
+    and not aggressively dense; otherwise fall back to the measured audible start, capped to the
+    first eight seconds so a long intro can never be amputated just to satisfy a detector.
+    """
+    end = _content_end(track)
+    if end <= 0.0:
+        return 0.0
+    head_end = min(end, 8.0)
+    vocal = _vocal_curve(track)
+    energy = _curve(track, "energyCurve")
+    default_vocal = _clamp(_finite(track.get("vocalProbability")), 0.0, 1.0)
+    head_vocal = _mean_window(vocal, 0.0, head_end, default_vocal)
+    head_activity = _mean_window(energy, 0.0, head_end, 0.0)
+    if head_vocal <= 0.30 and head_activity <= 0.82:
+        return 0.0
+    return min(max(0.0, _audible_start(track)), 8.0)
+
+
+def _max_window_mean(
+    points: list[tuple[float, float]],
+    start: float,
+    end: float,
+    window: float,
+    default: float,
+) -> float:
+    """Maximum local mean in [start, end], used to reject false release pockets."""
+    if not points or end <= start:
+        return default
+    times = [t for t, _ in points if start <= t <= end]
+    if not times:
+        return default
+    return max(
+        _mean_window(points, t, min(end, t + window), default)
+        for t in times
+    )
+
+
 def _content_end(track: dict[str, Any]) -> float:
     duration = max(0.0, _finite(track.get("duration")))
     explicit = _finite(track.get("contentEndTime"), 0.0)
@@ -559,36 +601,62 @@ def _impact_time(track: dict[str, Any]) -> float:
 
 
 def _release_landmarks(track: dict[str, Any]) -> tuple[float, float, bool]:
-    """Return (foreground release, content end, protected-to-end)."""
+    """Return (foreground release, content end, protected-to-end).
+
+    A release is not one quiet two-second pocket. It is the point after which the final foreground
+    phrase does not come back. This specifically prevents a breath/break in a last chorus from
+    authorizing B to take over 8-15 seconds before A actually resolves.
+    """
     end = _content_end(track)
     if end <= 0.0:
         return 0.0, 0.0, False
     energy = _curve(track, "energyCurve")
     vocal = _vocal_curve(track)
+    default_vocal = _clamp(_finite(track.get("vocalProbability"), 0.5), 0.0, 1.0)
     search_start = max(0.0, min(
         _finite(track.get("outroStartTime"), end - 24.0) or end - 24.0,
         end - 8.0,
     ))
     search_start = max(search_start, end - 40.0)
 
-    # A genuine release is a sustained opening in the arrangement, not merely one quiet frame.
     candidate: float | None = None
     for t, _ in energy:
         if t < search_start or t > end - 0.75:
             continue
-        e = _mean_window(energy, t, min(end, t + 2.0), 0.5)
-        v = _mean_window(vocal, t, min(end, t + 2.0), _finite(track.get("vocalProbability"), 0.5))
-        if e <= 0.52 and v <= 0.42:
-            candidate = t
-            break
+        immediate_end = min(end, t + 2.5)
+        confirm_end = min(end, t + 6.0)
+        e = _mean_window(energy, t, immediate_end, 0.5)
+        v = _mean_window(vocal, t, immediate_end, default_vocal)
+        if e > 0.54 or v > 0.42:
+            continue
 
-    tail_start = max(0.0, end - 10.0)
+        # The pocket must stay released for several seconds, not only one classifier frame.
+        confirm_e = _mean_window(energy, t, confirm_end, e)
+        confirm_v = _mean_window(vocal, t, confirm_end, v)
+        if confirm_e > 0.60 or confirm_v > 0.40:
+            continue
+
+        # Most importantly, reject the candidate if the foreground vocal/arrangement comes back
+        # later in the ending. A strong instrumental rebound alone may still be a usable tail, but
+        # a vocal rebound or a dense+vocal rebound means A has not actually released yet.
+        future_vocal = _max_window_mean(vocal, t, end, 2.0, default_vocal)
+        future_energy = _max_window_mean(energy, t, end, 2.0, e)
+        if future_vocal > 0.48:
+            continue
+        if future_energy > 0.80 and future_vocal > 0.30:
+            continue
+
+        candidate = t
+        break
+
+    tail_start = max(0.0, end - 12.0)
     tail_energy = _mean_window(energy, tail_start, end, 0.5)
-    tail_vocal = _mean_window(vocal, tail_start, end, _finite(track.get("vocalProbability"), 0.5))
-    protected = candidate is None and tail_energy >= 0.66 and tail_vocal >= 0.48
+    tail_vocal = _mean_window(vocal, tail_start, end, default_vocal)
+    tail_peak_vocal = _max_window_mean(vocal, tail_start, end, 2.0, default_vocal)
+    protected = candidate is None and tail_energy >= 0.64 and (tail_vocal >= 0.44 or tail_peak_vocal >= 0.52)
     if candidate is None:
-        # Keep the last phrase whole. A sub-second release is enough for a click-safe handoff.
-        candidate = max(0.0, end - (0.70 if protected else 2.0))
+        # Keep the last phrase whole. A sub-second release is enough for the click-safe handoff.
+        candidate = max(0.0, end - (0.55 if protected else 1.5))
     return candidate, end, protected
 
 
@@ -643,7 +711,9 @@ def _candidate_plan(style: str, score: float, reason: str, **kwargs: Any) -> dic
 
 def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     a_release, a_end, protected = _release_landmarks(a)
-    b_start = _audible_start(b)
+    b_audible_start = _audible_start(b)
+    b_bed_start = _bed_cue_start(b)
+    b_start = b_audible_start
     b_end = _content_end(b)
     b_impact = _impact_time(b)
     b_first_vocal = _first_sustained_vocal(b)
@@ -651,15 +721,17 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     # may be a stronger structural impact, but it must never justify hiding an entire first verse
     # underneath A. If B is instrumental for longer, the energy/structure impact is the landmark.
     b_underlay_handoff = b_first_vocal if b_first_vocal is not None else b_impact
-    b_runway = max(0.0, b_underlay_handoff - b_start)
+    # Underlay runway is measured from the safe musical head, not from a thresholded audible
+    # detector. Other strategies keep using b_start/audible-start so they do not lead with silence.
+    b_runway = max(0.0, b_underlay_handoff - b_bed_start)
     b_vocal = _vocal_curve(b)
     b_energy = _curve(b, "energyCurve")
     a_vocal_curve = _vocal_curve(a)
     a_energy = _curve(a, "energyCurve")
 
-    b_open_end = min(b_end if b_end > 0 else b_start + 8.0, b_start + 8.0)
-    b_open_vocal = _mean_window(b_vocal, b_start, b_open_end, _finite(b.get("vocalProbability"), 0.5))
-    b_open_activity = _mean_window(b_energy, b_start, b_open_end, 0.5)
+    b_open_end = min(b_end if b_end > 0 else b_bed_start + 8.0, b_bed_start + 8.0)
+    b_open_vocal = _mean_window(b_vocal, b_bed_start, b_open_end, _finite(b.get("vocalProbability"), 0.5))
+    b_open_activity = _mean_window(b_energy, b_bed_start, b_open_end, 0.0)
     a_tail_start = max(0.0, a_end - 10.0)
     a_tail_vocal = _mean_window(a_vocal_curve, a_tail_start, a_end, _finite(a.get("vocalProbability"), 0.5))
     a_tail_activity = _mean_window(a_energy, a_tail_start, a_end, 0.5)
@@ -692,7 +764,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
             candidates.append(_candidate_plan(
                 style, score, "server-intro-underlay",
                 transitionStart=round(start, 4), transitionEnd=round(a_end, 4),
-                incomingCueTime=round(b_start, 4), incomingHandoffTime=round(b_underlay_handoff, 4),
+                incomingCueTime=round(b_bed_start, 4), incomingHandoffTime=round(b_underlay_handoff, 4),
                 outgoingPlaybackRate=1.0, incomingPlaybackRate=round(rate, 5),
                 handoffFraction=round(release_fraction, 5),
                 bassSwap=bool(_low_curve(a) and _low_curve(b)),
@@ -844,7 +916,9 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     best["protectedOutgoing"] = protected
     best["outgoingReleaseTime"] = round(a_release, 4)
     best["incomingImpactTime"] = round(b_impact, 4)
-    best["planner"] = "orb-adaptive-dj-v2"
+    best["incomingAudibleStartTime"] = round(b_audible_start, 4)
+    best["incomingBedCueTime"] = round(b_bed_start, 4)
+    best["planner"] = "orb-adaptive-dj-v3"
     return best, candidates[:5]
 
 
