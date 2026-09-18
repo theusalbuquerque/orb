@@ -22,7 +22,7 @@ from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/automix", tags=["automix"])
 
-API_VERSION = 3
+API_VERSION = 4
 SAMPLE_RATE = int(os.getenv("AUTOMIX_SAMPLE_RATE", "22050"))
 MAX_UPLOAD_BYTES = int(os.getenv("AUTOMIX_MAX_UPLOAD_BYTES", str(24 * 1024 * 1024)))
 MAX_DURATION_SECONDS = float(os.getenv("AUTOMIX_MAX_DURATION_SECONDS", "900"))
@@ -329,7 +329,7 @@ def _analyze(path: str, track_id: str, declared_duration: float) -> dict[str, An
 
 @router.get("/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "version": API_VERSION, "analyzer": "orb-remote-dsp-v3"}
+    return {"ok": True, "version": API_VERSION, "analyzer": "orb-remote-dsp-v4"}
 
 
 @router.get("/analysis/{track_id}")
@@ -641,7 +641,12 @@ def _release_landmarks(track: dict[str, Any]) -> tuple[float, float, bool]:
         # a vocal rebound or a dense+vocal rebound means A has not actually released yet.
         future_vocal = _max_window_mean(vocal, t, end, 2.0, default_vocal)
         future_energy = _max_window_mean(energy, t, end, 2.0, e)
+        future_mean_energy = _mean_window(energy, t, end, e)
         if future_vocal > 0.48:
+            continue
+        # A strong instrumental rebound is also a real continuation of A. Do not call a 2-6 s
+        # pocket a release when the arrangement returns and remains dense afterwards.
+        if future_energy > 0.76 and future_mean_energy > 0.58:
             continue
         if future_energy > 0.80 and future_vocal > 0.30:
             continue
@@ -717,10 +722,15 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     b_end = _content_end(b)
     b_impact = _impact_time(b)
     b_first_vocal = _first_sustained_vocal(b)
-    # The safe underlay runway ends at B's first sustained vocal when one exists. A later chorus
-    # may be a stronger structural impact, but it must never justify hiding an entire first verse
-    # underneath A. If B is instrumental for longer, the energy/structure impact is the landmark.
-    b_underlay_handoff = b_first_vocal if b_first_vocal is not None else b_impact
+    # The safe underlay runway ends at B's first *major arrangement impact*, not automatically at
+    # its first sustained vocal. An instrumental intro can open up before the lyric arrives. The
+    # concrete regression is HEATED -> DANCE: impact is around 0:56 while first vocal is later.
+    # v3 wrongly used first vocal whenever present, stretching the bed back to ~3:12 of HEATED.
+    handoff_candidates = [
+        value for value in (b_impact, b_first_vocal)
+        if value is not None and value >= b_bed_start + 6.0
+    ]
+    b_underlay_handoff = min(handoff_candidates) if handoff_candidates else max(b_bed_start, b_impact)
     # Underlay runway is measured from the safe musical head, not from a thresholded audible
     # detector. Other strategies keep using b_start/audible-start so they do not lead with silence.
     b_runway = max(0.0, b_underlay_handoff - b_bed_start)
@@ -918,7 +928,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     best["incomingImpactTime"] = round(b_impact, 4)
     best["incomingAudibleStartTime"] = round(b_audible_start, 4)
     best["incomingBedCueTime"] = round(b_bed_start, 4)
-    best["planner"] = "orb-adaptive-dj-v3"
+    best["planner"] = "orb-adaptive-dj-v4"
     return best, candidates[:5]
 
 
@@ -929,7 +939,7 @@ async def plan(request: PlanRequest) -> dict[str, Any]:
     outgoing = _plan_track(request.outgoing)
     incoming = _plan_track(request.incoming)
     plan_result, candidates = _remote_plan(outgoing, incoming)
-    # Keep top-level style/reason for v1-era diagnostics while v2 clients consume the full plan.
+    # Keep top-level style/reason for v1-era diagnostics while v4 clients consume the full plan.
     return {
         "version": API_VERSION,
         "style": plan_result.get("style", "EQUAL_POWER"),
