@@ -3,7 +3,8 @@
 Mount this router into the existing Orb FastAPI service. The Android client uploads only its
 standalone lightweight analysis rendition (normally YouTube Opus), never the Lossless/Hi-Res
 playback file. Audio is deleted immediately after feature extraction; only derived metadata is
-kept in a bounded in-memory cache.
+kept in a bounded in-memory cache. Automix v5 makes the server the sole authority for choosing
+the transition family, timing and choreography; Android only executes or transport-falls back.
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/automix", tags=["automix"])
 
-API_VERSION = 4
+API_VERSION = 5
 SAMPLE_RATE = int(os.getenv("AUTOMIX_SAMPLE_RATE", "22050"))
 MAX_UPLOAD_BYTES = int(os.getenv("AUTOMIX_MAX_UPLOAD_BYTES", str(24 * 1024 * 1024)))
 MAX_DURATION_SECONDS = float(os.getenv("AUTOMIX_MAX_DURATION_SECONDS", "900"))
@@ -271,7 +272,7 @@ def _analyze(path: str, track_id: str, declared_duration: float) -> dict[str, An
     beat_interval = 60.0 / bpm if bpm > 0 else 0.0
 
     # We do not pretend to infer meter with confidence we do not have: four-beat bars are a safe
-    # structural grid and the local planner still gates all ambitious use by beat confidence.
+    # structural grid and the server planner gates ambitious transition families by beat confidence.
     downbeats = beats[::4] if beats else []
     phrases = downbeats[::4] if downbeats else []
     first_beat = beats[0] if beats else 0.0
@@ -329,7 +330,7 @@ def _analyze(path: str, track_id: str, declared_duration: float) -> dict[str, An
 
 @router.get("/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "version": API_VERSION, "analyzer": "orb-remote-dsp-v4"}
+    return {"ok": True, "version": API_VERSION, "analyzer": "orb-remote-dsp-v5"}
 
 
 @router.get("/analysis/{track_id}")
@@ -928,7 +929,8 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     best["incomingImpactTime"] = round(b_impact, 4)
     best["incomingAudibleStartTime"] = round(b_audible_start, 4)
     best["incomingBedCueTime"] = round(b_bed_start, 4)
-    best["planner"] = "orb-adaptive-dj-v4"
+    best["planner"] = "orb-server-authoritative-v5"
+    best["serverAuthoritative"] = True
     return best, candidates[:5]
 
 
@@ -939,9 +941,14 @@ async def plan(request: PlanRequest) -> dict[str, Any]:
     outgoing = _plan_track(request.outgoing)
     incoming = _plan_track(request.incoming)
     plan_result, candidates = _remote_plan(outgoing, incoming)
-    # Keep top-level style/reason for v1-era diagnostics while v4 clients consume the full plan.
+    # The selected recipe is a command from the musical planner, not a style hint. Even the
+    # minimal fallback is selected here on the server; Android may only reject impossible bounds.
+    plan_result = dict(plan_result)
+    plan_result["serverAuthoritative"] = True
+    plan_result["planner"] = "orb-server-authoritative-v5"
     return {
         "version": API_VERSION,
+        "authority": "server",
         "style": plan_result.get("style", "EQUAL_POWER"),
         "reason": plan_result.get("reason", "server-plan"),
         "plan": plan_result,
