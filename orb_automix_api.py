@@ -1687,8 +1687,11 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
         and tempo >= 0.38
         and conf >= 0.30
     ):
-        conflict_key = key_evidence and key_fit < 0.35
-        target_beats = 4 if conflict_key else 8
+        # Unknown key may use a filtered bridge; a *known* incompatible key may not.
+        # Filtering can mask uncertain harmony, but it should not deliberately layer
+        # two keys the analyzer has positively identified as conflicting.
+        known_key_conflict = key_evidence and key_fit < 0.35
+        target_beats = 8
         desired_cue = max(b_start, _finite(b.get("mixInTime"), b_start))
         pair = _best_structural_pair(
             a,
@@ -1714,11 +1717,16 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
             actual_beats = int(round(float(pair["actualBeats"])))
             release_fraction = float(pair["releaseFraction"])
 
-            vocal_limit = 0.28 if conflict_key else 0.68
-            structure_floor = 0.40 if conflict_key else 0.42
+            has_outgoing_structure = bool(a.get("downbeats") or a.get("phraseBoundaries"))
+            has_incoming_structure = bool(b.get("downbeats") or b.get("phraseBoundaries"))
+            vocal_limit = 0.68
+            structure_floor = 0.42
             minimum_beats = 4
             if (
-                actual_beats >= minimum_beats
+                not known_key_conflict
+                and has_outgoing_structure
+                and has_incoming_structure
+                and actual_beats >= minimum_beats
                 and span_fit >= 0.24
                 and phrase_fit >= structure_floor
                 and overlap_vocal_clash < vocal_limit
@@ -1746,7 +1754,14 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                     incomingPlaybackRate=round(bridge_in_rate, 5),
                     transitionBeats=actual_beats,
                     requestedTransitionBeats=target_beats,
-                    handoffFraction=round(_clamp(release_fraction, 0.48, 0.82), 4),
+                    handoffFraction=round(
+                        _clamp(
+                            release_fraction,
+                            0.86 if protected else 0.48,
+                            0.94 if protected else 0.82,
+                        ),
+                        4,
+                    ),
                     bassSwap=bool(
                         key_evidence
                         and key_fit >= 0.58
@@ -1754,7 +1769,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                         and _low_curve(b)
                     ),
                     bassSwapFraction=round(_clamp(release_fraction, 0.50, 0.82), 4),
-                    filterSweep=0.92 if conflict_key else 0.82,
+                    filterSweep=0.82,
                     keyCompatibility=round(key_fit, 4),
                     tempoCompatibility=round(tempo, 4),
                     phraseAlignment=round(phrase_fit, 4),
@@ -1909,7 +1924,14 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     ]
 
     if overlap_candidates:
-        best = max(overlap_candidates, key=lambda x: x["score"])
+        open_overlap = [
+            candidate
+            for candidate in overlap_candidates
+            if candidate.get("style") in {"DJ_BLEND", "EQ_SWAP"}
+        ]
+        # Prefer the richer open/bass-swap techniques whenever they clear their
+        # own safety floors. DJ_FILTER is the conservative overlap fallback.
+        best = max(open_overlap or overlap_candidates, key=lambda x: x["score"])
     elif cut_candidates:
         best = max(cut_candidates, key=lambda x: x["score"])
     else:
