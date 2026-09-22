@@ -680,34 +680,41 @@ def _trusted_key(track: dict[str, Any]) -> tuple[int, str] | None:
 
 
 def _key_compatibility(a: dict[str, Any], b: dict[str, Any]) -> float:
-    """0..1 harmonic-mixing compatibility; unknown keys are deliberately neutral."""
+    """0..1 harmonic compatibility based on musical relationships, not semitone proximity.
+
+    A key one semitone away is physically close on a keyboard but usually a poor place to leave
+    two full arrangements open. Strong scores are reserved for relationships a DJ would actually
+    use: same key, relative major/minor, and fourth/fifth in the same mode.
+    Unknown/low-confidence keys stay neutral so they cannot manufacture a harmonic advantage.
+    """
     left = _trusted_key(a)
     right = _trusted_key(b)
     if left is None or right is None:
-        # Neutral enough for a filtered bridge, not high enough for an open blend.
         return 0.55
+
     li, lm = left
     ri, rm = right
     distance = min((li - ri) % 12, (ri - li) % 12)
+    same_mode = bool(lm and rm and lm == rm)
+    different_mode = bool(lm and rm and lm != rm)
 
-    if lm and rm and lm != rm:
-        # Relative major/minor shares the key signature and is the strongest
-        # cross-mode relationship. Parallel major/minor is useful only with a
-        # guarded/filtered transfer, not as an open harmonic blend.
-        if distance == 3:
-            return 0.95
-        if distance == 0:
-            return 0.45
-        return 0.15
-
-    if distance == 0:
+    if same_mode and distance == 0:
         return 1.0
-    if distance == 5:
-        return 0.90
-    if distance == 2:
-        return 0.40
-    if distance == 1:
-        return 0.25
+    if different_mode and distance == 3:
+        # Relative major/minor.
+        return 0.92
+    if same_mode and distance == 5:
+        # Perfect fourth/fifth relationship.
+        return 0.88
+    if different_mode and distance == 0:
+        # Parallel major/minor: related, but usually not safe for a flat overlap.
+        return 0.52
+
+    # Mild credit for incomplete mode labels with the same tonic; otherwise,
+    # chromatic proximity is not treated as harmonic compatibility.
+    if (not lm or not rm) and distance == 0:
+        return 0.72
+
     return 0.18
 
 
