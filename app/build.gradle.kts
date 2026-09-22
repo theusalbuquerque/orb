@@ -51,14 +51,9 @@ android {
             dimension = "env"
             applicationId = "com.dev.orb"
             resValue("string", "app_name", "Orb Dev")
-            // Experimental Automix v6 is limited to the development channel
-            // until the staged rollout is explicitly widened.
-            buildConfigField("boolean", "NEW_AUTOMIX_ENABLED", "true")
         }
         create("prod") {
             dimension = "env"
-            // Public builds keep the established local Automix for now.
-            buildConfigField("boolean", "NEW_AUTOMIX_ENABLED", "false")
         }
     }
 
