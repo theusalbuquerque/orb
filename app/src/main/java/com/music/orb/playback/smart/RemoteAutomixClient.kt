@@ -187,7 +187,9 @@ object RemoteAutomixClient {
                 phraseAlignment = value.finiteDouble("phraseAlignment", 0.0),
                 pairCompatibility = value.finiteDouble("pairCompatibility", 0.0),
                 energyCompatibility = value.finiteDouble("energyCompatibility", 0.0),
-                overlapVocalClash = overlapVocalClash,
+                overlapVocalClash = value
+                    .finiteDouble("overlapVocalClash", value.finiteDouble("vocalOverlap", 0.0))
+                    .coerceIn(0.0, 1.0),
                 spanCompatibility = value.finiteDouble("spanCompatibility", 0.0),
                 requestedTransitionBeats = value.optInt("requestedTransitionBeats", 0).coerceAtLeast(0),
                 outgoingAnchor = value.optString("outgoingAnchor", ""),
@@ -267,7 +269,7 @@ object RemoteAutomixClient {
             phraseAlignment = value.finiteDouble("phraseAlignment", 0.0),
             pairCompatibility = value.finiteDouble("pairCompatibility", 0.0),
             energyCompatibility = value.finiteDouble("energyCompatibility", 0.0),
-            overlapVocalClash = value.finiteDouble("overlapVocalClash", 0.0),
+            overlapVocalClash = overlapVocalClash,
             spanCompatibility = value.finiteDouble("spanCompatibility", 0.0),
             requestedTransitionBeats = value.optInt("requestedTransitionBeats", 0).coerceAtLeast(0),
             outgoingAnchor = value.optString("outgoingAnchor", ""),
