@@ -888,45 +888,94 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
             filterSweep=0.0, phraseAlignment=round(phrase_fit, 4), gainEnvelope=[],
         ))
 
-    # 3) Phrase cut: useful for a strong, immediate B entrance when a long overlap would create a
-    # vocal/tempo collision. A valuable long B intro is a strong negative so this cannot become
-    # the old "jump to the chorus" behaviour again.
+    # 3) Phrase cut: a deliberate phrase/downbeat transfer, not a tiny crossfade.
+    # Both sides must expose a usable structural point close to the intended handoff.
     strong_entry = max(b_start, _finite(b.get("mixInTime"), b_impact))
     if b_end > 0.0 and strong_entry < b_end - 0.25 and a_end > 0.0:
         skipped = max(0.0, strong_entry - b_start)
         long_intro_penalty = _clamp((skipped - 8.0) / 24.0, 0.0, 1.0)
         phrase_need = _clamp(0.55 * vocal_clash + 0.45 * (1.0 - tempo), 0.0, 1.0)
-        phrase_score = 0.24 + 0.28 * phrase_need + 0.12 * b_open_activity - 0.40 * long_intro_penalty
-        if skipped <= 8.0 and phrase_score >= 0.34:
-            span = _clamp(60.0 / a_bpm if a_bpm > 0 else 0.70, 0.45, 1.15)
+        beat = 60.0 / a_bpm if a_bpm > 0.0 else 0.70
+        desired_span = _clamp(beat, 0.45, 1.15)
+        desired_start = max(0.0, a_end - desired_span)
+        phrase_start, outgoing_phrase_fit = _structural_snap(
+            a,
+            desired_start,
+            max(0.0, a_end - 2.5 * beat),
+            max(0.0, a_end - 0.10),
+            beat,
+        )
+        phrase_cue, incoming_phrase_fit = _structural_snap(
+            b,
+            strong_entry,
+            b_start,
+            max(b_start, b_end - 0.25),
+            60.0 / b_bpm if b_bpm > 0.0 else beat,
+        )
+        phrase_fit = min(outgoing_phrase_fit, incoming_phrase_fit)
+        phrase_score = (
+            0.18 + 0.24 * phrase_need + 0.10 * b_open_activity +
+            0.18 * phrase_fit + 0.08 * key_fit - 0.40 * long_intro_penalty
+        )
+        if skipped <= 8.0 and phrase_fit >= 0.70 and phrase_score >= 0.34:
             candidates.append(_candidate_plan(
                 "PHRASE_CUT", phrase_score, "server-phrase-handoff",
-                transitionStart=round(max(0.0, a_end - span), 4), transitionEnd=round(a_end, 4),
-                incomingCueTime=round(strong_entry, 4), incomingHandoffTime=round(strong_entry, 4),
+                transitionStart=round(phrase_start, 4), transitionEnd=round(a_end, 4),
+                incomingCueTime=round(phrase_cue, 4), incomingHandoffTime=round(phrase_cue, 4),
                 outgoingPlaybackRate=1.0, incomingPlaybackRate=1.0,
+                transitionBeats=1,
                 handoffFraction=0.50, bassSwap=False, bassSwapFraction=0.70,
-                filterSweep=0.0, gainEnvelope=[],
+                filterSweep=0.0,
+                keyCompatibility=round(key_fit, 4),
+                tempoCompatibility=round(tempo, 4),
+                phraseAlignment=round(phrase_fit, 4),
+                gainEnvelope=[],
             ))
 
-    # 4) Preserve a protected A when overlap is not a good fit. This is not a failure: a DJ-like
-    # clean downbeat handoff is preferable to chewing off the final chorus.
+    # 4) Clean structural handoff. CUT is intentionally conservative: if neither side exposes
+    # a nearby phrase/downbeat, natural playback is better than manufacturing a micro-crossfade.
     if a_end > 0.0:
-        cut_score = 0.28 + (0.38 if protected else 0.10) + 0.16 * b_open_vocal + 0.08 * b_open_activity
-        span = _clamp(60.0 / a_bpm if a_bpm > 0 else 0.55, 0.35, 0.90)
-        candidates.append(_candidate_plan(
-            "CUT", cut_score, "server-protected-handoff" if protected else "server-clean-handoff",
-            transitionStart=round(max(0.0, a_end - span), 4), transitionEnd=round(a_end, 4),
-            incomingCueTime=round(b_start, 4), incomingHandoffTime=round(b_start, 4),
-            outgoingPlaybackRate=1.0, incomingPlaybackRate=1.0,
-            handoffFraction=0.50, bassSwap=False, bassSwapFraction=0.70,
-            filterSweep=0.0, gainEnvelope=[],
-        ))
+        beat = 60.0 / a_bpm if a_bpm > 0.0 else 0.55
+        desired_start = max(0.0, a_end - _clamp(beat, 0.35, 0.90))
+        cut_start, outgoing_cut_fit = _structural_snap(
+            a,
+            desired_start,
+            max(0.0, a_end - 2.5 * beat),
+            max(0.0, a_end - 0.08),
+            beat,
+        )
+        cut_cue, incoming_cut_fit = _structural_snap(
+            b,
+            b_start,
+            b_start,
+            max(b_start, min(b_end - 0.25 if b_end > 0.25 else b_start, b_start + 2.5 * beat)),
+            60.0 / b_bpm if b_bpm > 0.0 else beat,
+        )
+        cut_structure = min(outgoing_cut_fit, incoming_cut_fit)
+        cut_score = (
+            0.20 + (0.16 if protected else 0.06) +
+            0.22 * cut_structure + 0.08 * b_open_vocal + 0.05 * b_open_activity
+        )
+        if cut_structure >= 0.70:
+            candidates.append(_candidate_plan(
+                "CUT", cut_score, "server-protected-handoff" if protected else "server-clean-handoff",
+                transitionStart=round(cut_start, 4), transitionEnd=round(a_end, 4),
+                incomingCueTime=round(cut_cue, 4), incomingHandoffTime=round(cut_cue, 4),
+                outgoingPlaybackRate=1.0, incomingPlaybackRate=1.0,
+                transitionBeats=1,
+                handoffFraction=0.50, bassSwap=False, bassSwapFraction=0.70,
+                filterSweep=0.0,
+                keyCompatibility=round(key_fit, 4),
+                tempoCompatibility=round(tempo, 4),
+                phraseAlignment=round(cut_structure, 4),
+                gainEnvelope=[],
+            ))
 
     # 5) Doing nothing is a first-class Automix decision. Weak beat evidence, harmonic
     # conflict or a vocal collision can make natural playback better than an artificial blend.
     if a_end > 0.0:
         weak_evidence = 1.0 - _clamp(0.55 * conf + 0.45 * tempo, 0.0, 1.0)
-        no_mix_score = 0.30 + 0.25 * weak_evidence + 0.18 * (1.0 - key_fit) + 0.12 * vocal_clash
+        no_mix_score = 0.34 + 0.28 * weak_evidence + 0.18 * (1.0 - key_fit) + 0.12 * vocal_clash
         candidates.append(_candidate_plan(
             "NO_TRANSITION", no_mix_score, "server-no-transition",
             transitionStart=round(a_end, 4), transitionEnd=round(a_end, 4),
