@@ -1454,7 +1454,6 @@ class CrossfadeController(
      */
     private fun isRealMix(): Boolean = smartFadeActive && (
         render.style == TransitionStyle.DJ_BLEND ||
-            render.style == TransitionStyle.INTRO_BED ||
             render.style == TransitionStyle.DJ_FILTER ||
             render.style == TransitionStyle.EQ_SWAP ||
             render.style == TransitionStyle.PHRASE_CUT ||
