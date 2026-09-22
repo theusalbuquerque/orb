@@ -176,6 +176,35 @@ class AutomixPlannerTest(unittest.TestCase):
         self.assertGreaterEqual(confidence, 0.25)
 
 
+    def test_transition_uses_tail_and_head_tempo_before_global_bpm(self) -> None:
+        a = track(bpm=100.0)
+        b = track(bpm=150.0)
+        a["tailBpm"] = 128.0
+        a["tailBeatConfidence"] = 0.80
+        b["headBpm"] = 130.0
+        b["headBeatConfidence"] = 0.85
+
+        outgoing, incoming, compatibility = automix._tempo_pair(a, b)
+
+        self.assertAlmostEqual(outgoing, 128.0, delta=0.01)
+        self.assertAlmostEqual(incoming, 130.0, delta=0.01)
+        self.assertGreater(compatibility, 0.85)
+
+    def test_low_confidence_local_tempo_falls_back_to_global_bpm(self) -> None:
+        a = track(bpm=128.0)
+        b = track(bpm=130.0)
+        a["tailBpm"] = 90.0
+        a["tailBeatConfidence"] = 0.10
+        b["headBpm"] = 180.0
+        b["headBeatConfidence"] = 0.10
+
+        outgoing, incoming, compatibility = automix._tempo_pair(a, b)
+
+        self.assertAlmostEqual(outgoing, 128.0, delta=0.01)
+        self.assertAlmostEqual(incoming, 130.0, delta=0.01)
+        self.assertGreater(compatibility, 0.85)
+
+
     def test_transition_uses_tail_and_head_keys_before_global_keys(self) -> None:
         a = track(key="C major")
         b = track(key="C# major")
