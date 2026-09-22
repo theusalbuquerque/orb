@@ -10,6 +10,7 @@ import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import com.music.orb.data.settings.AppSettings
+import com.music.orb.data.settings.AutomixVersion
 import com.music.orb.data.settings.SmartAnalysis
 import com.music.orb.data.settings.TrackAnalysisState
 import com.music.orb.data.settings.TransitionWindow
@@ -19,6 +20,7 @@ import com.music.orb.playback.smart.TrackAnalysis
 import com.music.orb.playback.smart.TransitionStyle
 import com.music.orb.playback.smart.TransitionTrackInfo
 import com.music.orb.playback.smart.planTransition
+import com.music.orb.playback.smart.v20.planTransition20
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -269,6 +271,8 @@ class CrossfadeController(
         val bassSwapFraction: Double = 0.7,
         val filterSweep: Double = 0.0,
         val vocalOverlap: Double = 0.0,
+        /** Preserve the public Automix 2.0 gain/tempo choreography. */
+        val legacy20: Boolean = false,
     )
 
     private var fadeStartedAt = 0L
@@ -545,6 +549,82 @@ class CrossfadeController(
         val currentTrack = currentItem.toTransitionInfo(duration)
         val nextTrack = nextItem.toTransitionInfo(nextDuration)
         val currentTimeSeconds = player.currentPosition / 1000.0
+        val automixVersion = AppSettings.automixVersion.value
+
+        if (automixVersion == AutomixVersion.V2_0) {
+            // Public/stable Automix 2.0: this is the planner and choreography
+            // from immediately before the 2.5 work began.
+            val legacyFallbackSeconds = configuredFadeMs().takeIf { it > 0L }
+                ?.div(1000.0)
+                ?: DEFAULT_SMART_FALLBACK_SECONDS
+            val plan = planTransition20(
+                analysis = currentAnalysis,
+                nextAnalysis = nextAnalysis,
+                currentTrack = currentTrack,
+                nextTrack = nextTrack,
+                currentTime = currentTimeSeconds,
+                duration = duration / 1000.0,
+                fadeSeconds = legacyFallbackSeconds,
+                mode = CrossfadeMode.SMART,
+            )
+
+            val verdict = "2.0|${plan.reason}|${plan.transitionStyle}|fade=${plan.fadeMs}" +
+                "|cue=${plan.incomingCueTime}|rate=${plan.incomingPlaybackRate}" +
+                "|vocalOverlap=${"%.2f".format(plan.vocalOverlap)}" +
+                "|blocked=${plan.blocked}|policy=${plan.policyReasons.joinToString(",")}"
+            if (verdict != lastPlanVerdict) {
+                lastPlanVerdict = verdict
+                Log.d(
+                    TAG,
+                    "plan ${currentItem.mediaId}->${nextItem.mediaId}: $verdict " +
+                        "bpm=${currentAnalysis.bpm}/${nextAnalysis.bpm} " +
+                        "conf=${currentAnalysis.beatConfidence}/${nextAnalysis.beatConfidence}",
+                )
+            }
+
+            val markable = !plan.blocked &&
+                plan.markerVisible &&
+                duration > 0L &&
+                analysisState.current == TrackAnalysisState.ANALYSED &&
+                analysisState.next in MEASURED_ENOUGH_TO_ENTER_ON
+            AppSettings.smartTransitionWindow.value = if (markable) {
+                TransitionWindow(
+                    start = (plan.transitionStart * 1000.0 / duration).toFloat().coerceIn(0f, 1f),
+                    end = (plan.transitionEnd * 1000.0 / duration).toFloat().coerceIn(0f, 1f),
+                )
+            } else {
+                null
+            }
+
+            if (plan.blocked || plan.fadeMs <= 0L) return
+            val transitionStartMs = (plan.transitionStart * 1000).roundToLong()
+            if (transitionStartMs - player.currentPosition > ARM_LEAD_MS) return
+
+            begin(
+                plan.fadeMs,
+                endMs = (plan.transitionEnd * 1000).roundToLong(),
+                smart = true,
+                cueTimeMs = (plan.incomingCueTime * 1000).roundToLong(),
+                outgoingRate = 1.0,
+                playbackRate = plan.incomingPlaybackRate,
+                renderStyle = Render(
+                    style = plan.transitionStyle,
+                    bassSwap = plan.bassSwap,
+                    bassSwapFraction = plan.bassSwapFraction,
+                    filterSweep = plan.filterSweep,
+                    vocalOverlap = plan.vocalOverlap,
+                    legacy20 = true,
+                ),
+            )
+            return
+        }
+
+        if (!AppSettings.automix25Available.value) {
+            // Entitlement can disappear on sign-out while the service is warm.
+            AppSettings.setAutomixVersion(AutomixVersion.V2_0)
+            AppSettings.smartTransitionWindow.value = null
+            return
+        }
 
         val readyForRemote =
             currentAnalysis.isUsable &&
@@ -1052,9 +1132,16 @@ class CrossfadeController(
         val elapsed = (player.currentPosition - incomingCueTimeMs).coerceAtLeast(0L)
         val progress = (elapsed.toFloat() / span).coerceIn(0f, 1f)
 
-        player.volume = incomingGain(progress)
-        out.volume = outgoingGain(progress)
-        if (smartFadeActive) rideTempoBridge(progress, out, player)
+        if (render.legacy20) {
+            // Automix 2.0 used the classic equal-power lap and kept A at its
+            // native tempo while only B carried the planner's beatmatch rate.
+            player.volume = riseGain(progress)
+            out.volume = fallGain(progress)
+        } else {
+            player.volume = incomingGain(progress)
+            out.volume = outgoingGain(progress)
+            if (smartFadeActive) rideTempoBridge(progress, out, player)
+        }
         // Only from here, never during ARMING: the standby is silent until the
         // handoff, and [filters] describes the split between the track arriving
         // and the track leaving, which only exists once both are audible.
