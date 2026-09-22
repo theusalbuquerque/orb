@@ -119,6 +119,7 @@ object RemoteAutomixClient {
     ) {
         val payload = JSONObject()
             .put("version", API_VERSION)
+            .put("preview", BuildConfig.NEW_AUTOMIX_ENABLED)
             .put("outgoing", analysisJson(outgoing, outgoingTrack))
             .put("incoming", analysisJson(incoming, incomingTrack))
             .toString()
