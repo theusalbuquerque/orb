@@ -531,7 +531,9 @@ class CrossfadeController(
                 TAG,
                 "plan ${currentItem.mediaId}->${nextItem.mediaId}: $verdict " +
                     "bpm=${currentAnalysis.bpm}/${nextAnalysis.bpm} " +
-                    "conf=${currentAnalysis.beatConfidence}/${nextAnalysis.beatConfidence}",
+                    "conf=${currentAnalysis.beatConfidence}/${nextAnalysis.beatConfidence} " +
+                    "key=${currentAnalysis.key}(${"%.2f".format(currentAnalysis.keyConfidence)})/" +
+                    "${nextAnalysis.key}(${"%.2f".format(nextAnalysis.keyConfidence)})",
             )
         }
 
