@@ -1,5 +1,7 @@
 import unittest
 
+import numpy as np
+
 import orb_automix_api as automix
 
 
@@ -53,6 +55,24 @@ def track(
 
 
 class AutomixPlannerTest(unittest.TestCase):
+    def test_long_track_key_analysis_preserves_pitch(self) -> None:
+        duration_seconds = 96
+        samples = int(automix.SAMPLE_RATE * duration_seconds)
+        time = np.arange(samples, dtype=np.float32) / float(automix.SAMPLE_RATE)
+        audio = np.zeros(samples, dtype=np.float32)
+
+        # C major across several octaves. The previous long-track sampler treated
+        # distant samples as adjacent audio and could shift this chroma upward.
+        for frequency in (130.8128, 261.6256, 329.6276, 391.9954, 523.2511):
+            audio += np.sin(2.0 * np.pi * frequency * time).astype(np.float32)
+        audio /= 5.0
+
+        key, confidence = automix._key_from_audio(audio)
+
+        self.assertEqual(key, "C major")
+        self.assertGreaterEqual(confidence, 0.25)
+
+
     def test_harmonic_relationships_are_musical_not_chromatic(self) -> None:
         c_major = track(key="C major")
         a_minor = track(key="A minor")
