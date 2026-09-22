@@ -999,6 +999,19 @@ fun planTransition(
     val nextKey = trustedKey(nextAnalysis)
     val keysKnown = currentKey.isNotBlank() && nextKey.isNotBlank()
     val harmonicFit = !keysKnown || harmonicallyCompatible(currentKey, nextKey)
+
+    // Local planning is a failure-path fallback only. If both tonalities are
+    // trustworthy and conflict, do not turn that failure into a forced
+    // filtered overlap. The remote planner has CUT/PHRASE_CUT; locally, natural
+    // playback is safer than inventing harmony that is not there.
+    if (keysKnown && !harmonicFit) {
+        return blocked(
+            "smart-no-transition:harmonic-conflict",
+            transitionStart = mixAnchor,
+            transitionEnd = mixAnchor,
+        )
+    }
+
     val sameBeatBlend =
         policy.tier == TransitionTier.BEATMATCHED &&
         harmonicFit
