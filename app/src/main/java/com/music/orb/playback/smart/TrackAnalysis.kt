@@ -161,6 +161,6 @@ enum class TransitionTier {
     /** Beat-quantized anchors and EQ handoffs are allowed; time-stretching is not. */
     DJ_ASSISTED,
 
-    /** The evidence supports nothing beyond an equal-power fade at the analyzed anchor. */
-    PLAIN_CROSSFADE,
+    /** The evidence is not strong enough to justify an Automix operation. Play through normally. */
+    NO_TRANSITION,
 }
