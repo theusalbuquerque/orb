@@ -799,7 +799,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
         blend_ok = tempo_bridge_ok and tempo >= 0.62 and conf >= 0.35 and key_fit >= 0.58 and vocal_clash < 0.58
         filter_ok = tempo_bridge_ok and tempo >= 0.35 and conf >= 0.28 and key_fit >= 0.35
 
-        style: str | None = None
+        style = None
         if blend_ok:
             style = "DJ_BLEND"
         elif filter_ok:
