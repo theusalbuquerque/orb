@@ -497,6 +497,19 @@ def _analyze(path: str, track_id: str, declared_duration: float) -> dict[str, An
     outro_start = float(times[tail_start_idx + quiet_tail[0]]) if quiet_tail.size else max(0.0, content_end - min(20.0, duration * 0.12))
 
     key, key_conf = _key_from_audio(audio)
+
+    # Harmonic compatibility for a transition is local: A's ending meets B's opening.
+    # Keep the global key for fallback/catalog display, but measure those two windows separately.
+    key_window_seconds = min(24.0, max(8.0, duration * 0.18))
+    key_window_samples = max(SAMPLE_RATE, int(round(key_window_seconds * SAMPLE_RATE)))
+    head_start_sample = max(0, int(round(audible_start * SAMPLE_RATE)))
+    head_end_sample = min(audio.size, head_start_sample + key_window_samples)
+    tail_end_sample = min(audio.size, max(head_end_sample, int(round(content_end * SAMPLE_RATE))))
+    tail_start_sample = max(0, tail_end_sample - key_window_samples)
+
+    head_key, head_key_conf = _key_from_audio(audio[head_start_sample:head_end_sample])
+    tail_key, tail_key_conf = _key_from_audio(audio[tail_start_sample:tail_end_sample])
+
     mix_in_candidates, mix_out_candidates = _candidate_points(times, energy, vocal, downbeats, duration)
     mix_in = float(mix_in_candidates[0]["time"]) if mix_in_candidates else intro_end
     mix_out = float(mix_out_candidates[0]["time"]) if mix_out_candidates else content_end
@@ -511,6 +524,10 @@ def _analyze(path: str, track_id: str, declared_duration: float) -> dict[str, An
         "firstBeat": round(first_beat, 4),
         "key": key,
         "keyConfidence": round(key_conf, 5),
+        "headKey": head_key,
+        "headKeyConfidence": round(head_key_conf, 5),
+        "tailKey": tail_key,
+        "tailKeyConfidence": round(tail_key_conf, 5),
         "audibleStartTime": round(audible_start, 4),
         "pickupTime": round(first_beat or audible_start, 4),
         "introEndTime": round(intro_end, 4),
@@ -1024,10 +1041,13 @@ _KEY_INDEX = {
 }
 
 
-def _trusted_key(track: dict[str, Any]) -> tuple[int, str] | None:
-    if _clamp(_finite(track.get("keyConfidence")), 0.0, 1.0) < 0.25:
+def _parse_trusted_key(
+    raw_value: Any,
+    confidence_value: Any,
+) -> tuple[int, str] | None:
+    if _clamp(_finite(confidence_value), 0.0, 1.0) < 0.25:
         return None
-    raw = str(track.get("key") or "").strip().replace("♯", "#").replace("♭", "b")
+    raw = str(raw_value or "").strip().replace("♯", "#").replace("♭", "b")
     if not raw:
         return None
     parts = raw.split()
@@ -1039,6 +1059,18 @@ def _trusted_key(track: dict[str, Any]) -> tuple[int, str] | None:
     return index, mode
 
 
+def _trusted_key(track: dict[str, Any]) -> tuple[int, str] | None:
+    return _parse_trusted_key(track.get("key"), track.get("keyConfidence"))
+
+
+def _transition_key(track: dict[str, Any], side: str) -> tuple[int, str] | None:
+    if side == "outgoing":
+        local = _parse_trusted_key(track.get("tailKey"), track.get("tailKeyConfidence"))
+    else:
+        local = _parse_trusted_key(track.get("headKey"), track.get("headKeyConfidence"))
+    return local or _trusted_key(track)
+
+
 def _key_compatibility(a: dict[str, Any], b: dict[str, Any]) -> float:
     """0..1 harmonic compatibility based on musical relationships, not semitone proximity.
 
@@ -1047,8 +1079,8 @@ def _key_compatibility(a: dict[str, Any], b: dict[str, Any]) -> float:
     use: same key, relative major/minor, and fourth/fifth in the same mode.
     Unknown/low-confidence keys stay neutral so they cannot manufacture a harmonic advantage.
     """
-    left = _trusted_key(a)
-    right = _trusted_key(b)
+    left = _transition_key(a, "outgoing")
+    right = _transition_key(b, "incoming")
     if left is None or right is None:
         return 0.55
 
@@ -1386,7 +1418,10 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     a_bpm, b_bpm, tempo = _tempo_pair(a, b)
     conf = min(_clamp(_finite(a.get("beatConfidence")), 0.0, 1.0), _clamp(_finite(b.get("beatConfidence")), 0.0, 1.0))
     key_fit = _key_compatibility(a, b)
-    key_evidence = _trusted_key(a) is not None and _trusted_key(b) is not None
+    key_evidence = (
+        _transition_key(a, "outgoing") is not None
+        and _transition_key(b, "incoming") is not None
+    )
     bridge_out_rate, bridge_in_rate = _tempo_bridge_rates(a_bpm, b_bpm)
     tempo_distance = abs(b_bpm / a_bpm - 1.0) if a_bpm > 0.0 and b_bpm > 0.0 else 1.0
     tempo_bridge_ok = tempo_distance <= 0.08
@@ -1689,6 +1724,8 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     best["incomingImpactTime"] = round(b_impact, 4)
     best["incomingAudibleStartTime"] = round(b_audible_start, 4)
     best["keyCompatibility"] = round(key_fit, 4)
+    best["outgoingTransitionKey"] = str(a.get("tailKey") or a.get("key") or "")
+    best["incomingTransitionKey"] = str(b.get("headKey") or b.get("key") or "")
     best["tempoCompatibility"] = round(tempo, 4)
     best["planner"] = "orb-server-authoritative-v5"
     best["serverAuthoritative"] = True
