@@ -324,6 +324,61 @@ async def _recover_mercado_pago_status(checkout_ref: str) -> dict[str, Any] | No
     }
 
 
+async def _mercado_pago_status_by_plan_id(plan_id: str) -> dict[str, Any] | None:
+    if not MP_ACCESS_TOKEN:
+        return None
+
+    headers = {"Authorization": f"Bearer {MP_ACCESS_TOKEN}"}
+
+    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+        plan_response = await client.get(
+            f"{MP_API}/preapproval_plan/{plan_id}",
+            headers=headers,
+        )
+        if plan_response.status_code >= 400:
+            return None
+
+        plan = plan_response.json() or {}
+        subscriptions_response = await client.get(
+            f"{MP_API}/preapproval/search",
+            headers=headers,
+            params={"preapproval_plan_id": plan_id},
+        )
+
+        subscriptions: list[dict[str, Any]] = []
+        if subscriptions_response.status_code < 400:
+            subscriptions = (subscriptions_response.json() or {}).get("results") or []
+
+    selected: dict[str, Any] | None = None
+    if subscriptions:
+        subscriptions.sort(
+            key=lambda item: str(item.get("date_created") or ""),
+            reverse=True,
+        )
+        selected = subscriptions[0]
+
+    recurring = plan.get("auto_recurring") or {}
+    frequency = int(recurring.get("frequency") or 1)
+    frequency_type = str(recurring.get("frequency_type") or "months").lower()
+    plan_name = "yearly" if frequency_type == "months" and frequency >= 12 else "monthly"
+
+    provider_status = str((selected or {}).get("status") or "pending")
+    status = _normalize_mp_status(provider_status)
+
+    return {
+        "provider": "mercadopago",
+        "providerPlanId": str(plan.get("id") or plan_id),
+        "providerSubscriptionId": str((selected or {}).get("id") or "") or None,
+        "plan": plan_name,
+        "amount": float(recurring.get("transaction_amount") or 0.0),
+        "currency": str(recurring.get("currency_id") or "BRL"),
+        "status": status,
+        "premium": _premium(status),
+        "subscriberCount": int(plan.get("subscribed") or 0),
+        "recoveredFromProvider": True,
+    }
+
+
 @router.get("/providers")
 async def providers():
     return {
@@ -400,6 +455,7 @@ async def create_mercado_pago_checkout(body: CheckoutRequest):
     return {
         "checkoutRef": checkout_ref,
         "provider": "mercadopago",
+        "providerPlanId": plan_id,
         "checkoutUrl": checkout_url,
         "status": "pending",
         "checkoutMode": "subscription_plan",
@@ -483,6 +539,16 @@ async def create_asaas_checkout(body: CheckoutRequest):
         "checkoutUrl": checkout_url,
         "status": "pending",
     }
+
+
+@router.get("/status/mercadopago")
+async def mercado_pago_plan_status(
+    plan_id: str = Query(..., min_length=16, max_length=128),
+):
+    status = await _mercado_pago_status_by_plan_id(plan_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="Mercado Pago plan not found")
+    return status
 
 
 @router.get("/status")
