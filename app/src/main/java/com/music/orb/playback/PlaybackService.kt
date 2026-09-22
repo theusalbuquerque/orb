@@ -450,6 +450,9 @@ class PlaybackService : MediaSessionService() {
         // state lives.
         NerdStats.forgetLastSession()
         QualityUpgrade.forgetLastSession()
+        // Remote Automix plans are pair-specific decisions. A warm service
+        // restart must not inherit a previous playback session's verdicts.
+        com.music.orb.playback.smart.RemoteAutomixClient.clear()
 
         setMediaNotificationProvider(
             DefaultMediaNotificationProvider.Builder(this)
