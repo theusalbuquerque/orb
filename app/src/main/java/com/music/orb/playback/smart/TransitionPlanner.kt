@@ -1009,21 +1009,33 @@ fun planTransition(
     val keysKnown = currentKey.isNotBlank() && nextKey.isNotBlank()
     val harmonicFit = !keysKnown || harmonicallyCompatible(currentKey, nextKey)
 
-    // Local planning is a failure-path fallback only. If both tonalities are
-    // trustworthy and conflict, do not turn that failure into a forced
-    // filtered overlap. The remote planner has CUT/PHRASE_CUT; locally, natural
-    // playback is safer than inventing harmony that is not there.
-    if (keysKnown && !harmonicFit) {
+    // Local planning is a failure-path safety net, not a second musical authority.
+    // It may execute a DJ blend only when both beat evidence and harmonic evidence
+    // are strong enough to justify one. Anything weaker plays through naturally
+    // instead of silently degrading Automix into a filtered crossfade.
+    if (!keysKnown) {
+        return blocked(
+            "smart-no-transition:key-confidence",
+            transitionStart = mixAnchor,
+            transitionEnd = mixAnchor,
+        )
+    }
+    if (!harmonicFit) {
         return blocked(
             "smart-no-transition:harmonic-conflict",
             transitionStart = mixAnchor,
             transitionEnd = mixAnchor,
         )
     }
+    if (policy.tier != TransitionTier.BEATMATCHED) {
+        return blocked(
+            "smart-no-transition:" + (policy.reasons.firstOrNull() ?: "local-evidence"),
+            transitionStart = mixAnchor,
+            transitionEnd = mixAnchor,
+        )
+    }
 
-    val sameBeatBlend =
-        policy.tier == TransitionTier.BEATMATCHED &&
-        harmonicFit
+    val sameBeatBlend = true
     val outgoingArrangementOverlap =
         if (sameBeatBlend && mixOutAnchor.type == "content_end") {
             min(ARRANGEMENT_OVERLAP_BEATS * 60 / currentBpm, MAX_DISCARDED_MUSIC_SECONDS)
@@ -1086,13 +1098,11 @@ fun planTransition(
         pickupSeconds = pickupSeconds,
         transitionBeats = transitionBeats,
         bassSwap = sameBeatBlend || hasBassContent,
-        transitionStyle = if (sameBeatBlend) TransitionStyle.DJ_BLEND else TransitionStyle.DJ_FILTER,
-        // The two styles are alternatives, not a scale: a matched pair hands the
-        // low end over on a beat and otherwise stays open, while an unmatched
-        // pair has no shared grid to hand anything over on and instead pulls the
-        // outgoing track behind a closing low-pass. Left at zero on the blend
-        // branch so the renderer doesn't do both at once.
-        filterSweep = if (sameBeatBlend) 0.0 else FILTER_SWEEP,
+        transitionStyle = TransitionStyle.DJ_BLEND,
+        // The local fallback is intentionally incapable of inventing a filtered
+        // overlap. DJ_FILTER remains a server decision where key/tempo/structure
+        // have been scored together.
+        filterSweep = 0.0,
         vocalOverlap = plannedVocalOverlap(
             analysis = analysis,
             nextAnalysis = nextAnalysis,
@@ -1102,10 +1112,6 @@ fun planTransition(
             incomingPlaybackRate = incomingPlaybackRate,
         ),
         policyReasons = policy.reasons,
-        reason = if (started) {
-            if (sameBeatBlend) "automix-beat-key-bridge" else "automix-filtered-bridge"
-        } else {
-            if (sameBeatBlend) "before-beat-key-bridge" else "before-filtered-bridge"
-        },
+        reason = if (started) "automix-local-beat-key-bridge" else "before-local-beat-key-bridge",
     )
 }
