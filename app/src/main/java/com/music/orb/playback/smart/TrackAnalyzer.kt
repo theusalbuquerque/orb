@@ -997,7 +997,8 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
                     val remote = RemoteAutomixClient.analyze(trackId, durationSeconds, file)
                     if (remote?.isUsable == true) {
                         results[trackId] = remote
-                        provisional.remove(trackId)                        shortDecodes.remove(trackId)
+                        provisional.remove(trackId)
+                        shortDecodes.remove(trackId)
                         store.save(trackId, remote)
                         restoreAttempted.add(trackId)
                         NerdStats.onAutomixAnalysisSource(trackId, NerdStats.AutomixAnalysisSource.REMOTE)
