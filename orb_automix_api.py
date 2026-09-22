@@ -580,7 +580,7 @@ def _analyze(path: str, track_id: str, declared_duration: float) -> dict[str, An
 
 @router.get("/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "version": API_VERSION, "analyzer": "orb-remote-dsp-v5"}
+    return {"ok": True, "version": API_VERSION, "analyzer": "orb-remote-dsp-v6"}
 
 
 @router.get("/analysis/{track_id}")
@@ -1768,7 +1768,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     best["outgoingTransitionBpm"] = round(a_bpm, 4)
     best["incomingTransitionBpm"] = round(b_bpm, 4)
     best["tempoCompatibility"] = round(tempo, 4)
-    best["planner"] = "orb-server-authoritative-v5"
+    best["planner"] = "orb-server-authoritative-v6"
     best["serverAuthoritative"] = True
     return best, candidates[:5]
 
@@ -1784,7 +1784,7 @@ async def plan(request: PlanRequest) -> dict[str, Any]:
     # minimal fallback is selected here on the server; Android may only reject impossible bounds.
     plan_result = dict(plan_result)
     plan_result["serverAuthoritative"] = True
-    plan_result["planner"] = "orb-server-authoritative-v5"
+    plan_result["planner"] = "orb-server-authoritative-v6"
     return {
         "version": API_VERSION,
         "authority": "server",
