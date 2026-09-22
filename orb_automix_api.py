@@ -2623,13 +2623,62 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
         )
         takeover_end = min(a_end, a_release + max(1.8, 4.0 * out_beat))
         if takeover_end > takeover_start + 1.0:
+            takeover_a_bpm, takeover_a_conf = _tempo_near(
+                a,
+                takeover_start + (takeover_end - takeover_start) * 0.5,
+                a_bpm,
+            )
+            takeover_b_bpm, takeover_b_conf = _tempo_near(
+                b,
+                takeover_cue + (takeover_end - takeover_start) * 0.5,
+                b_bpm,
+            )
+            if takeover_a_bpm > 0.0 and takeover_b_bpm > 0.0:
+                while takeover_b_bpm / takeover_a_bpm > 1.5:
+                    takeover_b_bpm /= 2.0
+                while takeover_b_bpm / takeover_a_bpm < 0.67:
+                    takeover_b_bpm *= 2.0
+            takeover_tempo_fit = (
+                _clamp(1.0 - abs(takeover_b_bpm / takeover_a_bpm - 1.0) / 0.14, 0.0, 1.0)
+                if takeover_a_bpm > 0.0 and takeover_b_bpm > 0.0
+                else 0.0
+            )
+            takeover_out_rate, takeover_in_rate = _tempo_bridge_rates(
+                takeover_a_bpm,
+                takeover_b_bpm,
+            )
             takeover_vocal_clash, takeover_energy_fit = _overlap_pair_metrics(
                 a,
                 b,
                 takeover_start,
                 takeover_end,
                 takeover_cue,
-                1.0,
+                takeover_in_rate,
+            )
+            takeover_curve = _transition_curve_metrics(
+                a,
+                b,
+                takeover_start,
+                takeover_end,
+                takeover_cue,
+                takeover_out_rate,
+                takeover_in_rate,
+            )
+            takeover_curve_fit = float(takeover_curve.get("compatibility", 0.5))
+            takeover_curve_evidence = bool(takeover_curve.get("evidence", False))
+            takeover_onset_fit = float(takeover_curve.get("onsetFit", 0.5))
+            takeover_harmonic_fit = float(takeover_curve.get("harmonicFit", 0.5))
+            takeover_spectral_fit = float(takeover_curve.get("spectralFit", 0.5))
+            takeover_low_collision = float(takeover_curve.get("lowCollision", 0.0))
+            takeover_phase_fit, takeover_phase_error_ms = _beat_phase_metrics(
+                a,
+                b,
+                takeover_start,
+                takeover_cue,
+                takeover_a_bpm,
+                takeover_b_bpm,
+                takeover_out_rate,
+                takeover_in_rate,
             )
             takeover_structure = min(outgoing_takeover_fit, incoming_takeover_fit)
             known_key_conflict = key_evidence and key_fit < 0.18
@@ -2637,6 +2686,9 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                 not known_key_conflict
                 and takeover_structure >= 0.52
                 and takeover_vocal_clash < 0.72
+                and (min(takeover_a_conf, takeover_b_conf) < 0.18 or takeover_tempo_fit >= 0.35)
+                and (not takeover_curve_evidence or takeover_harmonic_fit >= 0.18)
+                and (not takeover_curve_evidence or takeover_onset_fit >= 0.22 or takeover_phase_fit >= 0.48)
             ):
                 handoff_fraction = _clamp(
                     (a_release - takeover_start) / max(takeover_end - takeover_start, 1e-6),
@@ -2644,13 +2696,15 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                     0.82,
                 )
                 takeover_score = (
-                    0.30
-                    + 0.20 * takeover_structure
-                    + 0.16 * (1.0 - takeover_vocal_clash)
-                    + 0.12 * takeover_energy_fit
-                    + 0.10 * key_fit
-                    + 0.06 * tempo
+                    0.24
+                    + 0.16 * takeover_structure
+                    + 0.13 * (1.0 - takeover_vocal_clash)
+                    + 0.09 * takeover_energy_fit
+                    + 0.08 * key_fit
+                    + 0.08 * takeover_tempo_fit
+                    + 0.06 * takeover_phase_fit
                     + 0.06 * _clamp(release_tail / 12.0, 0.0, 1.0)
+                    + (0.10 * takeover_curve_fit if takeover_curve_evidence else 0.0)
                 )
                 before = max(0.05, handoff_fraction - 0.16)
                 after = min(0.96, handoff_fraction + 0.10)
@@ -2662,14 +2716,20 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                     transitionEnd=round(takeover_end, 4),
                     incomingCueTime=round(takeover_cue, 4),
                     incomingHandoffTime=round(takeover_cue, 4),
-                    outgoingPlaybackRate=1.0,
-                    incomingPlaybackRate=1.0,
+                    outgoingPlaybackRate=round(takeover_out_rate, 5),
+                    incomingPlaybackRate=round(takeover_in_rate, 5),
                     transitionBeats=max(1, int(round((takeover_end - takeover_start) / out_beat))),
                     requestedTransitionBeats=4,
                     handoffFraction=round(handoff_fraction, 4),
                     bassSwap=bool(key_fit >= 0.58 and _low_curve(a) and _low_curve(b)),
                     bassSwapFraction=round(handoff_fraction, 4),
-                    filterSweep=0.45 if key_fit < 0.58 else 0.0,
+                    filterSweep=round(_clamp(
+                        (0.34 if key_fit < 0.58 else 0.0)
+                        + 0.22 * (1.0 - takeover_spectral_fit)
+                        + 0.16 * takeover_low_collision,
+                        0.0,
+                        0.86,
+                    ), 4),
                     keyCompatibility=round(key_fit, 4),
                     tempoCompatibility=round(tempo, 4),
                     phraseAlignment=round(takeover_structure, 4),
@@ -2688,6 +2748,15 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                     spanCompatibility=1.0,
                     outgoingAnchor="release",
                     incomingAnchor="opening-phrase",
+                    curveCompatibility=round(takeover_curve_fit, 4),
+                    onsetCurveFit=round(takeover_onset_fit, 4),
+                    harmonicCurveFit=round(takeover_harmonic_fit, 4),
+                    spectralCurveFit=round(takeover_spectral_fit, 4),
+                    beatPhaseFit=round(takeover_phase_fit, 4),
+                    beatPhaseErrorMs=round(takeover_phase_error_ms, 2),
+                    localTempoCompatibility=round(takeover_tempo_fit, 4),
+                    outgoingLocalBpm=round(takeover_a_bpm, 4),
+                    incomingLocalBpm=round(takeover_b_bpm, 4),
                     gainEnvelope=[
                         {"progress": 0.0, "incomingGain": 0.0, "outgoingGain": 1.0},
                         {
