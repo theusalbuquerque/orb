@@ -24,6 +24,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.pow
 import kotlin.math.roundToLong
@@ -237,6 +238,12 @@ class CrossfadeController(
      */
     private var outgoingPlaybackRate: Double = 1.0
     private var incomingPlaybackRate: Double = 1.0
+
+    /** Media-time ramp used to bring A to the meeting tempo before B becomes audible. */
+    private var tempoPreRollStartPositionMs = C.TIME_UNSET
+    private var tempoPreRollEndPositionMs = C.TIME_UNSET
+    private var tempoPreRollProgress = 1f
+    private var tempoPreRollTooLate = false
 
     /**
      * The style-specific half of the plan in flight — everything [rideFilters]
@@ -811,6 +818,10 @@ class CrossfadeController(
         incomingCueTimeMs = cueTimeMs.coerceAtLeast(0L)
         outgoingPlaybackRate = outgoingRate
         incomingPlaybackRate = playbackRate
+        tempoPreRollStartPositionMs = C.TIME_UNSET
+        tempoPreRollEndPositionMs = C.TIME_UNSET
+        tempoPreRollProgress = if (abs(outgoingRate - 1.0) <= TEMPO_RATE_EPSILON) 1f else 0f
+        tempoPreRollTooLate = false
         render = renderStyle
         armDeadline = SystemClock.elapsedRealtime() + ARM_TIMEOUT_MS
         handedOff = false
@@ -878,11 +889,23 @@ class CrossfadeController(
         if (ready && smartFadeActive) rideTempoPreRoll(out)
 
         // Wait for the track to actually reach the fade point. [fadeEndMs] is
-        // the track's own duration in standard mode, or a Automix plan's
+        // the track's own duration in standard mode, or an Automix plan's
         // analyzed mix-out anchor when it ends before the file does.
         val atFadePoint = fadeEndMs <= 0L || fadeEndMs - out.currentPosition <= fadeMs
         if (!atFadePoint) return
-        if (ready) startFade()
+
+        val tempoReady = !smartFadeActive ||
+            abs(outgoingPlaybackRate - 1.0) <= TEMPO_RATE_EPSILON ||
+            tempoPreRollProgress >= TEMPO_PREROLL_REQUIRED_PROGRESS
+        if (ready && tempoReady) {
+            startFade()
+        } else if (ready && tempoPreRollTooLate) {
+            Log.d(
+                TAG,
+                "drop smart transition: incoming became ready too late for smooth tempo pre-roll",
+            )
+            bail()
+        }
     }
 
     /**
@@ -901,10 +924,10 @@ class CrossfadeController(
         // with a copy of it; those tracks would otherwise be lost at the swap.
         reconcileQueue(out, into)
 
-        // The pre-roll normally arrives here already at the meeting tempo.
-        // If B became READY at the last possible tick, enforce the same grid
-        // before making B audible rather than starting the overlap off-phase.
-        if (smartFadeActive) {
+        // The pre-roll has already converged A to the meeting tempo. This tiny
+        // final assignment removes residual interpolation error; late readiness
+        // is rejected in [driveArming] rather than turned into a speed jump here.
+        if (smartFadeActive && abs(outgoingPlaybackRate - 1.0) > TEMPO_RATE_EPSILON) {
             out.setPlaybackSpeed(
                 (AppSettings.playbackSpeed.value * outgoingPlaybackRate).toFloat(),
             )
@@ -1117,6 +1140,10 @@ class CrossfadeController(
         incomingCueTimeMs = 0L
         outgoingPlaybackRate = 1.0
         incomingPlaybackRate = 1.0
+        tempoPreRollStartPositionMs = C.TIME_UNSET
+        tempoPreRollEndPositionMs = C.TIME_UNSET
+        tempoPreRollProgress = 1f
+        tempoPreRollTooLate = false
         phase = Phase.IDLE
     }
 
@@ -1406,16 +1433,34 @@ class CrossfadeController(
      * if arming fails, [finish] restores A's native listener speed.
      */
     private fun rideTempoPreRoll(out: ExoPlayer) {
-        if (outgoingPlaybackRate == 1.0 || fadeEndMs <= 0L || fadeMs <= 0L) return
+        if (abs(outgoingPlaybackRate - 1.0) <= TEMPO_RATE_EPSILON) {
+            tempoPreRollProgress = 1f
+            return
+        }
+        if (fadeEndMs <= 0L || fadeMs <= 0L || tempoPreRollTooLate) return
 
         val transitionStartMs = (fadeEndMs - fadeMs).coerceAtLeast(0L)
         val remainingMs = transitionStartMs - out.currentPosition
-        val preRollMs = (fadeMs / 4L)
+        val desiredPreRollMs = (fadeMs / 4L)
             .coerceIn(TEMPO_PREROLL_MIN_MS, TEMPO_PREROLL_MAX_MS)
-        if (remainingMs > preRollMs) return
 
-        val progress = (1f - remainingMs.coerceAtLeast(0L).toFloat() / preRollMs)
-            .coerceIn(0f, 1f)
+        if (tempoPreRollStartPositionMs == C.TIME_UNSET) {
+            if (remainingMs > desiredPreRollMs) return
+            if (remainingMs < TEMPO_PREROLL_MIN_SMOOTH_MS) {
+                tempoPreRollTooLate = true
+                return
+            }
+            tempoPreRollStartPositionMs = out.currentPosition
+            tempoPreRollEndPositionMs = transitionStartMs
+            tempoPreRollProgress = 0f
+        }
+
+        val start = tempoPreRollStartPositionMs
+        val end = tempoPreRollEndPositionMs
+        val span = (end - start).coerceAtLeast(1L)
+        val progress = ((out.currentPosition - start).toFloat() / span).coerceIn(0f, 1f)
+        tempoPreRollProgress = progress
+
         val amount = smoothStep(progress).toDouble()
         val rate = 1.0 + (outgoingPlaybackRate - 1.0) * amount
         out.setPlaybackSpeed((AppSettings.playbackSpeed.value * rate).toFloat())
@@ -1536,6 +1581,9 @@ class CrossfadeController(
         /** Tempo adaptation of A happens silently before B enters, never while B is buffering. */
         const val TEMPO_PREROLL_MIN_MS = 1_200L
         const val TEMPO_PREROLL_MAX_MS = 3_000L
+        const val TEMPO_PREROLL_MIN_SMOOTH_MS = 850L
+        const val TEMPO_PREROLL_REQUIRED_PROGRESS = 0.92f
+        const val TEMPO_RATE_EPSILON = 0.001
 
         /** Never release B back to native tempo before this point of the overlap. */
         const val TEMPO_RELEASE_MIN = 0.66f
