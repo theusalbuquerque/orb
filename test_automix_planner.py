@@ -55,6 +55,50 @@ def track(
 
 
 class AutomixPlannerTest(unittest.TestCase):
+    def test_downbeat_phase_follows_recurring_accents(self) -> None:
+        hop = 0.10
+        beats = [i * 0.50 for i in range(24)]
+        onset = np.zeros(140, dtype=np.float64)
+
+        # Beat index 2 of each four-beat group carries the recurring bar accent.
+        for index, beat in enumerate(beats):
+            frame = int(round(beat / hop))
+            onset[frame] = 1.0 if index % 4 == 2 else 0.20
+
+        downbeats = automix._downbeats_from_beats(beats, onset, hop)
+
+        self.assertGreaterEqual(len(downbeats), 4)
+        self.assertAlmostEqual(downbeats[0], 1.0, delta=0.11)
+        self.assertAlmostEqual(downbeats[1] - downbeats[0], 2.0, delta=0.11)
+
+    def test_phrase_phase_follows_arrangement_changes(self) -> None:
+        downbeats = [i * 2.0 for i in range(16)]
+        times = np.arange(0.0, 32.0, 0.5, dtype=np.float64)
+
+        # Four-bar sections change at downbeat indices 1, 5, 9 and 13.
+        energy = np.zeros(times.size, dtype=np.float64)
+        low = np.zeros(times.size, dtype=np.float64)
+        vocal = np.zeros(times.size, dtype=np.float64)
+        for i, t in enumerate(times):
+            section = int(max(0.0, t - 2.0) // 8.0)
+            high = section % 2 == 1
+            energy[i] = 0.80 if high else 0.20
+            low[i] = 0.72 if high else 0.18
+            vocal[i] = 0.62 if high else 0.15
+
+        phrases = automix._phrase_boundaries_from_structure(
+            downbeats,
+            times,
+            energy,
+            low,
+            vocal,
+        )
+
+        self.assertGreaterEqual(len(phrases), 3)
+        self.assertAlmostEqual(phrases[0], 2.0, delta=0.1)
+        self.assertAlmostEqual(phrases[1] - phrases[0], 8.0, delta=0.1)
+
+
     def test_long_track_key_analysis_preserves_pitch(self) -> None:
         duration_seconds = 96
         samples = int(automix.SAMPLE_RATE * duration_seconds)
