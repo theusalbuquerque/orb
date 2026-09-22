@@ -192,6 +192,12 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
     val filter by viewModel.filter.collectAsStateWithLifecycle()
     val signedIn by viewModel.signedIn.collectAsStateWithLifecycle()
     val account by viewModel.account.collectAsStateWithLifecycle()
+
+    // Automix 2.5 entitlement follows the signed-in account. Everyone else
+    // stays on Automix 2.0 even if 2.5 had previously been selected locally.
+    LaunchedEffect(account?.email) {
+        AppSettings.setCurrentAccountEmail(account?.email)
+    }
     val lyrics by viewModel.lyrics.collectAsStateWithLifecycle()
     val lyricsSource by viewModel.lyricsSource.collectAsStateWithLifecycle()
     val lyricsChecked by viewModel.lyricsChecked.collectAsStateWithLifecycle()
