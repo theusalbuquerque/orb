@@ -892,6 +892,190 @@ def _best_incoming_cue(
     return cue, structure_fit, vocal_clash, energy_fit
 
 
+def _timing_candidates(
+    track: dict[str, Any],
+    desired: float,
+    lo: float,
+    hi: float,
+    beat_seconds: float,
+    mix_key: str,
+    limit: int = 10,
+) -> list[tuple[float, float, str]]:
+    """Rank nearby musical anchors without reducing a track to one scalar cue."""
+    if hi <= lo:
+        return [(_clamp(desired, lo, max(lo, hi)), 0.45, "raw")]
+
+    radius = max(1.0, 4.0 * beat_seconds)
+    search_lo = max(lo, desired - radius)
+    search_hi = min(hi, desired + radius)
+    items: list[tuple[float, float, str]] = []
+
+    raw_mix = track.get(mix_key)
+    if isinstance(raw_mix, list):
+        for item in raw_mix[:12]:
+            if not isinstance(item, dict):
+                continue
+            time_s = _finite(item.get("time"), -1.0)
+            if not (lo <= time_s <= hi):
+                continue
+            analyzer_score = _clamp(_finite(item.get("score"), 0.5), 0.0, 1.0)
+            kind = str(item.get("type") or "mix")
+            items.append((time_s, 0.68 + 0.30 * analyzer_score, kind))
+
+    for name, quality, kind in (
+        ("phraseBoundaries", 1.0, "phrase"),
+        ("downbeats", 0.80, "downbeat"),
+    ):
+        raw = track.get(name)
+        if not isinstance(raw, list):
+            continue
+        for value in raw:
+            time_s = _finite(value, -1.0)
+            if search_lo <= time_s <= search_hi:
+                items.append((time_s, quality, kind))
+
+    snapped, snap_quality = _structural_snap(track, desired, lo, hi, beat_seconds)
+    items.append((snapped, snap_quality, "snap"))
+    items.append((_clamp(desired, lo, hi), 0.45, "raw"))
+
+    # Keep the strongest representative for anchors that land on effectively the same beat.
+    dedupe_radius = max(0.06, beat_seconds * 0.16)
+    unique: list[tuple[float, float, str]] = []
+    for time_s, quality, kind in sorted(items, key=lambda x: x[0]):
+        if unique and abs(unique[-1][0] - time_s) <= dedupe_radius:
+            if quality > unique[-1][1]:
+                unique[-1] = (time_s, quality, kind)
+            continue
+        unique.append((time_s, quality, kind))
+
+    unique.sort(
+        key=lambda x: (
+            x[1],
+            -abs(x[0] - desired) / max(beat_seconds, 0.25),
+        ),
+        reverse=True,
+    )
+    return unique[:limit]
+
+
+def _best_structural_pair(
+    a: dict[str, Any],
+    b: dict[str, Any],
+    a_release: float,
+    a_end: float,
+    b_start: float,
+    b_end: float,
+    desired_cue: float,
+    target_beats: int,
+    outgoing_bpm: float,
+    incoming_bpm: float,
+    incoming_rate: float,
+) -> dict[str, float | str] | None:
+    """Search A↔B phrase/downbeat pairs and score the audio that would actually overlap."""
+    if a_end <= 0.0 or b_end <= b_start:
+        return None
+    if outgoing_bpm <= 0.0 or incoming_bpm <= 0.0:
+        return None
+
+    out_beat = 60.0 / outgoing_bpm
+    in_beat = 60.0 / incoming_bpm
+    target_span = target_beats * out_beat
+    desired_start = max(0.0, max(a_release, a_end - target_span))
+
+    # Do not move A far away from the intended phrase merely to manufacture compatibility.
+    a_lo = max(0.0, a_release, desired_start - 4.0 * out_beat)
+    a_hi = max(a_lo, min(a_end - 0.20, desired_start + 4.0 * out_beat))
+    outgoing = _timing_candidates(
+        a,
+        desired_start,
+        a_lo,
+        a_hi,
+        out_beat,
+        "mixOutCandidates",
+        limit=8,
+    )
+
+    # B may offer several valid entry phrases, but skipping deeply into the track is expensive.
+    b_hi = max(
+        b_start,
+        min(
+            b_end - 0.25,
+            max(desired_cue + 8.0 * in_beat, b_start + 32.0),
+        ),
+    )
+    incoming = _timing_candidates(
+        b,
+        desired_cue,
+        b_start,
+        b_hi,
+        in_beat,
+        "mixInCandidates",
+        limit=10,
+    )
+
+    best: dict[str, float | str] | None = None
+    best_score = float("-inf")
+
+    for a_start, a_structure, a_kind in outgoing:
+        actual_span = a_end - a_start
+        if actual_span <= 0.20:
+            continue
+        actual_beats = actual_span / out_beat
+        span_fit = _clamp(
+            1.0 - abs(actual_beats - target_beats) / max(4.0, float(target_beats)),
+            0.0,
+            1.0,
+        )
+
+        for cue, b_structure, b_kind in incoming:
+            vocal_clash, energy_fit = _overlap_pair_metrics(
+                a,
+                b,
+                a_start,
+                a_end,
+                cue,
+                incoming_rate,
+            )
+            skipped = max(0.0, cue - b_start)
+            skip_penalty = _clamp((skipped - 8.0) / 24.0, 0.0, 1.0)
+            cue_proximity = 1.0 - _clamp(
+                abs(cue - desired_cue) / max(8.0, 8.0 * in_beat),
+                0.0,
+                1.0,
+            )
+            phrase_pair_bonus = 1.0 if a_kind == "phrase" and b_kind == "phrase" else 0.0
+            pair_score = (
+                0.18 * a_structure
+                + 0.18 * b_structure
+                + 0.24 * (1.0 - vocal_clash)
+                + 0.14 * energy_fit
+                + 0.12 * span_fit
+                + 0.07 * cue_proximity
+                + 0.07 * phrase_pair_bonus
+                - 0.16 * skip_penalty
+            )
+            if pair_score <= best_score:
+                continue
+
+            best_score = pair_score
+            best = {
+                "start": a_start,
+                "cue": cue,
+                "outgoingStructure": a_structure,
+                "incomingStructure": b_structure,
+                "phraseAlignment": min(a_structure, b_structure),
+                "vocalClash": vocal_clash,
+                "energyFit": energy_fit,
+                "spanFit": span_fit,
+                "pairScore": _clamp(pair_score, 0.0, 1.0),
+                "actualBeats": max(1.0, actual_beats),
+                "outgoingAnchor": a_kind,
+                "incomingAnchor": b_kind,
+            }
+
+    return best
+
+
 def _candidate_plan(style: str, score: float, reason: str, **kwargs: Any) -> dict[str, Any]:
     plan: dict[str, Any] = {
         "style": style,
@@ -929,81 +1113,89 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     vocal_clash = min(a_tail_vocal, b_open_vocal)
     candidates: list[dict[str, Any]] = []
 
-    # 1) Beat/key bridge. A filter is not permission to mix incompatible songs:
-    # both DJ families need a trustworthy rhythmic relationship and real key evidence.
-    # The final decision is made on the exact A/B windows that will overlap, not on B's
-    # first few seconds when the selected cue may be later in its arrangement.
+    # 1) Beat/key bridge. The planner now searches *pairs* of structural anchors:
+    # A's late phrase/downbeat and B's entry phrase/downbeat are scored together.
     if a_end > 0.0 and 40.0 <= a_bpm <= 220.0 and 40.0 <= b_bpm <= 220.0:
         blend_ok = key_evidence and tempo_bridge_ok and tempo >= 0.62 and conf >= 0.35 and key_fit >= 0.58
         filter_ok = key_evidence and tempo_bridge_ok and tempo >= 0.35 and conf >= 0.28 and key_fit >= 0.35
 
         requested_style = "DJ_BLEND" if blend_ok else ("DJ_FILTER" if filter_ok else None)
         if requested_style is not None:
-            beat = 60.0 / a_bpm
-            beats = 16.0 if requested_style == "DJ_BLEND" and key_fit >= 0.72 else 8.0
-            span = _clamp(beats * beat, 4.0, 12.0)
-            desired_start = max(0.0, max(a_release, a_end - span))
-            start, outgoing_phrase_fit = _structural_snap(
-                a,
-                desired_start,
-                max(0.0, a_release),
-                max(max(0.0, a_release), a_end - 0.25),
-                beat,
-            )
+            target_beats = 16 if requested_style == "DJ_BLEND" and key_fit >= 0.72 else 8
             desired_cue = max(b_start, _finite(b.get("mixInTime"), b_start))
-            incoming_beat = 60.0 / b_bpm if b_bpm > 0.0 else beat
-            cue, incoming_phrase_fit, overlap_vocal_clash, energy_fit = _best_incoming_cue(
+            pair = _best_structural_pair(
                 a,
                 b,
-                start,
+                a_release,
                 a_end,
-                desired_cue,
                 b_start,
                 b_end,
+                desired_cue,
+                target_beats,
+                a_bpm,
+                b_bpm,
                 bridge_in_rate,
-                incoming_beat,
             )
-            phrase_fit = min(outgoing_phrase_fit, incoming_phrase_fit)
 
-            style = requested_style
-            # A flat blend with actual vocal-on-vocal collision is not rescued by its
-            # quiet opening statistics. A filtered bridge may still work for a moderate
-            # clash, but a very vocal overlap is rejected entirely.
-            if style == "DJ_BLEND" and overlap_vocal_clash >= 0.58:
-                style = "DJ_FILTER" if filter_ok and overlap_vocal_clash < 0.74 else None
-            elif style == "DJ_FILTER" and overlap_vocal_clash >= 0.74:
-                style = None
+            if pair is not None:
+                start = float(pair["start"])
+                cue = float(pair["cue"])
+                phrase_fit = float(pair["phraseAlignment"])
+                overlap_vocal_clash = float(pair["vocalClash"])
+                energy_fit = float(pair["energyFit"])
+                span_fit = float(pair["spanFit"])
+                pair_fit = float(pair["pairScore"])
+                actual_beats = int(round(float(pair["actualBeats"])))
 
-            if style is not None:
-                score = (
-                    0.18 + 0.22 * tempo + 0.13 * conf + 0.19 * key_fit +
-                    0.12 * (1.0 - overlap_vocal_clash) + 0.09 * phrase_fit +
-                    0.07 * energy_fit
-                )
-                if protected and style == "DJ_BLEND":
-                    score -= 0.16
-                candidates.append(_candidate_plan(
-                    style, score, "server-beat-key-bridge" if style == "DJ_BLEND" else "server-filtered-bridge",
-                    transitionStart=round(start, 4), transitionEnd=round(a_end, 4),
-                    incomingCueTime=round(cue, 4),
-                    incomingHandoffTime=round(cue, 4),
-                    outgoingPlaybackRate=round(bridge_out_rate, 5),
-                    incomingPlaybackRate=round(bridge_in_rate, 5),
-                    transitionBeats=int(beats),
-                    handoffFraction=0.66 if style == "DJ_BLEND" else 0.52,
-                    bassSwap=bool(_low_curve(a) and _low_curve(b)),
-                    bassSwapFraction=0.66,
-                    filterSweep=0.0 if style == "DJ_BLEND" else 0.72,
-                    keyCompatibility=round(key_fit, 4),
-                    tempoCompatibility=round(tempo, 4),
-                    phraseAlignment=round(phrase_fit, 4),
-                    overlapVocalClash=round(overlap_vocal_clash, 4),
-                    energyCompatibility=round(energy_fit, 4),
-                    gainEnvelope=[],
-                ))
+                style = requested_style
+                # A flat blend with real vocal-on-vocal collision is demoted to a filtered
+                # bridge only when that bridge is independently allowed. Heavy collision
+                # rejects the overlap entirely.
+                if style == "DJ_BLEND" and overlap_vocal_clash >= 0.58:
+                    style = "DJ_FILTER" if filter_ok and overlap_vocal_clash < 0.74 else None
+                elif style == "DJ_FILTER" and overlap_vocal_clash >= 0.74:
+                    style = None
 
-    # 2) EQ swap is a separate candidate, not a synonym for blend. It earns a place only when
-    # both low-band curves exist and the shared grid is trustworthy enough to exchange the bass.
+                minimum_beats = 8 if style == "DJ_BLEND" else 4
+                if style is not None and actual_beats >= minimum_beats and span_fit >= 0.45:
+                    score = (
+                        0.15 + 0.20 * tempo + 0.12 * conf + 0.18 * key_fit
+                        + 0.11 * (1.0 - overlap_vocal_clash)
+                        + 0.08 * phrase_fit
+                        + 0.06 * energy_fit
+                        + 0.10 * pair_fit
+                    )
+                    if protected and style == "DJ_BLEND":
+                        score -= 0.16
+                    candidates.append(_candidate_plan(
+                        style,
+                        score,
+                        "server-paired-beat-key-bridge" if style == "DJ_BLEND" else "server-paired-filtered-bridge",
+                        transitionStart=round(start, 4),
+                        transitionEnd=round(a_end, 4),
+                        incomingCueTime=round(cue, 4),
+                        incomingHandoffTime=round(cue, 4),
+                        outgoingPlaybackRate=round(bridge_out_rate, 5),
+                        incomingPlaybackRate=round(bridge_in_rate, 5),
+                        transitionBeats=actual_beats,
+                        requestedTransitionBeats=target_beats,
+                        handoffFraction=0.66 if style == "DJ_BLEND" else 0.52,
+                        bassSwap=bool(_low_curve(a) and _low_curve(b)),
+                        bassSwapFraction=0.66,
+                        filterSweep=0.0 if style == "DJ_BLEND" else 0.72,
+                        keyCompatibility=round(key_fit, 4),
+                        tempoCompatibility=round(tempo, 4),
+                        phraseAlignment=round(phrase_fit, 4),
+                        overlapVocalClash=round(overlap_vocal_clash, 4),
+                        energyCompatibility=round(energy_fit, 4),
+                        pairCompatibility=round(pair_fit, 4),
+                        spanCompatibility=round(span_fit, 4),
+                        outgoingAnchor=str(pair["outgoingAnchor"]),
+                        incomingAnchor=str(pair["incomingAnchor"]),
+                        gainEnvelope=[],
+                    ))
+
+    # 2) EQ swap uses the same paired phrase search, but requires low-band evidence on both tracks.
     if (
         a_end > 0.0
         and key_evidence
@@ -1014,59 +1206,66 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
         and _low_curve(a)
         and _low_curve(b)
     ):
-        beat = 60.0 / a_bpm if a_bpm > 0 else 0.5
-        span = _clamp(16.0 * beat, 5.0, 14.0)
-        desired_start = max(0.0, max(a_release, a_end - span))
-        start, outgoing_phrase_fit = _structural_snap(
-            a,
-            desired_start,
-            max(0.0, a_release),
-            max(max(0.0, a_release), a_end - 0.25),
-            beat,
-        )
         desired_cue = max(b_start, _finite(b.get("mixInTime"), b_start))
-        incoming_beat = 60.0 / b_bpm if b_bpm > 0.0 else beat
-        cue, incoming_phrase_fit, overlap_vocal_clash, energy_fit = _best_incoming_cue(
+        pair = _best_structural_pair(
             a,
             b,
-            start,
+            a_release,
             a_end,
-            desired_cue,
             b_start,
             b_end,
+            desired_cue,
+            16,
+            a_bpm,
+            b_bpm,
             bridge_in_rate,
-            incoming_beat,
         )
-        phrase_fit = min(outgoing_phrase_fit, incoming_phrase_fit)
-        eq_score = (
-            0.20 + 0.20 * tempo + 0.12 * conf + 0.18 * key_fit
-            + 0.12 * (1.0 - overlap_vocal_clash)
-            + 0.09 * phrase_fit
-            + 0.07 * energy_fit
-        )
-        if protected:
-            eq_score -= 0.16
+        if pair is not None:
+            start = float(pair["start"])
+            cue = float(pair["cue"])
+            phrase_fit = float(pair["phraseAlignment"])
+            overlap_vocal_clash = float(pair["vocalClash"])
+            energy_fit = float(pair["energyFit"])
+            span_fit = float(pair["spanFit"])
+            pair_fit = float(pair["pairScore"])
+            actual_beats = int(round(float(pair["actualBeats"])))
 
-        if overlap_vocal_clash < 0.62:
-            candidates.append(_candidate_plan(
-                "EQ_SWAP",
-                eq_score,
-                "server-eq-swap",
-                transitionStart=round(start, 4),
-                transitionEnd=round(a_end, 4),
-                incomingCueTime=round(cue, 4),
-                incomingHandoffTime=round(cue, 4),
-                outgoingPlaybackRate=round(bridge_out_rate, 5),
-                incomingPlaybackRate=round(bridge_in_rate, 5),
-                handoffFraction=0.56,
-                bassSwap=True,
-                bassSwapFraction=0.56,
-                filterSweep=0.0,
-                phraseAlignment=round(phrase_fit, 4),
-                overlapVocalClash=round(overlap_vocal_clash, 4),
-                energyCompatibility=round(energy_fit, 4),
-                gainEnvelope=[],
-            ))
+            eq_score = (
+                0.17 + 0.19 * tempo + 0.11 * conf + 0.17 * key_fit
+                + 0.11 * (1.0 - overlap_vocal_clash)
+                + 0.08 * phrase_fit
+                + 0.06 * energy_fit
+                + 0.11 * pair_fit
+            )
+            if protected:
+                eq_score -= 0.16
+
+            if overlap_vocal_clash < 0.62 and actual_beats >= 8 and span_fit >= 0.45:
+                candidates.append(_candidate_plan(
+                    "EQ_SWAP",
+                    eq_score,
+                    "server-paired-eq-swap",
+                    transitionStart=round(start, 4),
+                    transitionEnd=round(a_end, 4),
+                    incomingCueTime=round(cue, 4),
+                    incomingHandoffTime=round(cue, 4),
+                    outgoingPlaybackRate=round(bridge_out_rate, 5),
+                    incomingPlaybackRate=round(bridge_in_rate, 5),
+                    transitionBeats=actual_beats,
+                    requestedTransitionBeats=16,
+                    handoffFraction=0.56,
+                    bassSwap=True,
+                    bassSwapFraction=0.56,
+                    filterSweep=0.0,
+                    phraseAlignment=round(phrase_fit, 4),
+                    overlapVocalClash=round(overlap_vocal_clash, 4),
+                    energyCompatibility=round(energy_fit, 4),
+                    pairCompatibility=round(pair_fit, 4),
+                    spanCompatibility=round(span_fit, 4),
+                    outgoingAnchor=str(pair["outgoingAnchor"]),
+                    incomingAnchor=str(pair["incomingAnchor"]),
+                    gainEnvelope=[],
+                ))
 
     # 3) Phrase cut: a deliberate phrase/downbeat transfer, not a tiny crossfade.
     # Both sides must expose a usable structural point close to the intended handoff.
