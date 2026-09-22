@@ -997,7 +997,8 @@ class PlaybackService : MediaSessionService() {
             // track — including the continuation fetch when playback runs off
             // the end of the cached bytes. Deciding afresh each time is how
             // the middle of an MP4 ended up appended to a WebM. See
-            // [StreamChoice].            StreamChoice.of(videoId)?.let { serving ->
+            // [StreamChoice].
+            StreamChoice.of(videoId)?.let { serving ->
                 return@Factory dataSpec.buildUpon()
                     .setUri(Uri.parse(serving.url))
                     .setHttpRequestHeaders(serving.headers)
