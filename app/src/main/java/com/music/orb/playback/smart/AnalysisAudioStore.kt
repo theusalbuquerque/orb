@@ -162,6 +162,7 @@ class AnalysisAudioStore(private val context: Context) {
                         }
                     }
                     val body = response.body
+                        ?: error("analysis range missing response body")
                     raf.seek(position)
                     val input = body.byteStream()
                     val buffer = ByteArray(BUFFER_BYTES)

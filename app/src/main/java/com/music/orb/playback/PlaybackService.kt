@@ -3931,6 +3931,7 @@ class PlaybackService : MediaSessionService() {
 
     private fun requestCurrentAutomixPairAnalysis(player: ExoPlayer) {
         if (!AppSettings.smartFadeEnabled.value) return
+        if (player.currentMediaItem?.albumSequential == true && !QueueShuffle.enabled.value) return
 
         val currentIndex = player.currentMediaItemIndex
         if (currentIndex !in 0 until player.mediaItemCount) return
@@ -3959,6 +3960,7 @@ class PlaybackService : MediaSessionService() {
         val currentIndex = live.currentMediaItemIndex
         if (currentIndex !in 0 until live.mediaItemCount) return
         val current = live.getMediaItemAt(currentIndex)
+        if (current.albumSequential && !QueueShuffle.enabled.value) return
 
         if (item.mediaId == current.mediaId) {
             item.localConfiguration?.uri?.let { uri ->

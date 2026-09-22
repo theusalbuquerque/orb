@@ -51,6 +51,12 @@ data class Song(
      * the track played as a 128kbps MP3.
      */
     val sourceQuality: String? = null,
+    val isExplicit: Boolean = false,
+    val releaseYear: Int? = null,
+    val queuePinned: Boolean = false,
+    val sourcePlaylistId: String? = null,
+    val sourcePlaylistTitle: String? = null,
+    val sourcePlaylistArtworkUrl: String? = null,
 )
 
 /**

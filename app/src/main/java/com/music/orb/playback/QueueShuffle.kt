@@ -48,6 +48,17 @@ object QueueShuffle {
         _enabled.value = true
     }
 
+    fun consumeForNewQueue(): Boolean = _enabled.value
+
+    fun confirmActiveQueueShuffled() {
+        _enabled.value = true
+    }
+
+    fun onQueueCleared() {
+        original = emptyList()
+        _enabled.value = false
+    }
+
     /**
      * The order a queue should go in when it is started while shuffle is on:
      * the track the user picked leads, the rest follow at random. The order it

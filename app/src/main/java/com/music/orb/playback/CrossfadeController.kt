@@ -422,6 +422,11 @@ class CrossfadeController(
         if (phase != Phase.IDLE) bail()
     }
 
+    fun onQueueCleared() {
+        AppSettings.smartTransitionWindow.value = null
+        if (phase != Phase.IDLE) finish()
+    }
+
     // ---- Ticker -------------------------------------------------------------
 
     /**
@@ -536,6 +541,14 @@ class CrossfadeController(
         if (nextIndex == C.INDEX_UNSET) return
         val nextItem = player.getMediaItemAt(nextIndex)
         val nextDuration = nextItemDurationMs(nextIndex, nextItem)
+
+        // Authored album playback remains untouched even if AutoPlay already
+        // populated a recommendation tail below it.
+        if (currentItem.albumSequential && !QueueShuffle.enabled.value) {
+            AppSettings.smartTransitionWindow.value = null
+            AppSettings.smartMixInProgress.value = false
+            return
+        }
 
         // Cheap no-ops once a track is analysed or already in flight; called
         // every tick so a track that finishes caching mid-song is picked up
