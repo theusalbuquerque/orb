@@ -204,6 +204,7 @@ object RemoteAutomixClient {
 
         val style = when (rawStyle) {
             "DJ_BLEND" -> TransitionStyle.DJ_BLEND
+            "INTRO_BED" -> TransitionStyle.INTRO_BED
             "DJ_FILTER" -> TransitionStyle.DJ_FILTER
             "EQ_SWAP" -> TransitionStyle.EQ_SWAP
             "PHRASE_CUT" -> TransitionStyle.PHRASE_CUT
@@ -225,6 +226,7 @@ object RemoteAutomixClient {
         // safety. Refuse absurd windows rather than holding two decoders open.
         val maxSpan = when (style) {
             TransitionStyle.PHRASE_CUT, TransitionStyle.CUT -> 1.5
+            TransitionStyle.INTRO_BED -> 72.0
             else -> 14.0
         }
         if (end - start > maxSpan) start = end - maxSpan
