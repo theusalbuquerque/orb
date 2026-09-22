@@ -70,6 +70,11 @@ object RemoteAutomixClient {
         outgoingTrack: TransitionTrackInfo,
         incomingTrack: TransitionTrackInfo,
     ): Decision {
+        // v6 is a staged preview. Public/prod builds must never hit the remote
+        // planner until the rollout gate is explicitly widened.
+        if (!BuildConfig.NEW_AUTOMIX_ENABLED) {
+            return Decision(failed = true)
+        }
         val key = signature(outgoing, incoming, outgoingTrack, incomingTrack)
         val now = System.currentTimeMillis()
         val existing = entries[key]
