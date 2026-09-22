@@ -229,6 +229,45 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
     }
 
     /**
+     * Head-only tempo/key/beat preview for AutoPlay ordering. It never starts
+     * the full reliable C/D analysis, so the live Automix A -> B -> C contract
+     * stays intact.
+     */
+    fun requestQueuePreview(trackId: String, uri: Uri, durationSeconds: Double) {
+        if (trackId.isBlank()) return
+        restoreOnce(trackId)
+        if (results[trackId]?.isUsable == true) return
+        cache.requestAnalysisHead(uri)
+        if (running.isNotEmpty() || reliablePending.isNotEmpty()) return
+        val rendition = headWorthTrying(trackId, uri, durationSeconds) ?: return
+        if (!running.add(trackId)) return
+
+        executor.execute {
+            try {
+                if (results[trackId]?.isUsable == true) return@execute
+                analyzeHead(trackId, uri, durationSeconds, rendition)?.let { preview ->
+                    provisional.add(trackId)
+                    results[trackId] = preview
+                    notifyAnalysisUpdated(trackId)
+                    Log.d(
+                        TAG,
+                        "AutoPlay preview ready for " + trackId + ": bpm=" + preview.bpm +
+                            " key=" + preview.key + " beat=" + preview.beatConfidence,
+                    )
+                }
+            } catch (error: Throwable) {
+                Log.d(TAG, "AutoPlay preview unavailable for " + trackId + ": " + error.message)
+            } finally {
+                running.remove(trackId)
+                if (running.isEmpty()) {
+                    tracker.release()
+                    vocals.release()
+                }
+            }
+        }
+    }
+
+    /**
      * Looks [trackId] up on disk, once, off the playback thread.
      *
      * Deliberately not folded into [analysisFor], which is called several times

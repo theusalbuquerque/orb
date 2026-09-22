@@ -3815,33 +3815,31 @@ class PlaybackService : MediaSessionService() {
         val firstAutoplay = ((currentIndex + 1) until live.mediaItemCount)
             .firstOrNull { live.getMediaItemAt(it).fromAutoplay }
             ?: return
+        if (firstAutoplay <= 0) return
         val items = (firstAutoplay until live.mediaItemCount)
             .map { live.getMediaItemAt(it) }
             .takeWhile { it.fromAutoplay }
         if (items.size < 2) return
 
-        // Membership, not order: our own moveMediaItem calls must not schedule another pass.
+        val anchorItem = live.getMediaItemAt(firstAutoplay - 1)
         val membership = buildString {
-            append(live.getMediaItemAt(firstAutoplay - 1).mediaId)
-            append('|')
+            append(anchorItem.mediaId).append('|')
             items.map { it.mediaId }.sorted().forEach { append(it).append(';') }
         }
         if (membership == autoplayOrderMembership) return
         autoplayOrderMembership = membership
 
-        items.forEach { trackAnalyzer.restoreStored(it.mediaId) }
-        trackAnalyzer.restoreStored(live.getMediaItemAt(firstAutoplay - 1).mediaId)
-
+        val candidates = listOf(anchorItem) + items
+        candidates.forEach { trackAnalyzer.restoreStored(it.mediaId) }
         autoplayOrderJob?.cancel()
         autoplayOrderJob = scope.launch {
-            // Give the analyzer's single-threaded disk restore queue a brief chance to fill.
             delay(AUTOPLAY_ORDER_STORE_SETTLE_MS)
 
-            // 2.5 may reuse analyses already cached by the server. A cache miss is left alone;
-            // we never launch full future-track analysis here, preserving A -> B -> C ordering.
-            if (AppSettings.automixVersion.value == AutomixVersion.V2_5 && RemoteAutomixClient.isAvailable()) {
+            if (AppSettings.automixVersion.value == AutomixVersion.V2_5 &&
+                RemoteAutomixClient.isAvailable()
+            ) {
                 withContext(Dispatchers.IO) {
-                    items.take(AUTOPLAY_REMOTE_ANALYSIS_LOOKAHEAD).forEach { item ->
+                    candidates.take(AUTOPLAY_REMOTE_ANALYSIS_LOOKAHEAD).forEach { item ->
                         if (!trackAnalyzer.analysisFor(item.mediaId).isUsable) {
                             RemoteAutomixClient.cachedAnalysisForQueue(item.mediaId)
                                 ?.let(trackAnalyzer::acceptCachedAnalysis)
@@ -3850,6 +3848,22 @@ class PlaybackService : MediaSessionService() {
                 }
             }
 
+            val preview = candidates.take(AUTOPLAY_PREVIEW_ANALYSIS_LOOKAHEAD)
+            val deadline = SystemClock.elapsedRealtime() + AUTOPLAY_PREVIEW_BUDGET_MS
+            while (SystemClock.elapsedRealtime() < deadline) {
+                var missing = false
+                preview.forEach { item ->
+                    if (!trackAnalyzer.analysisFor(item.mediaId).isUsable) {
+                        missing = true
+                        val uri = item.localConfiguration?.uri ?: return@forEach
+                        val durationSeconds = runCatching { uri.getQueryParameter("d") }
+                            .getOrNull()?.toDoubleOrNull()?.takeIf { it > 0.0 } ?: 0.0
+                        trackAnalyzer.requestQueuePreview(item.mediaId, uri, durationSeconds)
+                    }
+                }
+                if (!missing) break
+                delay(AUTOPLAY_PREVIEW_POLL_MS)
+            }
             applyAutoplayMusicalOrder()
         }
     }
@@ -5406,11 +5420,12 @@ class PlaybackService : MediaSessionService() {
     }
 
     private companion object {
-        /** Brief disk-cache settle before ordering a freshly appended AutoPlay batch. */
-        const val AUTOPLAY_ORDER_STORE_SETTLE_MS = 300L
-
-        /** Bound cache-only server lookups; no future-track audio analysis is started here. */
-        const val AUTOPLAY_REMOTE_ANALYSIS_LOOKAHEAD = 10
+        /** Let persisted evidence land before spending network/CPU on recommendation previews. */
+        const val AUTOPLAY_ORDER_STORE_SETTLE_MS = 650L
+        const val AUTOPLAY_REMOTE_ANALYSIS_LOOKAHEAD = 16
+        const val AUTOPLAY_PREVIEW_ANALYSIS_LOOKAHEAD = 8
+        const val AUTOPLAY_PREVIEW_BUDGET_MS = 7_000L
+        const val AUTOPLAY_PREVIEW_POLL_MS = 250L
 
         private const val REMOTE_AUTOMIX_PROBE_RETRY_MS = 120_000L
         /**

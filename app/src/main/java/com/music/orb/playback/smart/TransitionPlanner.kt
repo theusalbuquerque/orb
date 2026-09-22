@@ -325,6 +325,41 @@ private fun harmonicallyCompatible(left: String, right: String): Boolean {
 private fun trustedKey(analysis: TrackAnalysis): String =
     if (analysis.key.isBlank() || analysis.keyConfidence < 0.25) "" else analysis.key
 
+/** Fast musical-proximity score used only to order AutoPlay suggestions. */
+internal fun automixQueueCompatibility(
+    outgoing: TrackAnalysis,
+    incoming: TrackAnalysis,
+): Double {
+    if (!outgoing.isUsable || !incoming.isUsable) return 0.0
+
+    val outgoingLocalBpm = outgoing.tempoCurve.asReversed()
+        .firstOrNull { it.confidence >= 0.20 && it.bpm in 40.0..220.0 }?.bpm ?: outgoing.bpm
+    var incomingLocalBpm = incoming.tempoCurve
+        .firstOrNull { it.confidence >= 0.20 && it.bpm in 40.0..220.0 }?.bpm ?: incoming.bpm
+    if (outgoingLocalBpm <= 0.0 || incomingLocalBpm <= 0.0) return 0.0
+    while (incomingLocalBpm / outgoingLocalBpm > 1.5) incomingLocalBpm /= 2.0
+    while (incomingLocalBpm / outgoingLocalBpm < 0.67) incomingLocalBpm *= 2.0
+
+    val tempoFit = (1.0 - abs(incomingLocalBpm / outgoingLocalBpm - 1.0) / 0.10)
+        .coerceIn(0.0, 1.0)
+    val outgoingKey = trustedKey(outgoing)
+    val incomingKey = trustedKey(incoming)
+    val harmonicFit = when {
+        outgoingKey.isBlank() || incomingKey.isBlank() -> 0.50
+        outgoingKey == incomingKey -> 1.0
+        harmonicallyCompatible(outgoingKey, incomingKey) -> 0.90
+        else -> 0.12
+    }
+    val confidenceFit = min(outgoing.beatConfidence, incoming.beatConfidence).coerceIn(0.0, 1.0)
+    val gridFit = when {
+        outgoing.beats.isNotEmpty() && incoming.beats.isNotEmpty() -> 1.0
+        outgoing.downbeats.isNotEmpty() && incoming.downbeats.isNotEmpty() -> 0.84
+        else -> 0.42
+    }
+    val beatFit = (0.72 * confidenceFit + 0.28 * gridFit).coerceIn(0.0, 1.0)
+    return (0.48 * tempoFit + 0.34 * harmonicFit + 0.18 * beatFit).coerceIn(0.0, 1.0)
+}
+
 private fun nearestTimedValue(
     values: List<Double>,
     target: Double,

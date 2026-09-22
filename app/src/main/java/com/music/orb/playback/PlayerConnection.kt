@@ -95,6 +95,8 @@ data class PlayerState(
     val repeatMode: Int = Player.REPEAT_MODE_OFF,
     val queue: List<Song> = emptyList(),
     val queueIndex: Int = 0,
+    /** Current item belongs to an album launched in its original non-shuffled order. */
+    val albumSequential: Boolean = false,
     /**
      * Whether the queue has somewhere to go either side of the current track.
      * Taken from the player rather than [queueIndex], so the wrap-around of
@@ -147,6 +149,7 @@ fun rememberPlayerState(controller: MediaController?): PlayerState {
                 repeatMode = player.repeatMode,
                 queue = (0 until player.mediaItemCount).map { player.getMediaItemAt(it).toSong() },
                 queueIndex = player.currentMediaItemIndex,
+                albumSequential = item?.albumSequential == true,
                 hasPrevious = player.hasPreviousMediaItem(),
                 hasNext = player.hasNextMediaItem(),
             )

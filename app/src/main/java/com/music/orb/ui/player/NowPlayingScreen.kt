@@ -197,6 +197,7 @@ fun NowPlayingScreen(
     repeatMode: Int,
     shuffleEnabled: Boolean,
     autoplayEnabled: Boolean,
+    originalAlbumOrder: Boolean,
     signedIn: Boolean,
     likeStatus: LikeStatus,
     onToggleLike: () -> Unit,
@@ -708,6 +709,7 @@ fun NowPlayingScreen(
                             losslessRequested = losslessRequested,
                             nerdStats = nerdStats,
                             showNerdStats = showNerdStats,
+                            originalAlbumOrder = originalAlbumOrder,
                             modifier = Modifier
                                 .align(Alignment.Center)
                                 .padding(horizontal = 8.dp),
@@ -1776,9 +1778,14 @@ private fun LosslessOrStats(
     losslessRequested: Boolean,
     nerdStats: NerdStats.Snapshot?,
     showNerdStats: Boolean,
+    originalAlbumOrder: Boolean,
     modifier: Modifier = Modifier,
 ) {
     when {
+        showNerdStats && nerdStats != null && originalAlbumOrder -> OriginalOrderNerdStats(
+            nerdStats = nerdStats,
+            modifier = modifier,
+        )
         (stillRacing || (isLoading && losslessRequested)) && nerdStats?.isLossless != true -> LosslessLabel(
             text = "Upgrading Quality",
             animated = false,
@@ -1799,6 +1806,34 @@ private fun LosslessOrStats(
             modifier = modifier,
         )
         else -> {}
+    }
+}
+
+@Composable
+private fun OriginalOrderNerdStats(
+    nerdStats: NerdStats.Snapshot,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            text = nerdStats.describe(),
+            style = MaterialTheme.typography.labelSmall,
+            color = Color.White.copy(alpha = 0.65f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
+        )
+        Text(
+            text = "Reproduzindo ordem original",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color.White.copy(alpha = 0.65f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
+        )
     }
 }
 

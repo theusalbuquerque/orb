@@ -165,6 +165,7 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
     var creatingPlaylist by remember { mutableStateOf(false) }
     var playlistActions by remember { mutableStateOf<UserPlaylist?>(null) }
     val autoplay by AppSettings.autoplay.collectAsStateWithLifecycle()
+    val automixEnabled by AppSettings.smartFadeEnabled.collectAsStateWithLifecycle()
     val listenBrainzToken by AppSettings.listenBrainzToken.collectAsStateWithLifecycle()
     var searchFocusTrigger by remember { mutableIntStateOf(0) }
 
@@ -229,17 +230,31 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
     val shuffleEnabled by QueueShuffle.enabled.collectAsStateWithLifecycle()
 
     var autoplaySeed by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(autoplay, player.queueIndex, player.queue.size, player.song?.videoId, player.repeatMode) {
-        val song = player.song
-        val current = song?.videoId
-        if (!autoplay || song == null || current == null) return@LaunchedEffect
-        if (player.repeatMode == Player.REPEAT_MODE_ALL) return@LaunchedEffect
-        if (player.queueIndex < player.queue.lastIndex) return@LaunchedEffect
-        if (autoplaySeed == current) return@LaunchedEffect
-        autoplaySeed = current
-        val seed = youtubeSeedFor(song) ?: return@LaunchedEffect
+    LaunchedEffect(
+        autoplay,
+        automixEnabled,
+        player.queueIndex,
+        player.queue.size,
+        player.song?.videoId,
+        player.repeatMode,
+    ) {
+        val song = player.song ?: return@LaunchedEffect
+        if (!autoplay || player.repeatMode == Player.REPEAT_MODE_ALL) return@LaunchedEffect
+
+        val future = player.queue.drop((player.queueIndex + 1).coerceAtLeast(0))
+        val futureAutoplay = future.count { it.fromAutoplay }
+        if (!automixEnabled && player.queueIndex < player.queue.lastIndex) return@LaunchedEffect
+        if (automixEnabled && futureAutoplay >= AUTOPLAY_MIX_TARGET_AHEAD) return@LaunchedEffect
+
+        val seedSong = player.queue.lastOrNull() ?: song
+        val requestKey = seedSong.videoId + "|" + player.queue.size
+        if (autoplaySeed == requestKey) return@LaunchedEffect
+        autoplaySeed = requestKey
+
+        val seed = youtubeSeedFor(seedSong) ?: return@LaunchedEffect
         YtMusicRepository.radio(seed).onSuccess { related ->
-            val extra = QueueBuilder.extend(player.queue, related, RADIO_BATCH)
+            val batch = if (automixEnabled) AUTOPLAY_MIX_BATCH else RADIO_BATCH
+            val extra = QueueBuilder.extend(player.queue, related, batch)
             if (extra.isNotEmpty()) {
                 val resolved = coroutineScope {
                     extra.map { async { YtMusicRepository.resolveAudio(it) } }.awaitAll()
@@ -889,6 +904,7 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
                     repeatMode = player.repeatMode,
                     shuffleEnabled = shuffleEnabled,
                     autoplayEnabled = autoplay,
+                    originalAlbumOrder = player.albumSequential && !shuffleEnabled,
                     signedIn = signedIn,
                     likeStatus = likeStatuses[song.videoId] ?: LikeStatus.INDIFFERENT,
                     onToggleLike = { viewModel.toggleLike(song.videoId) },
@@ -1195,6 +1211,8 @@ private fun tween(durationMillis: Int) =
     androidx.compose.animation.core.tween<Float>(durationMillis)
 
 private const val RADIO_BATCH = 20
+private const val AUTOPLAY_MIX_BATCH = 24
+private const val AUTOPLAY_MIX_TARGET_AHEAD = 8
 
 private const val SEEK_END_GUARD_MS = 1_000L
 
