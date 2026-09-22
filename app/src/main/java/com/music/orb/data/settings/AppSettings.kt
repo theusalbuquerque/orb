@@ -7,6 +7,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import com.music.orb.auth.AuthStore
 import com.music.orb.data.lyrics.LyricsSource
+import java.security.MessageDigest
 import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
@@ -28,6 +29,12 @@ enum class AudioQuality(
 
 enum class ThemeMode(val label: String) {
     SYSTEM("System"), LIGHT("Light"), DARK("Dark")
+}
+
+/** Public Automix 2.0 and the gated premium-preview Automix 2.5. */
+enum class AutomixVersion {
+    V2_0,
+    V2_5,
 }
 
 /**
@@ -79,6 +86,18 @@ object AppSettings {
      * See [com.music.orb.playback.smart.TransitionPlanner].
      */
     val smartFadeEnabled = MutableStateFlow(false)
+
+    /**
+     * Automix 2.0 remains the public default. 2.5 is a separate premium
+     * entitlement; while billing is not live yet, the beta-owner account is
+     * allowed through the same gate used by future Premium subscribers.
+     */
+    val automixVersion = MutableStateFlow(AutomixVersion.V2_0)
+    val automix25Available = MutableStateFlow(false)
+    val premiumEntitled = MutableStateFlow(false)
+    internal val automix25AccountHash = MutableStateFlow("")
+    private var requestedAutomixVersion = AutomixVersion.V2_0
+
     val skipSilence = MutableStateFlow(false)
 
     /**
@@ -265,6 +284,14 @@ object AppSettings {
         losslessAudio.value = prefs.getBoolean(KEY_LOSSLESS, true)
         crossfadeSeconds.value = prefs.getInt(KEY_CROSSFADE, 0)
         smartFadeEnabled.value = prefs.getBoolean(KEY_SMART_FADE, false)
+        requestedAutomixVersion = runCatching {
+            AutomixVersion.valueOf(
+                prefs.getString(KEY_AUTOMIX_VERSION, AutomixVersion.V2_0.name)
+                    ?: AutomixVersion.V2_0.name,
+            )
+        }.getOrDefault(AutomixVersion.V2_0)
+        // Fail closed until the signed-in account entitlement is known.
+        automixVersion.value = AutomixVersion.V2_0
         skipSilence.value = prefs.getBoolean(KEY_SKIP_SILENCE, false)
         spatialAudio.value = prefs.getBoolean(KEY_SPATIAL_AUDIO, false)
         playbackSpeed.value = prefs.getFloat(KEY_SPEED, 1.0f)
@@ -411,6 +438,51 @@ object AppSettings {
         smartFadeEnabled.value = value
         prefs.edit().putBoolean(KEY_SMART_FADE, value).apply()
     }
+
+    fun setAutomixVersion(value: AutomixVersion) {
+        requestedAutomixVersion = value
+        prefs.edit().putString(KEY_AUTOMIX_VERSION, value.name).apply()
+        automixVersion.value =
+            if (value == AutomixVersion.V2_5 && !automix25Available.value) {
+                AutomixVersion.V2_0
+            } else {
+                value
+            }
+    }
+
+    /**
+     * Called whenever the app's signed-in Google/YouTube account changes.
+     * Only a hash is retained for the 2.5 request; the account email is not
+     * stored in settings or sent to the Automix service.
+     */
+    fun setCurrentAccountEmail(email: String?) {
+        automix25AccountHash.value = email
+            ?.trim()
+            ?.lowercase()
+            ?.takeIf { it.isNotEmpty() }
+            ?.let(::sha256Hex)
+            .orEmpty()
+        refreshAutomix25Entitlement()
+    }
+
+    /** Hook for the future Premium subscription entitlement. */
+    fun setPremiumEntitled(value: Boolean) {
+        premiumEntitled.value = value
+        refreshAutomix25Entitlement()
+    }
+
+    private fun refreshAutomix25Entitlement() {
+        val allowed = premiumEntitled.value ||
+            automix25AccountHash.value == AUTOMIX_25_BETA_OWNER_HASH
+        automix25Available.value = allowed
+        automixVersion.value =
+            if (allowed) requestedAutomixVersion else AutomixVersion.V2_0
+    }
+
+    private fun sha256Hex(value: String): String =
+        MessageDigest.getInstance("SHA-256")
+            .digest(value.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
 
     fun setSkipSilence(value: Boolean) {
         skipSilence.value = value
@@ -646,6 +718,7 @@ object AppSettings {
     private const val KEY_LOSSLESS = "lossless_audio"
     private const val KEY_CROSSFADE = "crossfade_seconds"
     private const val KEY_SMART_FADE = "smart_fade_enabled"
+    private const val KEY_AUTOMIX_VERSION = "automix_version"
     private const val KEY_SKIP_SILENCE = "skip_silence"
     private const val KEY_SPATIAL_AUDIO = "spatial_audio"
     private const val KEY_SPEED = "playback_speed"
@@ -690,6 +763,11 @@ object AppSettings {
     private const val KEY_DISCORD_BUTTON_2_VISIBLE = "discord_button_2_visible"
     private const val KEY_DISCORD_INFO_DISMISSED = "discord_info_dismissed"
     private const val KEY_LAST_VERSION_CODE = "last_version_code"
+
+    // SHA-256 of the temporary owner/beta account. Future subscribers enter
+    // through [premiumEntitled] instead of being added here.
+    private const val AUTOMIX_25_BETA_OWNER_HASH =
+        "2c8c3e1d1bcef1415230705c38bafb7403905850a7f37c5206bd5cfc055c6aeb"
 }
 
 /**
