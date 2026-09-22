@@ -25,7 +25,8 @@ from billing_api import premium_entitled_for_account_hash
 
 router = APIRouter(prefix="/api/automix", tags=["automix"])
 
-API_VERSION = 5
+API_VERSION = 6
+ANALYSIS_SCHEMA = 2
 SAMPLE_RATE = int(os.getenv("AUTOMIX_SAMPLE_RATE", "22050"))
 MAX_UPLOAD_BYTES = int(os.getenv("AUTOMIX_MAX_UPLOAD_BYTES", str(24 * 1024 * 1024)))
 MAX_DURATION_SECONDS = float(os.getenv("AUTOMIX_MAX_DURATION_SECONDS", "900"))
@@ -70,6 +71,9 @@ def _clamp(value: float, lo: float, hi: float) -> float:
 def _cache_get(track_id: str) -> dict[str, Any] | None:
     with _cache_lock:
         value = _analysis_cache.get(track_id)
+        if value is not None and int(_finite(value.get("analysisSchema"), 0)) != ANALYSIS_SCHEMA:
+            _analysis_cache.pop(track_id, None)
+            return None
         if value is not None:
             _analysis_cache.move_to_end(track_id)
         return value
@@ -152,6 +156,98 @@ def _spectral_band_energy(frames: np.ndarray, lo_hz: float, hi_hz: float) -> np.
     if not np.any(mask):
         return np.zeros(frames.shape[0], dtype=np.float32)
     return np.mean(spec[:, mask], axis=1).astype(np.float32)
+
+
+def _spectral_transition_features(
+    frames: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """One FFT pass for the time-varying timbral/harmonic curves used at the join.
+
+    Returns raw low/mid/high band power, perceptual brightness 0..1, and a
+    frame-by-frame 12-bin pitch-class profile. The curves are intentionally
+    transition metadata, not PCM; they are cheap to cache and compare.
+    """
+    window = np.hanning(frames.shape[1]).astype(np.float32)
+    spec = np.abs(np.fft.rfft(frames * window, axis=1)) ** 2
+    freqs = np.fft.rfftfreq(frames.shape[1], 1.0 / SAMPLE_RATE)
+
+    def band(lo_hz: float, hi_hz: float) -> np.ndarray:
+        mask = (freqs >= lo_hz) & (freqs < hi_hz)
+        if not np.any(mask):
+            return np.zeros(frames.shape[0], dtype=np.float64)
+        return np.mean(spec[:, mask], axis=1)
+
+    low = band(35.0, 250.0)
+    mid = band(250.0, 4000.0)
+    high = band(4000.0, 9000.0)
+
+    audible = (freqs >= 55.0) & (freqs <= 12000.0)
+    audible_spec = spec[:, audible]
+    audible_freqs = freqs[audible]
+    total = np.sum(audible_spec, axis=1) + 1e-12
+    centroid = np.sum(audible_spec * audible_freqs[None, :], axis=1) / total
+    # Log-frequency brightness is much closer to perception than raw Hz.
+    brightness = np.clip(
+        np.log2(np.maximum(centroid, 80.0) / 80.0) / np.log2(12000.0 / 80.0),
+        0.0,
+        1.0,
+    )
+
+    chroma = np.zeros((frames.shape[0], 12), dtype=np.float64)
+    tonal_mask = (freqs >= 55.0) & (freqs <= 5000.0)
+    tonal_freqs = freqs[tonal_mask]
+    tonal_spec = np.sqrt(np.maximum(spec[:, tonal_mask], 0.0))
+    if tonal_freqs.size:
+        midi = np.rint(69.0 + 12.0 * np.log2(tonal_freqs / 440.0)).astype(np.int32)
+        pitch_classes = np.mod(midi, 12)
+        for pitch_class in range(12):
+            bins = pitch_classes == pitch_class
+            if np.any(bins):
+                chroma[:, pitch_class] = np.sum(tonal_spec[:, bins], axis=1)
+        chroma_sum = np.sum(chroma, axis=1, keepdims=True)
+        chroma = np.divide(
+            chroma,
+            chroma_sum,
+            out=np.zeros_like(chroma),
+            where=chroma_sum > 1e-9,
+        )
+
+    return (
+        low.astype(np.float64),
+        mid.astype(np.float64),
+        high.astype(np.float64),
+        brightness.astype(np.float64),
+        chroma,
+    )
+
+
+def _tempo_curve(
+    onset: np.ndarray,
+    hop_seconds: float,
+    duration: float,
+) -> list[dict[str, float]]:
+    """Sliding local-tempo curve so a join follows tempo drift, not one catalog BPM."""
+    if duration <= 0.0 or onset.size < 16:
+        return []
+    window_seconds = 18.0
+    step_seconds = 6.0
+    result: list[dict[str, float]] = []
+    center = min(window_seconds / 2.0, duration / 2.0)
+    while center <= duration:
+        start = max(0.0, center - window_seconds / 2.0)
+        end = min(duration, center + window_seconds / 2.0)
+        lo = max(0, int(math.floor(start / hop_seconds)))
+        hi = min(onset.size, int(math.ceil(end / hop_seconds)))
+        if hi - lo >= 16:
+            bpm, confidence, _ = _beat_grid(onset[lo:hi], hop_seconds)
+            if 40.0 <= bpm <= 220.0 and confidence >= 0.12:
+                result.append({
+                    "time": round(center, 3),
+                    "bpm": round(bpm, 5),
+                    "confidence": round(confidence, 5),
+                })
+        center += step_seconds
+    return result
 
 
 def _beat_grid(onset: np.ndarray, hop_seconds: float) -> tuple[float, float, list[float]]:
