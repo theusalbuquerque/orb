@@ -7,14 +7,17 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import com.music.orb.auth.AuthStore
 import com.music.orb.data.lyrics.LyricsSource
-import java.security.MessageDigest
 import kotlinx.coroutines.flow.MutableStateFlow
+import java.security.MessageDigest
 
 /**
- * Stream bitrate ceiling. HIGH means "whatever the best available format is".
+ * Streaming quality below the separate per-network Lossless/Hi-Res ceiling.
  *
- * [hourly] is what the ceiling costs in data over an hour of listening, which
- * is the only part of this a user actually cares about on a metered plan.
+ * BitChord 1.5 treats HIGH as "best available" rather than as a fixed 320 kbps
+ * number. Orb additionally exposes AAC explicitly: when chosen, the YouTube
+ * resolver prefers an AAC/M4A rendition and other sources receive an AAC
+ * request where they support one. AAC is still lossy; Lossless remains the
+ * bit-exact tier stored separately through the Maximum flags below.
  */
 enum class AudioQuality(
     val maxKbps: Int,
@@ -22,20 +25,50 @@ enum class AudioQuality(
     val detail: String,
     val hourly: String,
 ) {
-    LOW(64, "Low", "~64 kbps · smallest download", "29 MB/hr"),
-    MEDIUM(128, "Medium", "~128 kbps · balanced", "58 MB/hr"),
-    HIGH(Int.MAX_VALUE, "High", "Best available · ~171 kbps Opus", "77 MB/hr"),
+    LOW(64, "Low", "About 64 kbps", "29 MB/hr"),
+    MEDIUM(128, "Medium", "Up to 128 kbps", "58 MB/hr"),
+    HIGH(Int.MAX_VALUE, "High", "Best available lossy", "Varies"),
+    AAC(320, "AAC", "Best AAC · up to ~320 kbps", "Up to ~144 MB/hr"),
+}
+
+enum class OutputPcmMode(val label: String) {
+    PCM_16("16-bit PCM"),
+    FLOAT_32("32-bit float"),
 }
 
 enum class ThemeMode(val label: String) {
     SYSTEM("System"), LIGHT("Light"), DARK("Dark")
 }
 
-/** Public Automix 2.0 and the gated premium-preview Automix 2.5. */
+/** Public Automix 2.0 and the gated Premium-preview Automix 2.5. */
 enum class AutomixVersion {
     V2_0,
     V2_5,
 }
+
+/** App typography choices. The UI only exposes this experiment in the dev flavor. */
+enum class AppFont {
+    ORB_DEFAULT,
+    GOOGLE_SANS_FLEX,
+}
+
+/**
+ * UI-only view of a long Automix overlap. The transport may already have moved
+ * to [incomingMediaId] so its queue/decoder can keep running, while the listener
+ * still perceives [outgoingMediaId] as the foreground record.
+ *
+ * [progress] is deliberately NOT the DSP fade progress. It is a short visual
+ * handoff window (0 -> outgoing fully shown, 1 -> incoming fully shown) that is
+ * derived from the real INTRO_BED dominance point. Keeping this separate stops
+ * Now Playing from jumping to B just because B became technically current.
+ */
+data class AutomixVisualTransition(
+    val outgoingMediaId: String,
+    val incomingMediaId: String,
+    val progress: Float = 0f,
+    val outgoingPositionMs: Long = 0L,
+    val outgoingDurationMs: Long = 0L,
+)
 
 /**
  * App settings, backed by SharedPreferences and exposed as flows.
@@ -52,45 +85,47 @@ object AppSettings {
     private lateinit var authStore: AuthStore
 
     /**
-     * Quality ceilings, one per kind of connection — the point of the split is
-     * that Wi-Fi can stay on High while mobile data is capped. Both default to
-     * High; the mobile plan is the user's to budget, not ours to assume.
+     * Lossy playback quality, one choice per kind of connection. Both start on
+     * AAC/Hi-Quality Audio. Wi-Fi may separately allow a Lossless/Hi-Res upgrade,
+     * but that never changes the first-note codec away from AAC.
      */
-    val audioQualityWifi = MutableStateFlow(AudioQuality.HIGH)
-    val audioQualityCellular = MutableStateFlow(AudioQuality.HIGH)
+    val audioQualityWifi = MutableStateFlow(AudioQuality.AAC)
+    val audioQualityCellular = MutableStateFlow(AudioQuality.AAC)
+
+    /**
+     * Fourth quality tier exposed by Audio & sources.
+     *
+     * True means "Maximum (Lossless)" for that connection. HIGH remains the
+     * lossy fallback if no enabled source can supply a compatible lossless
+     * rendition.
+     */
+    val audioQualityWifiMaximum = MutableStateFlow(false)
+    val audioQualityCellularMaximum = MutableStateFlow(false)
 
     /** Whether the active network charges for data. `null` while offline. */
     val meteredConnection = MutableStateFlow<Boolean?>(null)
 
+    /** True only when the active transport is Wi-Fi; null while offline/unknown. */
+    val wifiConnection = MutableStateFlow<Boolean?>(null)
+
     /**
-     * Ask sources for the file they hold rather than a transcode of it.
+     * Availability switch for Orb's built-in Lossless sources.
      *
-     * Off by default, and honestly labelled in Settings: YouTube has no
-     * lossless rendition of anything, so this does nothing at all until a
-     * source that holds real files is added on the Sources screen. It also
-     * loses to [effectiveAudioQuality] — see
-     * [SourceResolver.requestForNow][com.music.orb.data.sources.SourceResolver.requestForNow] —
-     * because a capped connection is a budget, and a preference should not
-     * quietly overspend one.
+     * This is deliberately NOT a playback-quality override anymore. Enabling
+     * it merely makes native hifi-api/addon Lossless sources eligible; the Wi-Fi/mobile quality
+     * choice decides whether a track actually asks for Lossless/Hi-Res.
      */
-    val losslessAudio = MutableStateFlow(true)
+    val losslessAudio = MutableStateFlow(false)
 
     val crossfadeSeconds = MutableStateFlow(0)
 
-    /**
-     * Lets Automix choose a musical operation from key, tempo, beat/phrase,
-     * energy and vocal evidence. This is independent from [crossfadeSeconds]:
-     * missing or weak evidence means natural playback, not a hidden Crossfade.
-     * Off by default because analysis costs background work per track.
-     *
-     * See [com.music.orb.playback.smart.TransitionPlanner].
-     */
-    val smartFadeEnabled = MutableStateFlow(false)
+    /** Beat-aware DSP transitions. Off by default while the new engine is experimental. */
+    val automixEnabled = MutableStateFlow(false)
 
     /**
-     * Automix 2.0 remains the public default. 2.5 is a separate premium
-     * entitlement; while billing is not live yet, the beta-owner account is
-     * allowed through the same gate used by future Premium subscribers.
+     * Automix 2.0 remains the public/default engine. Automix 2.5 is a separate
+     * Premium entitlement; while Premium is not generally released, the owner
+     * account can use the same gate as a private preview.
      */
     val automixVersion = MutableStateFlow(AutomixVersion.V2_0)
     val automix25Available = MutableStateFlow(false)
@@ -98,36 +133,104 @@ object AppSettings {
     internal val automix25AccountHash = MutableStateFlow("")
     private var requestedAutomixVersion = AutomixVersion.V2_0
 
+    /** BitChord v1.5 smart-fade runtime alias; Orb keeps the existing Automix toggle in UI. */
+    val smartFadeEnabled get() = automixEnabled
+    val smartAnalysis = MutableStateFlow(SmartAnalysis())
+    val smartTransitionWindow = MutableStateFlow<TransitionWindow?>(null)
+    val smartMixInProgress = MutableStateFlow(false)
+    val automixTransitionInProgress = MutableStateFlow(false)
+
+    /**
+     * Visual ownership of an INTRO_BED. Null for ordinary playback/transitions.
+     * This is runtime state only; it is never persisted as a user setting.
+     */
+    val automixVisualTransition = MutableStateFlow<AutomixVisualTransition?>(null)
+
     val skipSilence = MutableStateFlow(false)
 
     /**
-     * Widens stereo output via [com.music.orb.playback.SpatialAudioProcessor],
-     * a stereo widening + cross-feed effect running inside ExoPlayer's own
-     * pipeline. Not true object-based spatial audio — YouTube only ever hands
-     * us a stereo stream, so there's no Atmos-style source to render.
+     * Orb's own 360 Audio DSP. It widens compatible stereo PCM through
+     * [com.music.orb.playback.SpatialAudioProcessor] inside ExoPlayer's audio
+     * pipeline, after decoding and independently of any Dolby implementation.
      *
-     * The user's wish, not the final answer: it only takes effect on a device
-     * with Dolby Atmos switched on, and [com.music.orb.playback.DolbyAtmos]
-     * clears it back to false the moment that stops being true.
+     * This is deliberately separate from Dolby Atmos: 360 Audio may process a
+     * normal stereo AAC/Opus/FLAC stream on devices that do not ship Atmos at
+     * all. Dolby Atmos capability/status is tracked by
+     * [com.music.orb.playback.DolbyAtmos] only for genuine device/system Atmos.
      */
     val spatialAudio = MutableStateFlow(false)
     val playbackSpeed = MutableStateFlow(1.0f)
-    val themeMode = MutableStateFlow(ThemeMode.DARK)
 
-    /** Keep playing similar music once the queue runs out. */
-    val autoplay = MutableStateFlow(true)
+    /** PCM representation requested at Android's AudioTrack boundary. */
+    val outputPcmMode = MutableStateFlow(OutputPcmMode.PCM_16)
+
+    /** Route playback to a connected USB DAC when one is available. */
+    val preferUsbDac = MutableStateFlow(false)
+    val themeMode = MutableStateFlow(ThemeMode.SYSTEM)
+
+    /** Home page Aura background gradient. Enabled by default; users may disable it to reduce battery/GPU use. */
+    val homeAuraEnabled = MutableStateFlow(true)
+    val appFont = MutableStateFlow(AppFont.ORB_DEFAULT)
+
+    /** Prefer canonical album cuts over single/remix editions when Orb can verify the same recording. */
+    val prioritizeAlbumVersions = MutableStateFlow(false)
+
+    /**
+     * Keep playing similar music once the queue runs out.
+     *
+     * AutoPlay is opt-in in both release channels: selecting a song means that
+     * exact song unless the listener explicitly turns on the infinity button in
+     * Now Playing.
+     */
+    val autoplay = MutableStateFlow(false)
+
+    /**
+     * Which library the Library tab and "Add to library" actions write to.
+     *
+     * True keeps the historical YouTube Music-backed behaviour. False leaves
+     * the Google session connected for catalogue/account features but stores
+     * library membership only in Orb's own on-device library.
+     */
+    val useYouTubeMusicLibrary = MutableStateFlow(true)
 
     /** Put the playing track's codec, bitrate and sample rate on the player. */
     val showNerdStats = MutableStateFlow(false)
 
+    /** Optional tactile confirmations for key expressive actions. */
+    val hapticFeedback = MutableStateFlow(false)
+
     /** Freezes the main player's mesh gradient instead of letting it drift/crossfade. */
     val reduceAnimation = MutableStateFlow(false)
+
+    /** Hide the device status bar only while the full Now Playing window is open. */
+    val hideStatusBarNowPlaying = MutableStateFlow(false)
+
+    /** Keep the display awake only while the full Now Playing window is open. */
+    val keepScreenOnNowPlaying = MutableStateFlow(false)
+
+    /** Allow only the phone Now Playing window to follow device rotation. */
+    val allowScreenRotation = MutableStateFlow(false)
 
     /** Stop playback when the app is swiped away from the recent apps screen. */
     val stopOnTaskRemoved = MutableStateFlow(false)
 
     /** Swiping a song row plays it next instead of adding it to the end of the queue. */
     val swipeToPlayNext = MutableStateFlow(false)
+
+    /**
+     * Opt-in for the Orb Beta update channel.
+     *
+     * When enabled, WorkManager checks the configured GitHub repository for
+     * pre-releases and notifies about newer Beta builds. APK downloads are
+     * always started explicitly by the listener from the update dialog.
+     */
+    val betaUpdatesEnabled = MutableStateFlow(false)
+
+    /**
+     * True while Orb follows the stable channel in the background. This permits
+     * automatic checks and notifications only; it never permits an APK download.
+     */
+    val stableAutoUpdatesEnabled = MutableStateFlow(true)
 
     /** Drops haze blur (status bar, mini player, bottom fade, lyrics focus) for a solid-fill look. */
     val reduceDynamicBlur = MutableStateFlow(false)
@@ -159,6 +262,12 @@ object AppSettings {
 
     /** The databases [syncedLyrics] may ask. Empty is the same as off. */
     val lyricsSources = MutableStateFlow(LyricsSource.entries.toSet())
+
+    /** Keep looking for syllable/word timing after a line-synced result is found. */
+    val prioritizeSyllableSync = MutableStateFlow(false)
+
+    /** Optional credential for PaxSenix's Spotify and Musixmatch routes. */
+    val paxSenixApiKey = MutableStateFlow("")
 
     /** Disk budget for cached audio. [AudioCache][com.music.orb.playback.AudioCache] evicts past it. */
     val audioCacheLimitBytes = MutableStateFlow(DEFAULT_CACHE_LIMIT_BYTES)
@@ -244,31 +353,8 @@ object AppSettings {
     /** Published by PlaybackService so the UI can open the system equalizer. */
     val audioSessionId = MutableStateFlow(0)
 
-    /**
-     * True only while an Automix operation is audible: beat/key bridge, EQ
-     * swap, filtered bridge or structural cut. Manual Crossfade never sets it,
-     * and NO_TRANSITION deliberately leaves it dark.
-     */
-    val smartMixInProgress = MutableStateFlow(false)
 
-    /**
-     * How much of the *upcoming* transition has been analysed, for stats for
-     * nerds. Published by the crossfade controller, which is the only thing
-     * that knows which two tracks the next transition is between.
-     */
-    val smartAnalysis = MutableStateFlow(SmartAnalysis())
-
-    /**
-     * Where on the *playing* track the next transition is planned to happen, as
-     * fractions of its duration, or null when there is nothing worth drawing.
-     *
-     * Only published once both tracks are measured and a real plan exists.
-     * While analysis/server planning is pending, or when NO_TRANSITION wins,
-     * there is intentionally no marker.
-     */
-    val smartTransitionWindow = MutableStateFlow<TransitionWindow?>(null)
-
-    /** The ceiling that applies to a stream started right now. */
+    /** The lossy ceiling that applies to a stream started right now. */
     val effectiveAudioQuality: AudioQuality
         get() = if (meteredConnection.value == true) {
             audioQualityCellular.value
@@ -276,37 +362,103 @@ object AppSettings {
             audioQualityWifi.value
         }
 
+    /**
+     * Whether Wi-Fi is allowed to upgrade above AAC into Lossless / Hi-Res Lossless.
+     *
+     * This never changes the first-note codec: playback still resolves AAC first
+     * and only upgrades through Lossless sources after audio is already available. Mobile
+     * data deliberately has no Maximum tier.
+     */
+    val effectiveMaximumAudioQuality: Boolean
+        get() = wifiConnection.value == true &&
+            audioQualityWifiMaximum.value &&
+            losslessAudio.value
+
     fun init(context: Context) {
         prefs = context.getSharedPreferences("bitchord_settings", Context.MODE_PRIVATE)
         migrateSingleQuality()
+        migrateLegacyHighDefaultToAac()
+        // Keep AAC as AAC. Earlier builds translated the stored AAC default
+        // back into HIGH at startup, which made playback take the wrong source
+        // policy and could accidentally enter the Lossless path.
         audioQualityWifi.value = readQuality(KEY_QUALITY_WIFI)
         audioQualityCellular.value = readQuality(KEY_QUALITY_CELLULAR)
-        losslessAudio.value = prefs.getBoolean(KEY_LOSSLESS, true)
+        audioQualityWifiMaximum.value = prefs.getBoolean(KEY_QUALITY_WIFI_MAXIMUM, false)
+        // Lossless/Hi-Res is Wi-Fi-only. Older builds exposed a mobile Maximum
+        // flag; migrate it off permanently and keep AAC as the mobile ceiling.
+        audioQualityCellularMaximum.value = false
+        if (prefs.getBoolean(KEY_QUALITY_CELLULAR_MAXIMUM, false)) {
+            prefs.edit()
+                .putBoolean(KEY_QUALITY_CELLULAR_MAXIMUM, false)
+                .putString(KEY_QUALITY_CELLULAR, AudioQuality.AAC.name)
+                .apply()
+            audioQualityCellular.value = AudioQuality.AAC
+        }
+        losslessAudio.value = prefs.getBoolean(KEY_LOSSLESS, false)
         crossfadeSeconds.value = prefs.getInt(KEY_CROSSFADE, 0)
-        smartFadeEnabled.value = prefs.getBoolean(KEY_SMART_FADE, false)
+        automixEnabled.value = prefs.getBoolean(KEY_AUTOMIX, false)
         requestedAutomixVersion = runCatching {
             AutomixVersion.valueOf(
                 prefs.getString(KEY_AUTOMIX_VERSION, AutomixVersion.V2_0.name)
                     ?: AutomixVersion.V2_0.name,
             )
         }.getOrDefault(AutomixVersion.V2_0)
-        // Fail closed until the signed-in account entitlement is known.
+        // Fail closed to 2.0 until the signed-in account entitlement is known.
         automixVersion.value = AutomixVersion.V2_0
+        // Automix owns the transition envelope. A manual crossfade must never
+        // compete with it, including after restoring settings from an older build.
+        if (automixEnabled.value && crossfadeSeconds.value != 0) {
+            crossfadeSeconds.value = 0
+            prefs.edit().putInt(KEY_CROSSFADE, 0).apply()
+        }
         skipSilence.value = prefs.getBoolean(KEY_SKIP_SILENCE, false)
         spatialAudio.value = prefs.getBoolean(KEY_SPATIAL_AUDIO, false)
         playbackSpeed.value = prefs.getFloat(KEY_SPEED, 1.0f)
         themeMode.value = runCatching {
-            ThemeMode.valueOf(prefs.getString(KEY_THEME, null) ?: "DARK")
-        }.getOrDefault(ThemeMode.DARK)
-        autoplay.value = prefs.getBoolean(KEY_AUTOPLAY, true)
+            ThemeMode.valueOf(prefs.getString(KEY_THEME, null) ?: "SYSTEM")
+        }.getOrDefault(ThemeMode.SYSTEM)
+        homeAuraEnabled.value = prefs.getBoolean(KEY_HOME_AURA_ENABLED, true)
+        // The font picker was removed. Normalize older installs back to Orb's default
+        // so nobody gets stranded on the former experimental font after upgrading.
+        appFont.value = AppFont.ORB_DEFAULT
+        prefs.edit().putString(KEY_APP_FONT, AppFont.ORB_DEFAULT.name).apply()
+        prioritizeAlbumVersions.value = prefs.getBoolean(KEY_PRIORITIZE_ALBUM_VERSIONS, false)
+        // AutoPlay is opt-in for both Beta and Stable. Older installs may have
+        // inherited the legacy implicit-true default, so only a value written
+        // through the explicit infinity toggle is restored.
+        autoplay.value = if (prefs.getBoolean(KEY_AUTOPLAY_EXPLICIT, false)) {
+            prefs.getBoolean(KEY_AUTOPLAY, false)
+        } else {
+            false
+        }
+        useYouTubeMusicLibrary.value = prefs.getBoolean(KEY_USE_YOUTUBE_MUSIC_LIBRARY, true)
         showNerdStats.value = prefs.getBoolean(KEY_NERD_STATS, false)
+        hapticFeedback.value = prefs.getBoolean(KEY_HAPTIC_FEEDBACK, false)
         reduceAnimation.value = prefs.getBoolean(KEY_REDUCE_ANIMATION, false)
+        hideStatusBarNowPlaying.value = prefs.getBoolean(KEY_HIDE_STATUS_BAR_NOW_PLAYING, false)
+        keepScreenOnNowPlaying.value = prefs.getBoolean(KEY_KEEP_SCREEN_ON_NOW_PLAYING, false)
+        allowScreenRotation.value = prefs.getBoolean(KEY_ALLOW_SCREEN_ROTATION, false)
         stopOnTaskRemoved.value = prefs.getBoolean(KEY_STOP_ON_TASK_REMOVED, false)
         swipeToPlayNext.value = prefs.getBoolean(KEY_SWIPE_TO_PLAY_NEXT, false)
+        betaUpdatesEnabled.value = prefs.getBoolean(KEY_BETA_UPDATES_ENABLED, false)
+        stableAutoUpdatesEnabled.value = if (betaUpdatesEnabled.value) {
+            false
+        } else {
+            // Stable update notifications are now the default app behaviour.
+            // Migrate older installs that persisted the former opt-in false value.
+            prefs.edit().putBoolean(KEY_STABLE_AUTO_UPDATES_ENABLED, true).apply()
+            true
+        }
         reduceDynamicBlur.value = prefs.getBoolean(KEY_REDUCE_BLUR, false)
         animatedCanvas.value = prefs.getBoolean(KEY_ANIMATED_CANVAS, true)
         syncedLyrics.value = prefs.getBoolean(KEY_SYNCED_LYRICS, true)
         lyricsSources.value = readLyricsSources()
+        prioritizeSyllableSync.value = prefs.getBoolean(KEY_PRIORITIZE_SYLLABLE_SYNC, false)
+        paxSenixApiKey.value = prefs.getString(KEY_PAXSENIX_API_KEY, "").orEmpty()
+        outputPcmMode.value = prefs.getString(KEY_OUTPUT_PCM_MODE, null)
+            ?.let { saved -> OutputPcmMode.entries.firstOrNull { it.name == saved } }
+            ?: OutputPcmMode.PCM_16
+        preferUsbDac.value = prefs.getBoolean(KEY_PREFER_USB_DAC, false)
         audioCacheLimitBytes.value = prefs.getLong(KEY_CACHE_LIMIT, DEFAULT_CACHE_LIMIT_BYTES)
             .coerceIn(DEFAULT_CACHE_LIMIT_BYTES, MAX_CACHE_LIMIT_BYTES)
         lastfmEnabled.value = prefs.getBoolean(KEY_LASTFM_ENABLED, false)
@@ -323,6 +475,7 @@ object AppSettings {
         listenBrainzEnabled.value = prefs.getBoolean(KEY_LISTENBRAINZ_ENABLED, false)
         listenBrainzToken.value = prefs.getString(KEY_LISTENBRAINZ_TOKEN, "").orEmpty()
         authStore = AuthStore(context)
+        setCurrentAccountEmail(authStore.googleEmail)
         discordToken.value = authStore.discordToken.orEmpty()
         discordUsername.value = prefs.getString(KEY_DISCORD_USERNAME, "").orEmpty()
         discordName.value = prefs.getString(KEY_DISCORD_NAME, "").orEmpty()
@@ -376,9 +529,35 @@ object AppSettings {
             .apply()
     }
 
+    /**
+     * One-time migration from the builds where HIGH was the implicit/default
+     * quality. HIGH normally resolves to WebM/Opus on YouTube, so leaving that
+     * stored value behind would make an upgraded installation keep sounding as
+     * though AAC had never become Orb's default. Explicit LOW/MEDIUM choices are
+     * preserved; only the old HIGH default is promoted to AAC once.
+     */
+    private fun migrateLegacyHighDefaultToAac() {
+        if (prefs.getBoolean(KEY_AAC_DEFAULT_MIGRATED, false)) return
+        val wifi = prefs.getString(KEY_QUALITY_WIFI, null)
+        val cellular = prefs.getString(KEY_QUALITY_CELLULAR, null)
+        val editor = prefs.edit().putBoolean(KEY_AAC_DEFAULT_MIGRATED, true)
+        if (wifi == null || wifi == AudioQuality.HIGH.name) {
+            editor.putString(KEY_QUALITY_WIFI, AudioQuality.AAC.name)
+        }
+        if (cellular == null || cellular == AudioQuality.HIGH.name) {
+            editor.putString(KEY_QUALITY_CELLULAR, AudioQuality.AAC.name)
+        }
+        editor.apply()
+    }
+
     private fun readQuality(key: String): AudioQuality {
-        val stored = prefs.getString(key, null) ?: return AudioQuality.HIGH
-        return runCatching { AudioQuality.valueOf(stored) }.getOrDefault(AudioQuality.HIGH)
+        val stored = prefs.getString(key, null) ?: return AudioQuality.AAC
+        val parsed = runCatching { AudioQuality.valueOf(stored) }.getOrDefault(AudioQuality.AAC)
+        // HIGH was the historical name of Orb's top lossy tier. The current
+        // product contract for that visible tier is Hi-Quality AAC, so old
+        // installs are normalized on read instead of silently falling back to
+        // generic Opus-first "best lossy" behaviour.
+        return if (parsed == AudioQuality.HIGH) AudioQuality.AAC else parsed
     }
 
     /**
@@ -390,8 +569,13 @@ object AppSettings {
     private fun watchConnection(context: Context) {
         val manager = context.getSystemService(ConnectivityManager::class.java) ?: return
         val refresh = {
+            val active = manager.activeNetwork
             meteredConnection.value = runCatching {
-                if (manager.activeNetwork == null) null else manager.isActiveNetworkMetered
+                if (active == null) null else manager.isActiveNetworkMetered
+            }.getOrNull()
+            wifiConnection.value = runCatching {
+                if (active == null) null else manager.getNetworkCapabilities(active)
+                    ?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
             }.getOrNull()
         }
         refresh()
@@ -411,17 +595,60 @@ object AppSettings {
 
     fun setAutoplay(value: Boolean) {
         autoplay.value = value
-        prefs.edit().putBoolean(KEY_AUTOPLAY, value).apply()
+        prefs.edit()
+            .putBoolean(KEY_AUTOPLAY, value)
+            // Marks this as a real listener choice. Both release channels ignore
+            // the legacy implicit-true default until this toggle is touched.
+            .putBoolean(KEY_AUTOPLAY_EXPLICIT, true)
+            .apply()
+    }
+
+    fun setUseYouTubeMusicLibrary(value: Boolean) {
+        useYouTubeMusicLibrary.value = value
+        prefs.edit().putBoolean(KEY_USE_YOUTUBE_MUSIC_LIBRARY, value).apply()
     }
 
     fun setAudioQualityWifi(value: AudioQuality) {
-        audioQualityWifi.value = value
-        prefs.edit().putString(KEY_QUALITY_WIFI, value.name).apply()
+        val resolved = if (value == AudioQuality.HIGH) AudioQuality.AAC else value
+        audioQualityWifi.value = resolved
+        audioQualityWifiMaximum.value = false
+        prefs.edit()
+            .putString(KEY_QUALITY_WIFI, resolved.name)
+            .putBoolean(KEY_QUALITY_WIFI_MAXIMUM, false)
+            .apply()
     }
 
     fun setAudioQualityCellular(value: AudioQuality) {
-        audioQualityCellular.value = value
-        prefs.edit().putString(KEY_QUALITY_CELLULAR, value.name).apply()
+        val resolved = if (value == AudioQuality.HIGH) AudioQuality.AAC else value
+        audioQualityCellular.value = resolved
+        audioQualityCellularMaximum.value = false
+        prefs.edit()
+            .putString(KEY_QUALITY_CELLULAR, resolved.name)
+            .putBoolean(KEY_QUALITY_CELLULAR_MAXIMUM, false)
+            .apply()
+    }
+
+    fun setAudioQualityWifiMaximum(value: Boolean) {
+        audioQualityWifiMaximum.value = value
+        val editor = prefs.edit().putBoolean(KEY_QUALITY_WIFI_MAXIMUM, value)
+        if (value) {
+            // Maximum is an upgrade ceiling, not the first-note codec. Keep AAC
+            // underneath it so FLAC discovery can never force an Opus start.
+            audioQualityWifi.value = AudioQuality.AAC
+            editor.putString(KEY_QUALITY_WIFI, AudioQuality.AAC.name)
+        }
+        editor.apply()
+    }
+
+    fun setAudioQualityCellularMaximum(value: Boolean) {
+        // Maximum Lossless is intentionally unavailable on mobile data. Keep
+        // this compatibility setter so old callers/build variants still compile.
+        audioQualityCellularMaximum.value = false
+        if (value) audioQualityCellular.value = AudioQuality.AAC
+        prefs.edit()
+            .putBoolean(KEY_QUALITY_CELLULAR_MAXIMUM, false)
+            .putString(KEY_QUALITY_CELLULAR, audioQualityCellular.value.name)
+            .apply()
     }
 
     fun setLosslessAudio(value: Boolean) {
@@ -430,13 +657,20 @@ object AppSettings {
     }
 
     fun setCrossfadeSeconds(value: Int) {
-        crossfadeSeconds.value = value
-        prefs.edit().putInt(KEY_CROSSFADE, value).apply()
+        val resolved = if (automixEnabled.value) 0 else value.coerceIn(0, 12)
+        crossfadeSeconds.value = resolved
+        prefs.edit().putInt(KEY_CROSSFADE, resolved).apply()
     }
 
-    fun setSmartFadeEnabled(value: Boolean) {
-        smartFadeEnabled.value = value
-        prefs.edit().putBoolean(KEY_SMART_FADE, value).apply()
+    fun setAutomixEnabled(value: Boolean) {
+        automixEnabled.value = value
+        val editor = prefs.edit().putBoolean(KEY_AUTOMIX, value)
+        if (value) {
+            // Automix and manual Crossfade are mutually exclusive by design.
+            crossfadeSeconds.value = 0
+            editor.putInt(KEY_CROSSFADE, 0)
+        }
+        editor.apply()
     }
 
     fun setAutomixVersion(value: AutomixVersion) {
@@ -451,9 +685,8 @@ object AppSettings {
     }
 
     /**
-     * Called whenever the app's signed-in Google/YouTube account changes.
-     * Only a hash is retained for the 2.5 request; the account email is not
-     * stored in settings or sent to the Automix service.
+     * Refreshes the private 2.5 entitlement from the Orb/Google identity. The
+     * raw e-mail is never persisted by this setting or sent to the Automix API.
      */
     fun setCurrentAccountEmail(email: String?) {
         automix25AccountHash.value = email
@@ -465,7 +698,7 @@ object AppSettings {
         refreshAutomix25Entitlement()
     }
 
-    /** Hook for the future Premium subscription entitlement. */
+    /** Future Premium billing can call this with its verified entitlement. */
     fun setPremiumEntitled(value: Boolean) {
         premiumEntitled.value = value
         refreshAutomix25Entitlement()
@@ -482,7 +715,7 @@ object AppSettings {
     private fun sha256Hex(value: String): String =
         MessageDigest.getInstance("SHA-256")
             .digest(value.toByteArray(Charsets.UTF_8))
-            .joinToString("") { "%02x".format(it) }
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
     fun setSkipSilence(value: Boolean) {
         skipSilence.value = value
@@ -504,14 +737,49 @@ object AppSettings {
         prefs.edit().putBoolean(KEY_NERD_STATS, value).apply()
     }
 
+    fun setHapticFeedback(value: Boolean) {
+        hapticFeedback.value = value
+        prefs.edit().putBoolean(KEY_HAPTIC_FEEDBACK, value).apply()
+    }
+
+    fun setPrioritizeAlbumVersions(value: Boolean) {
+        prioritizeAlbumVersions.value = value
+        prefs.edit().putBoolean(KEY_PRIORITIZE_ALBUM_VERSIONS, value).apply()
+    }
+
     fun setThemeMode(value: ThemeMode) {
         themeMode.value = value
         prefs.edit().putString(KEY_THEME, value.name).apply()
     }
 
+    fun setHomeAuraEnabled(value: Boolean) {
+        homeAuraEnabled.value = value
+        prefs.edit().putBoolean(KEY_HOME_AURA_ENABLED, value).apply()
+    }
+
+    fun setAppFont(value: AppFont) {
+        appFont.value = value
+        prefs.edit().putString(KEY_APP_FONT, value.name).apply()
+    }
+
     fun setReduceAnimation(value: Boolean) {
         reduceAnimation.value = value
         prefs.edit().putBoolean(KEY_REDUCE_ANIMATION, value).apply()
+    }
+
+    fun setHideStatusBarNowPlaying(value: Boolean) {
+        hideStatusBarNowPlaying.value = value
+        prefs.edit().putBoolean(KEY_HIDE_STATUS_BAR_NOW_PLAYING, value).apply()
+    }
+
+    fun setKeepScreenOnNowPlaying(value: Boolean) {
+        keepScreenOnNowPlaying.value = value
+        prefs.edit().putBoolean(KEY_KEEP_SCREEN_ON_NOW_PLAYING, value).apply()
+    }
+
+    fun setAllowScreenRotation(value: Boolean) {
+        allowScreenRotation.value = value
+        prefs.edit().putBoolean(KEY_ALLOW_SCREEN_ROTATION, value).apply()
     }
 
     fun setStopOnTaskRemoved(value: Boolean) {
@@ -522,6 +790,16 @@ object AppSettings {
     fun setSwipeToPlayNext(value: Boolean) {
         swipeToPlayNext.value = value
         prefs.edit().putBoolean(KEY_SWIPE_TO_PLAY_NEXT, value).apply()
+    }
+
+    fun setBetaUpdatesEnabled(value: Boolean) {
+        betaUpdatesEnabled.value = value
+        prefs.edit().putBoolean(KEY_BETA_UPDATES_ENABLED, value).apply()
+    }
+
+    fun setStableAutoUpdatesEnabled(value: Boolean) {
+        stableAutoUpdatesEnabled.value = value
+        prefs.edit().putBoolean(KEY_STABLE_AUTO_UPDATES_ENABLED, value).apply()
     }
 
     fun setReduceDynamicBlur(value: Boolean) {
@@ -539,6 +817,26 @@ object AppSettings {
         prefs.edit().putString(KEY_LYRICS_SOURCES, value.joinToString(",") { it.name }).apply()
     }
 
+    fun setPrioritizeSyllableSync(value: Boolean) {
+        prioritizeSyllableSync.value = value
+        prefs.edit().putBoolean(KEY_PRIORITIZE_SYLLABLE_SYNC, value).apply()
+    }
+
+    fun setPaxSenixApiKey(value: String) {
+        paxSenixApiKey.value = value.trim().removePrefix("Bearer ").trim()
+        prefs.edit().putString(KEY_PAXSENIX_API_KEY, paxSenixApiKey.value).apply()
+    }
+
+    fun setOutputPcmMode(value: OutputPcmMode) {
+        outputPcmMode.value = value
+        prefs.edit().putString(KEY_OUTPUT_PCM_MODE, value.name).apply()
+    }
+
+    fun setPreferUsbDac(value: Boolean) {
+        preferUsbDac.value = value
+        prefs.edit().putBoolean(KEY_PREFER_USB_DAC, value).apply()
+    }
+
     /**
      * Stored as a joined list of names rather than a string set: a name that
      * no longer exists — a source dropped in a later build — has to fall out
@@ -548,10 +846,29 @@ object AppSettings {
      */
     private fun readLyricsSources(): Set<LyricsSource> {
         val stored = prefs.getString(KEY_LYRICS_SOURCES, null)
-            ?: return LyricsSource.entries.toSet()
-        return stored.split(",")
+        if (stored == null) {
+            prefs.edit().putBoolean(KEY_LYRICS_PROVIDER_EXPANSION_MIGRATED, true).apply()
+            return LyricsSource.entries.toSet()
+        }
+        val parsed = stored.split(",")
             .mapNotNull { name -> LyricsSource.entries.firstOrNull { it.name == name } }
             .toSet()
+        if (prefs.getBoolean(KEY_LYRICS_PROVIDER_EXPANSION_MIGRATED, false)) return parsed
+
+        // Preserve the user's choices for the four providers Orb already had,
+        // but enable every newly introduced provider once on upgrade.
+        val legacy = setOf(
+            LyricsSource.BETTER_LYRICS,
+            LyricsSource.LYRICS_PLUS,
+            LyricsSource.SIMP_MUSIC,
+            LyricsSource.LRCLIB,
+        )
+        val migrated = parsed + LyricsSource.entries.filterNot { it in legacy }
+        prefs.edit()
+            .putString(KEY_LYRICS_SOURCES, migrated.joinToString(",") { it.name })
+            .putBoolean(KEY_LYRICS_PROVIDER_EXPANSION_MIGRATED, true)
+            .apply()
+        return migrated
     }
 
     fun setAnimatedCanvas(value: Boolean) {
@@ -680,8 +997,7 @@ object AppSettings {
 
     fun setDiscordButton1Text(value: String) {
         discordButton1Text.value = value
-        prefs.edit().putString(KEY_DISCORD_BUTTON_1_TEXT, value).apply()
-    }
+        prefs.edit().putString(KEY_DISCORD_BUTTON_1_TEXT, value).apply()    }
 
     fun setDiscordButton1Visible(value: Boolean) {
         discordButton1Visible.value = value
@@ -703,36 +1019,76 @@ object AppSettings {
         prefs.edit().putBoolean(KEY_DISCORD_INFO_DISMISSED, value).apply()
     }
 
+    fun statsNotificationsSeenAtMs(userId: String): Long =
+        prefs.getLong("${KEY_STATS_NOTIFICATIONS_SEEN_AT}_$userId", 0L)
+
+    fun markStatsNotificationsSeen(userId: String, nowMs: Long = System.currentTimeMillis()) {
+        prefs.edit().putLong("${KEY_STATS_NOTIFICATIONS_SEEN_AT}_$userId", nowMs).apply()
+    }
+
+    /**
+     * One-shot discovery hint introduced with the Stats ranking card update.
+     * The key is deliberately versioned: existing installations see the hint
+     * once after installing this update, while later launches stay quiet.
+     */
+    fun shouldShowStatsArtistRankingHint(): Boolean =
+        !prefs.getBoolean(KEY_STATS_ARTIST_RANKING_HINT_V161_SEEN, false)
+
+    fun markStatsArtistRankingHintSeen() {
+        prefs.edit().putBoolean(KEY_STATS_ARTIST_RANKING_HINT_V161_SEEN, true).apply()
+    }
+
     /** Forgets the account: token and cached profile. */
     fun clearDiscordAccount() {
         setDiscordToken("")
         setDiscordAccount("", "", null)
     }
 
-    const val DEFAULT_CACHE_LIMIT_BYTES = 512L * 1024 * 1024
+    const val DEFAULT_CACHE_LIMIT_BYTES = 1L * 1024 * 1024 * 1024
     const val MAX_CACHE_LIMIT_BYTES = 10L * 1024 * 1024 * 1024
 
     private const val KEY_QUALITY_LEGACY = "audio_quality"
     private const val KEY_QUALITY_WIFI = "audio_quality_wifi"
     private const val KEY_QUALITY_CELLULAR = "audio_quality_cellular"
+    private const val KEY_QUALITY_WIFI_MAXIMUM = "audio_quality_wifi_maximum"
+    private const val KEY_QUALITY_CELLULAR_MAXIMUM = "audio_quality_cellular_maximum"
+    private const val KEY_AAC_DEFAULT_MIGRATED = "audio_quality_aac_default_migrated_v2"
     private const val KEY_LOSSLESS = "lossless_audio"
     private const val KEY_CROSSFADE = "crossfade_seconds"
-    private const val KEY_SMART_FADE = "smart_fade_enabled"
+    private const val KEY_AUTOMIX = "automix_enabled_v2"
     private const val KEY_AUTOMIX_VERSION = "automix_version"
     private const val KEY_SKIP_SILENCE = "skip_silence"
     private const val KEY_SPATIAL_AUDIO = "spatial_audio"
     private const val KEY_SPEED = "playback_speed"
     private const val KEY_THEME = "theme_mode"
+    private const val KEY_HOME_AURA_ENABLED = "home_aura_enabled"
+    private const val KEY_APP_FONT = "app_font"
+    private const val KEY_PRIORITIZE_ALBUM_VERSIONS = "prioritize_album_versions"
     private const val KEY_AUTOPLAY = "autoplay"
+    private const val KEY_AUTOPLAY_EXPLICIT = "autoplay_explicit"
+    private const val KEY_USE_YOUTUBE_MUSIC_LIBRARY = "use_youtube_music_library"
     private const val KEY_NERD_STATS = "show_nerd_stats"
+    private const val KEY_HAPTIC_FEEDBACK = "haptic_feedback"
     private const val KEY_CACHE_LIMIT = "audio_cache_limit_bytes"
     private const val KEY_REDUCE_ANIMATION = "reduce_animation"
+    private const val KEY_HIDE_STATUS_BAR_NOW_PLAYING = "hide_status_bar_now_playing"
+    private const val KEY_KEEP_SCREEN_ON_NOW_PLAYING = "keep_screen_on_now_playing"
+    private const val KEY_ALLOW_SCREEN_ROTATION = "allow_screen_rotation"
     private const val KEY_STOP_ON_TASK_REMOVED = "stop_on_task_removed"
     private const val KEY_SWIPE_TO_PLAY_NEXT = "swipe_to_play_next"
+    private const val KEY_BETA_UPDATES_ENABLED = "beta_updates_enabled"
+    private const val KEY_STABLE_AUTO_UPDATES_ENABLED = "stable_auto_updates_enabled"
     private const val KEY_REDUCE_BLUR = "reduce_dynamic_blur"
     private const val KEY_ANIMATED_CANVAS = "animated_canvas"
     private const val KEY_SYNCED_LYRICS = "synced_lyrics"
     private const val KEY_LYRICS_SOURCES = "lyrics_sources"
+    private const val KEY_LYRICS_PROVIDER_EXPANSION_MIGRATED = "lyrics_provider_expansion_v16_migrated"
+    private const val KEY_PRIORITIZE_SYLLABLE_SYNC = "prioritize_syllable_sync"
+    private const val KEY_PAXSENIX_API_KEY = "paxsenix_api_key"
+    private const val KEY_OUTPUT_PCM_MODE = "output_pcm_mode"
+    private const val KEY_PREFER_USB_DAC = "prefer_usb_dac"
+    private const val KEY_STATS_NOTIFICATIONS_SEEN_AT = "stats_notifications_seen_at"
+    private const val KEY_STATS_ARTIST_RANKING_HINT_V161_SEEN = "stats_artist_ranking_hint_v161_seen"
 
     private const val KEY_LASTFM_ENABLED = "lastfm_enabled"
     private const val KEY_LASTFM_USERNAME = "lastfm_username"
@@ -762,65 +1118,11 @@ object AppSettings {
     private const val KEY_DISCORD_BUTTON_2_TEXT = "discord_button_2_text"
     private const val KEY_DISCORD_BUTTON_2_VISIBLE = "discord_button_2_visible"
     private const val KEY_DISCORD_INFO_DISMISSED = "discord_info_dismissed"
-    private const val KEY_LAST_VERSION_CODE = "last_version_code"
 
-    // SHA-256 of the temporary owner/beta account. Future subscribers enter
-    // through [premiumEntitled] instead of being added here.
+    // SHA-256 of the temporary private 2.5 preview account. Future Premium
+    // subscribers are authorized through [premiumEntitled], not added here.
     private const val AUTOMIX_25_BETA_OWNER_HASH =
         "2c8c3e1d1bcef1415230705c38bafb7403905850a7f37c5206bd5cfc055c6aeb"
+    private const val KEY_LAST_VERSION_CODE = "last_version_code"
 }
 
-/**
- * Where one track stands in Automix's analysis.
- *
- * The three no-result states are kept apart because they call for different
- * reactions: [WAITING] resolves itself once bytes arrive, [ANALYSING] resolves
- * itself in a few seconds, and [FAILED] never resolves at all. From outside
- * they look identical, which is precisely why the line has to say which.
- */
-enum class TrackAnalysisState {
-    /** Nothing in flight and no result — usually waiting on bytes to arrive. */
-    WAITING,
-
-    /** Decode and inference running now; a result is a few seconds away. */
-    ANALYSING,
-
-    /** Measured, with a tempo the planner can actually use. */
-    ANALYSED,
-
-    /**
-     * Measured off the track's opening, with the whole-track pass running now to
-     * replace those numbers with better ones.
-     *
-     * Its own state rather than either neighbour, because it is genuinely both:
-     * reporting [ANALYSING] made a track that was already usable look like it
-     * had gone backwards, and reporting [ANALYSED] would hide that the cue and
-     * the tempo are about to move.
-     */
-    REFINING,
-
-    /**
-     * Tried and came back with nothing usable — a decode error, or audio that
-     * yielded no tempo. Distinct from [WAITING] because nothing further will
-     * happen on its own: waiting is a matter of time, this is not.
-     */
-    FAILED,
-}
-
-/**
- * Both sides of the next transition, for stats for nerds.
- *
- * A transition needs *both* tracks measured before it can beat-match or cue the
- * incoming one into its arrangement, so reporting them separately is what makes
- * a plain crossfade explicable rather than mysterious.
- */
-data class SmartAnalysis(
-    val current: TrackAnalysisState = TrackAnalysisState.WAITING,
-    val next: TrackAnalysisState = TrackAnalysisState.WAITING,
-)
-
-/**
- * A span of the playing track, in fractions of its duration, that the next
- * transition is planned to occupy.
- */
-data class TransitionWindow(val start: Float, val end: Float)
