@@ -1,93 +1,81 @@
-# Orb Billing — Mercado Pago + Asaas
+# Orb Billing — Mercado Pago
 
-Primeira camada de billing recorrente do Orb.
+Billing recorrente do Orb Premium usando Mercado Pago.
+
+## Estado atual
+
+As novas assinaturas ficam fechadas por padrão.
+
+O endpoint de checkout só cria novas assinaturas quando:
+
+```text
+ORB_PREMIUM_SIGNUPS_ENABLED=true
+```
+
+Sem essa variável, ou com valor `false`, o endpoint retorna HTTP 403 e nenhum
+checkout é criado.
 
 ## Arquitetura
 
-O APK nunca recebe chaves privadas dos gateways.
+O APK nunca recebe chaves privadas do Mercado Pago.
 
-Orb Android -> Orb FastAPI -> Mercado Pago / Asaas -> Webhooks -> status local -> entitlement Premium.
+Orb Android -> Orb FastAPI -> Mercado Pago -> Webhooks -> entitlement Premium.
 
 ## Variáveis de ambiente
 
-Configure no servidor (por exemplo, Render), nunca no APK e nunca no GitHub:
+Configure no servidor, nunca no APK e nunca no GitHub:
 
 - `MERCADO_PAGO_ACCESS_TOKEN`
 - `MERCADO_PAGO_WEBHOOK_SECRET`
-- `ASAAS_API_KEY`
-- `ASAAS_WEBHOOK_TOKEN`
-- `ASAAS_API_BASE_URL` (opcional; produção: `https://api.asaas.com/v3`)
 - `ORB_PREMIUM_MONTHLY_PRICE`
 - `ORB_PREMIUM_YEARLY_PRICE`
+- `ORB_PREMIUM_SIGNUPS_ENABLED` (padrão: `false`)
 - `ORB_BILLING_DB_PATH`
 - `PUBLIC_BASE_URL`
-
-Para sandbox do Asaas, use `https://api-sandbox.asaas.com/v3`.
 
 ## Endpoints
 
 - `GET /api/billing/providers`
 - `POST /api/billing/checkout/mercadopago`
-- `POST /api/billing/checkout/asaas`
+- `GET /api/billing/status/mercadopago?plan_id=...`
 - `GET /api/billing/status?checkout_ref=...`
 - `POST /api/billing/webhooks/mercadopago`
-- `POST /api/billing/webhooks/asaas`
 
-Payload de checkout:
+## Checkout
+
+O Mercado Pago usa um plano de assinatura (`preapproval_plan`) e devolve um
+`init_point` hospedado pelo próprio Mercado Pago.
+
+Exemplo:
 
 ```json
 {
-  "customer_ref": "orb-user-or-install-id",
-  "email": "cliente@example.com",
+  "customer_ref": "orb-user-id",
   "name": "Cliente",
   "plan": "monthly"
 }
 ```
 
-A resposta contém `checkoutUrl` para abrir no navegador e `checkoutRef` para consultar o estado.
+Quando as inscrições estiverem fechadas, a mesma chamada retorna HTTP 403.
 
-## Webhooks
+## Webhook
 
-Mercado Pago:
+URL:
 
-`https://SEU_BACKEND/api/billing/webhooks/mercadopago`
+```text
+https://SEU_BACKEND/api/billing/webhooks/mercadopago
+```
 
-Ative os tópicos de Assinaturas e Payments. Configure o secret em
+Ative os eventos de Planos e assinaturas e Pagamentos.
+
+A chave secreta gerada pelo Mercado Pago deve ser salva em
 `MERCADO_PAGO_WEBHOOK_SECRET`.
-
-Asaas:
-
-`https://SEU_BACKEND/api/billing/webhooks/asaas`
-
-Configure um `authToken` forte no Asaas e salve o mesmo valor em
-`ASAAS_WEBHOOK_TOKEN`. O servidor valida o header `asaas-access-token`.
-
-Eventos recomendados no Asaas:
-
-- `CHECKOUT_PAID`
-- `CHECKOUT_CANCELED`
-- `CHECKOUT_EXPIRED`
-- `SUBSCRIPTION_CREATED`
-- `PAYMENT_RECEIVED`
-- `PAYMENT_CONFIRMED`
-- `PAYMENT_OVERDUE`
-- `PAYMENT_REFUNDED`
-- `PAYMENT_DELETED`
 
 ## Persistência
 
-A implementação inicial usa SQLite para homologação. Em Render, a base precisa
-estar em disco persistente por meio de `ORB_BILLING_DB_PATH`; não use o
-filesystem efêmero como fonte definitiva de entitlements.
+O SQLite atual serve apenas como apoio de homologação. O status do Mercado Pago
+também pode ser recuperado pelo `providerPlanId`, sem depender do filesystem
+efêmero do Render.
 
-Antes de produção, a tabela de billing deve migrar para o banco permanente da
-conta Orb (Postgres/Supabase, por exemplo), e `customer_ref` deve vir de uma
-sessão autenticada do Orb em vez de ser aceito diretamente do cliente.
-
-## Pix
-
-- Asaas: o checkout recorrente desta primeira implementação usa cartão.
-  `billingType=PIX` em uma assinatura comum não é Pix Automático. O Pix
-  Automático exige o fluxo de autorização próprio do Asaas.
-- Mercado Pago: o checkout hospedado decide os meios disponíveis para a conta e
-  para a assinatura. A confirmação real sempre vem por webhook.
+Antes de abrir o Premium ao público, os entitlements devem ser associados a uma
+conta autenticada do Orb em armazenamento persistente.
