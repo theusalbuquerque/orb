@@ -233,6 +233,39 @@ def _premium(status: str) -> bool:
     return status == "active"
 
 
+def premium_entitled_for_account_hash(account_hash: str) -> bool:
+    """Server-side Premium entitlement lookup without exposing account email.
+
+    Automix receives only a SHA-256 account hash. Billing keeps the checkout
+    email locally; compare hashes here so the playback service never needs the
+    raw address and a modified client cannot grant itself Premium merely by
+    toggling a local flag.
+    """
+    wanted = account_hash.strip().lower()
+    if len(wanted) != 64:
+        return False
+    try:
+        with _db() as conn:
+            rows = conn.execute(
+                """
+                SELECT email
+                FROM billing_subscriptions
+                WHERE status='active'
+                """
+            ).fetchall()
+    except sqlite3.Error:
+        return False
+
+    for row in rows:
+        email = str(row["email"] or "").strip().lower()
+        if not email:
+            continue
+        digest = hashlib.sha256(email.encode("utf-8")).hexdigest()
+        if hmac.compare_digest(digest, wanted):
+            return True
+    return False
+
+
 @router.get("/providers")
 async def providers():
     return {
