@@ -162,6 +162,12 @@ enum class TransitionTier {
     /** Beat-quantized anchors and EQ handoffs are allowed; time-stretching is not. */
     DJ_ASSISTED,
 
-    /** The evidence is not strong enough to justify an Automix operation. Play through normally. */
+    /**
+     * Automix 2.0 legacy floor: evidence supports only its historical equal-power
+     * transition at the analyzed anchor. Kept so 2.0 remains behaviorally stable.
+     */
+    PLAIN_CROSSFADE,
+
+    /** Automix 2.5 floor: insufficient evidence means natural playback. */
     NO_TRANSITION,
 }
