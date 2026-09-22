@@ -1531,11 +1531,11 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                     style = None
 
                 minimum_beats = 8 if style == "DJ_BLEND" else 4
-                minimum_structure = 0.72 if style == "DJ_BLEND" else 0.66
+                minimum_structure = 0.55 if style == "DJ_BLEND" else 0.48
                 if (
                     style is not None
                     and actual_beats >= minimum_beats
-                    and span_fit >= 0.45
+                    and span_fit >= 0.35
                     and phrase_fit >= minimum_structure
                 ):
                     score = (
@@ -1638,8 +1638,8 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
             if (
                 overlap_vocal_clash < 0.62
                 and actual_beats >= 8
-                and span_fit >= 0.45
-                and phrase_fit >= 0.72
+                and span_fit >= 0.35
+                and phrase_fit >= 0.55
             ):
                 candidates.append(_candidate_plan(
                     "EQ_SWAP",
@@ -1696,7 +1696,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
             0.18 + 0.24 * phrase_need + 0.10 * b_open_activity +
             0.18 * phrase_fit + 0.08 * key_fit - 0.40 * long_intro_penalty
         )
-        if skipped <= 8.0 and phrase_fit >= 0.70 and phrase_score >= 0.34:
+        if skipped <= 8.0 and phrase_fit >= 0.52 and phrase_score >= 0.30:
             candidates.append(_candidate_plan(
                 "PHRASE_CUT", phrase_score, "server-phrase-handoff",
                 transitionStart=round(phrase_start, 4), transitionEnd=round(a_end, 4),
@@ -1735,7 +1735,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
             0.20 + (0.16 if protected else 0.06) +
             0.22 * cut_structure + 0.08 * b_open_vocal + 0.05 * b_open_activity
         )
-        if cut_structure >= 0.70:
+        if cut_structure >= 0.52:
             candidates.append(_candidate_plan(
                 "CUT", cut_score, "server-protected-handoff" if protected else "server-clean-handoff",
                 transitionStart=round(cut_start, 4), transitionEnd=round(a_end, 4),
@@ -1755,8 +1755,8 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     if a_end > 0.0:
         weak_evidence = 1.0 - _clamp(0.55 * conf + 0.45 * tempo, 0.0, 1.0)
         no_mix_score = (
-            0.34 + 0.28 * weak_evidence + 0.18 * (1.0 - key_fit) +
-            0.12 * vocal_clash + (0.10 if not key_evidence else 0.0)
+            0.22 + 0.30 * weak_evidence + 0.22 * (1.0 - key_fit) +
+            0.16 * vocal_clash + (0.12 if not key_evidence else 0.0)
         )
         candidates.append(_candidate_plan(
             "NO_TRANSITION", no_mix_score, "server-no-transition",
@@ -1782,8 +1782,28 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
         ), []
 
     candidates.sort(key=lambda x: x["score"], reverse=True)
-    best = candidates[0]
-    second = candidates[1]["score"] if len(candidates) > 1 else 0.0
+
+    style_floor = {
+        "DJ_BLEND": 0.46,
+        "DJ_FILTER": 0.42,
+        "EQ_SWAP": 0.45,
+        "PHRASE_CUT": 0.34,
+        "CUT": 0.34,
+    }
+    musical_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.get("style") != "NO_TRANSITION"
+        and candidate.get("score", 0.0) >= style_floor.get(candidate.get("style"), 1.0)
+    ]
+    if musical_candidates:
+        best = max(musical_candidates, key=lambda x: x["score"])
+    else:
+        best = max(candidates, key=lambda x: x["score"])
+    second = max(
+        (candidate["score"] for candidate in candidates if candidate is not best),
+        default=0.0,
+    )
     # Confidence describes confidence in the *choice among candidates*, not analysis quality alone.
     confidence = _clamp(0.48 + 0.36 * best["score"] + 0.28 * max(0.0, best["score"] - second), 0.0, 0.99)
     best = dict(best)
