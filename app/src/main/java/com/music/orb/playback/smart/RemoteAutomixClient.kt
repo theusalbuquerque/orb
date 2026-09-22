@@ -155,6 +155,7 @@ object RemoteAutomixClient {
                                 "rates=${plan.outgoingPlaybackRate}/${plan.incomingPlaybackRate} " +
                                 "handoff=${plan.handoffFraction} pair=${"%.2f".format(plan.pairCompatibility)} " +
                                 "phrase=${"%.2f".format(plan.phraseAlignment)} " +
+                                "keys=${plan.outgoingTransitionKey}->${plan.incomingTransitionKey} " +
                                 "anchors=${plan.outgoingAnchor}->${plan.incomingAnchor} " +
                                 "reason=${plan.reason}",
                         )
@@ -194,6 +195,8 @@ object RemoteAutomixClient {
                 requestedTransitionBeats = value.optInt("requestedTransitionBeats", 0).coerceAtLeast(0),
                 outgoingAnchor = value.optString("outgoingAnchor", ""),
                 incomingAnchor = value.optString("incomingAnchor", ""),
+                outgoingTransitionKey = value.optString("outgoingTransitionKey", ""),
+                incomingTransitionKey = value.optString("incomingTransitionKey", ""),
                 reason = "remote:$reason",
                 policyReasons = listOf("remote-authoritative"),
             )
@@ -274,6 +277,8 @@ object RemoteAutomixClient {
             requestedTransitionBeats = value.optInt("requestedTransitionBeats", 0).coerceAtLeast(0),
             outgoingAnchor = value.optString("outgoingAnchor", ""),
             incomingAnchor = value.optString("incomingAnchor", ""),
+            outgoingTransitionKey = value.optString("outgoingTransitionKey", ""),
+            incomingTransitionKey = value.optString("incomingTransitionKey", ""),
             policyReasons = listOf("remote-authoritative"),
             reason = "remote:$reason",
         )
