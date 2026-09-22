@@ -107,12 +107,6 @@ enum class TransitionStyle {
     /** Beat/key-aligned blend; may exchange the low end at the structural handoff. */
     DJ_BLEND,
 
-    /**
-     * Long, low-gain instrumental opening of B laid under A so B's first real
-     * impact lands at A's release/end. Deliberately not a long crossfade.
-     */
-    INTRO_BED,
-
     /** Beat-aware filtered bridge when the pair should not stay spectrally open. */
     DJ_FILTER,
 
@@ -1013,10 +1007,8 @@ fun planTransition(
 
     val nextLength = max(nextAnalysis.duration.orZero(), trackDurationSeconds(nextTrack))
 
-    // The previous phraseSwitch path was effectively the removed INTRO_BED:
-    // it searched B's pre-drop intro and laid that under A. Keep that recipe
-    // disabled for now. A Smart transition starts at a real musical cue and
-    // connects bars/phrases from there.
+    // The previous long-bed phraseSwitch path remains disabled. A Smart
+    // transition starts at a real musical cue and connects bars/phrases from there.
     val overlapPlan = adaptiveOverlap(analysis, nextAnalysis)
     val overlap = overlapPlan.overlap
     val transitionBeats = overlapPlan.transitionBeats
