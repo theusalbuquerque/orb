@@ -487,6 +487,29 @@ def _analyze(path: str, track_id: str, declared_duration: float) -> dict[str, An
     audible_start = float(times[active[0]]) if active.size else 0.0
     content_end = min(duration, float(times[active[-1]] + hop / SAMPLE_RATE)) if active.size else duration
 
+    # Local tempo matters more than a track-wide average at the join. Estimate the first and last
+    # ~30 seconds independently so an intro/outro tempo change does not poison compatibility.
+    def local_tempo(start_s: float, end_s: float) -> tuple[float, float]:
+        start_frame = max(0, int(math.floor(start_s / (beat_frame / SAMPLE_RATE))))
+        end_frame = min(onset.size, int(math.ceil(end_s / (beat_frame / SAMPLE_RATE))))
+        if end_frame - start_frame < 16:
+            return 0.0, 0.0
+        local_bpm, local_conf, _ = _beat_grid(
+            onset[start_frame:end_frame],
+            beat_frame / SAMPLE_RATE,
+        )
+        return local_bpm, local_conf
+
+    tempo_window = min(30.0, max(12.0, duration * 0.22))
+    head_bpm, head_beat_conf = local_tempo(
+        audible_start,
+        min(content_end, audible_start + tempo_window),
+    )
+    tail_bpm, tail_beat_conf = local_tempo(
+        max(audible_start, content_end - tempo_window),
+        content_end,
+    )
+
     # Structure anchors from sustained changes in the normalized energy envelope.
     intro_limit = min(len(energy), max(1, int(45.0 / (hop / SAMPLE_RATE))))
     intro_candidates = np.flatnonzero(energy[:intro_limit] >= 0.35)
@@ -519,6 +542,10 @@ def _analyze(path: str, track_id: str, declared_duration: float) -> dict[str, An
         "bpm": round(bpm, 5),
         "beatInterval": round(beat_interval, 6),
         "beatConfidence": round(beat_conf, 5),
+        "headBpm": round(head_bpm, 5),
+        "headBeatConfidence": round(head_beat_conf, 5),
+        "tailBpm": round(tail_bpm, 5),
+        "tailBeatConfidence": round(tail_beat_conf, 5),
         "downbeats": [round(float(x), 4) for x in downbeats[:1024]],
         "phraseBoundaries": [round(float(x), 4) for x in phrases[:256]],
         "firstBeat": round(first_beat, 4),
@@ -1020,9 +1047,22 @@ def _release_landmarks(track: dict[str, Any]) -> tuple[float, float, bool]:
     return candidate, end, protected
 
 
+def _transition_bpm(track: dict[str, Any], side: str) -> float:
+    if side == "outgoing":
+        local_bpm = _finite(track.get("tailBpm"))
+        local_conf = _clamp(_finite(track.get("tailBeatConfidence")), 0.0, 1.0)
+    else:
+        local_bpm = _finite(track.get("headBpm"))
+        local_conf = _clamp(_finite(track.get("headBeatConfidence")), 0.0, 1.0)
+
+    if 40.0 <= local_bpm <= 220.0 and local_conf >= 0.30:
+        return local_bpm
+    return _finite(track.get("bpm"))
+
+
 def _tempo_pair(a: dict[str, Any], b: dict[str, Any]) -> tuple[float, float, float]:
-    a_bpm = _finite(a.get("bpm"))
-    b_bpm = _finite(b.get("bpm"))
+    a_bpm = _transition_bpm(a, "outgoing")
+    b_bpm = _transition_bpm(b, "incoming")
     if not (40.0 <= a_bpm <= 220.0 and 40.0 <= b_bpm <= 220.0):
         return a_bpm, b_bpm, 0.0
     aligned = b_bpm
@@ -1032,7 +1072,6 @@ def _tempo_pair(a: dict[str, Any], b: dict[str, Any]) -> tuple[float, float, flo
         aligned *= 2.0
     compatibility = _clamp(1.0 - abs(aligned / a_bpm - 1.0) / 0.14, 0.0, 1.0)
     return a_bpm, aligned, compatibility
-
 
 _KEY_INDEX = {
     "C": 0, "C#": 1, "DB": 1, "D": 2, "D#": 3, "EB": 3,
@@ -1726,6 +1765,8 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     best["keyCompatibility"] = round(key_fit, 4)
     best["outgoingTransitionKey"] = str(a.get("tailKey") or a.get("key") or "")
     best["incomingTransitionKey"] = str(b.get("headKey") or b.get("key") or "")
+    best["outgoingTransitionBpm"] = round(a_bpm, 4)
+    best["incomingTransitionBpm"] = round(b_bpm, 4)
     best["tempoCompatibility"] = round(tempo, 4)
     best["planner"] = "orb-server-authoritative-v5"
     best["serverAuthoritative"] = True
