@@ -3,6 +3,8 @@ package com.music.orb.playback.smart
 import android.util.Log
 import com.music.orb.BuildConfig
 import com.music.orb.data.Http
+import com.music.orb.data.settings.AppSettings
+import com.music.orb.data.settings.AutomixVersion
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -70,9 +72,11 @@ object RemoteAutomixClient {
         outgoingTrack: TransitionTrackInfo,
         incomingTrack: TransitionTrackInfo,
     ): Decision {
-        // v6 is a staged preview. Public/prod builds must never hit the remote
-        // planner until the rollout gate is explicitly widened.
-        if (!BuildConfig.NEW_AUTOMIX_ENABLED) {
+        // Automix 2.5 is a separate entitlement. Automix 2.0 never calls this
+        // client and remains entirely local/stable.
+        if (AppSettings.automixVersion.value != AutomixVersion.V2_5 ||
+            !AppSettings.automix25Available.value
+        ) {
             return Decision(failed = true)
         }
         val key = signature(outgoing, incoming, outgoingTrack, incomingTrack)
@@ -119,7 +123,8 @@ object RemoteAutomixClient {
     ) {
         val payload = JSONObject()
             .put("version", API_VERSION)
-            .put("preview", BuildConfig.NEW_AUTOMIX_ENABLED)
+            .put("preview", true)
+            .put("accountHash", AppSettings.automix25AccountHash.value)
             .put("outgoing", analysisJson(outgoing, outgoingTrack))
             .put("incoming", analysisJson(incoming, incomingTrack))
             .toString()
