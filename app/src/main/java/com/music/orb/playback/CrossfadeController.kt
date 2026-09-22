@@ -14,6 +14,7 @@ import com.music.orb.data.settings.SmartAnalysis
 import com.music.orb.data.settings.TrackAnalysisState
 import com.music.orb.data.settings.TransitionWindow
 import com.music.orb.playback.smart.CrossfadeMode
+import com.music.orb.playback.smart.RemoteAutomixClient
 import com.music.orb.playback.smart.TrackAnalysis
 import com.music.orb.playback.smart.TransitionStyle
 import com.music.orb.playback.smart.TransitionTrackInfo
@@ -498,30 +499,90 @@ class CrossfadeController(
         requestAnalysis(currentItem, duration)
         requestAnalysis(nextItem, nextDuration)
 
-        // fadeSeconds is part of the shared planner signature, but SMART no
-        // longer degrades into manual Crossfade when evidence is weak. The
-        // planner either returns a real musical plan or NO_TRANSITION.
+        // Automix's server is the musical authority. Nothing here waits on
+        // network I/O: decisionFor() only reads/starts an async request. We
+        // request a plan once A has its full analysis and B has at least a
+        // stable entry analysis; while that request is in flight we simply
+        // keep playing A. If the server explicitly fails, the local planner is
+        // allowed to provide a transport-safe fallback -- never a Crossfade.
         val fallbackSeconds = DEFAULT_SMART_FALLBACK_SECONDS
-
-        // Resolved once and reused: [analysisFor] was being called five separate
-        // times per tick below, and the answer cannot change mid-tick.
         val currentAnalysis = analysisFor(currentItem)
         val nextAnalysis = analysisFor(nextItem)
         val analysisState = AppSettings.smartAnalysis.value
+        val currentTrack = currentItem.toTransitionInfo(duration)
+        val nextTrack = nextItem.toTransitionInfo(nextDuration)
+        val currentTimeSeconds = player.currentPosition / 1000.0
 
-        val plan = planTransition(
-            analysis = currentAnalysis,
-            nextAnalysis = nextAnalysis,
-            currentTrack = currentItem.toTransitionInfo(duration),
-            nextTrack = nextItem.toTransitionInfo(nextDuration),
-            currentTime = player.currentPosition / 1000.0,
-            duration = duration / 1000.0,
-            fadeSeconds = fallbackSeconds,
-            mode = CrossfadeMode.SMART,
+        val readyForRemote =
+            currentAnalysis.isUsable &&
+                nextAnalysis.isUsable &&
+                analysisState.current == TrackAnalysisState.ANALYSED &&
+                analysisState.next in MEASURED_ENOUGH_TO_ENTER_ON
+
+        if (!readyForRemote) {
+            AppSettings.smartTransitionWindow.value = null
+            val waiting = "remote-waiting-analysis|${analysisState.current}/${analysisState.next}"
+            if (waiting != lastPlanVerdict) {
+                lastPlanVerdict = waiting
+                Log.d(
+                    TAG,
+                    "plan ${currentItem.mediaId}->${nextItem.mediaId}: $waiting",
+                )
+            }
+            return
+        }
+
+        val remote = RemoteAutomixClient.decisionFor(
+            outgoing = currentAnalysis,
+            incoming = nextAnalysis,
+            outgoingTrack = currentTrack,
+            incomingTrack = nextTrack,
         )
+
+        if (remote.pending) {
+            AppSettings.smartTransitionWindow.value = null
+            val waiting = "remote-plan-pending"
+            if (waiting != lastPlanVerdict) {
+                lastPlanVerdict = waiting
+                Log.d(
+                    TAG,
+                    "plan ${currentItem.mediaId}->${nextItem.mediaId}: $waiting " +
+                        "bpm=${currentAnalysis.bpm}/${nextAnalysis.bpm} " +
+                        "key=${currentAnalysis.key}/${nextAnalysis.key}",
+                )
+            }
+            return
+        }
+
+        val planSource: String
+        val rawPlan = remote.plan ?: run {
+            planSource = "local-fallback"
+            planTransition(
+                analysis = currentAnalysis,
+                nextAnalysis = nextAnalysis,
+                currentTrack = currentTrack,
+                nextTrack = nextTrack,
+                currentTime = currentTimeSeconds,
+                duration = duration / 1000.0,
+                fadeSeconds = fallbackSeconds,
+                mode = CrossfadeMode.SMART,
+            )
+        }
+        if (remote.plan != null) planSource = "remote"
+
+        // Remote plans are pair-level recipes and do not know the live
+        // playhead. The controller owns the start predicate; every other
+        // musical choice remains the server's.
+        val plan = if (planSource == "remote") {
+            rawPlan.copy(
+                shouldStart = !rawPlan.blocked && currentTimeSeconds >= rawPlan.transitionStart,
+            )
+        } else {
+            rawPlan
+        }
         // One line per distinct verdict rather than one per 250ms tick, so the
         // log says what the planner decided for this pair without burying it.
-        val verdict = "${plan.reason}|${plan.transitionStyle}|fade=${plan.fadeMs}" +
+        val verdict = "$planSource|${plan.reason}|${plan.transitionStyle}|fade=${plan.fadeMs}" +
             "|cue=${plan.incomingCueTime}|rates=${plan.outgoingPlaybackRate}/${plan.incomingPlaybackRate}" +
             "|vocalOverlap=${"%.2f".format(plan.vocalOverlap)}" +
             "|blocked=${plan.blocked}|policy=${plan.policyReasons.joinToString(",")}"
@@ -1087,22 +1148,15 @@ class CrossfadeController(
             TransitionStyle.DJ_FILTER -> rideFilterSweep(progress)
             TransitionStyle.DJ_BLEND ->
                 if (render.bassSwap) rideBassSwap(progress) else rideVocalSeparation(progress)
-            // GAPLESS is an album being played through, where any filtering would
-            // be an edit the record didn't ask for — so it stays open whatever
-            // the material does.
+            TransitionStyle.EQ_SWAP -> rideBassSwap(progress)
+            // Phrase/cut plans are intentionally short structural transfers.
+            // Adding a sweep would turn a clean boundary into a miniature blend.
+            TransitionStyle.PHRASE_CUT,
+            TransitionStyle.CUT,
             TransitionStyle.GAPLESS -> filters.open()
-            // EQUAL_POWER used to be defined the same way: the bottom tier,
-            // reached because the evidence was too weak to justify anything more
-            // opinionated, therefore don't touch the spectrum.
-            //
-            // That conflated two different kinds of evidence. The tier is decided
-            // by tempo and beat confidence; whether both tracks are singing is
-            // measured by a separate model that doesn't depend on either. A pair
-            // can have useless tempo evidence — dropping it to this tier — and a
-            // perfectly good vocal mask on both sides saying they collide. Every
-            // one of those transitions was rendered as a plain crossfade with two
-            // full vocals over each other, because the weak half of the evidence
-            // was silencing the strong half.
+            // EQUAL_POWER belongs to manual Crossfade. Its Render has no vocal
+            // overlap metadata, so this is normally open and preserves the old
+            // manual behaviour exactly.
             TransitionStyle.EQUAL_POWER -> rideVocalSeparation(progress)
         }
     }
@@ -1316,6 +1370,9 @@ class CrossfadeController(
     private fun isRealMix(): Boolean = smartFadeActive && (
         render.style == TransitionStyle.DJ_BLEND ||
             render.style == TransitionStyle.DJ_FILTER ||
+            render.style == TransitionStyle.EQ_SWAP ||
+            render.style == TransitionStyle.PHRASE_CUT ||
+            render.style == TransitionStyle.CUT ||
             incomingCueTimeMs > 0L ||
             outgoingPlaybackRate != 1.0 ||
             incomingPlaybackRate != 1.0
@@ -1375,18 +1432,26 @@ class CrossfadeController(
         }
 
         val handoff = when (render.style) {
-            TransitionStyle.DJ_BLEND ->
+            TransitionStyle.DJ_BLEND,
+            TransitionStyle.EQ_SWAP ->
                 render.bassSwapFraction.toFloat().coerceIn(AUTOMIX_HANDOFF_MIN, AUTOMIX_HANDOFF_MAX)
             TransitionStyle.DJ_FILTER -> AUTOMIX_FILTER_HANDOFF
+            TransitionStyle.PHRASE_CUT -> AUTOMIX_PHRASE_CUT_HANDOFF
+            TransitionStyle.CUT -> AUTOMIX_CUT_HANDOFF
             else -> 0.5f
         }
         val entryAngle = when (render.style) {
             // B is audible and rhythmically established, but A still owns the
             // foreground until the bass/phrase handoff.
-            TransitionStyle.DJ_BLEND -> AUTOMIX_BLEND_ENTRY_ANGLE
+            TransitionStyle.DJ_BLEND,
+            TransitionStyle.EQ_SWAP -> AUTOMIX_BLEND_ENTRY_ANGLE
             // A filtered bridge wants an even quieter pre-handoff B; the filter
             // itself creates the lane, then the gain takeover follows.
             TransitionStyle.DJ_FILTER -> AUTOMIX_FILTER_ENTRY_ANGLE
+            // Structural cuts do not build a bed. The tiny non-zero phrase
+            // value is only enough to make a phrase boundary click-safe.
+            TransitionStyle.PHRASE_CUT -> AUTOMIX_PHRASE_CUT_ENTRY_ANGLE
+            TransitionStyle.CUT -> 0f
             else -> 0f
         }
 
@@ -1430,12 +1495,17 @@ class CrossfadeController(
         /** Filtered bridges hand over a little earlier than beat/key blends. */
         const val AUTOMIX_FILTER_HANDOFF = 0.52f
 
+        /** Short structural transfers: decisive, not mini-crossfades. */
+        const val AUTOMIX_PHRASE_CUT_HANDOFF = 0.38f
+        const val AUTOMIX_CUT_HANDOFF = 0.46f
+
         /**
          * Angles on the constant-power circle at the pre-handoff plateau.
          * sin(0.245) ~= 0.24 (-12.3 dB); sin(0.18) ~= 0.18 (-14.9 dB).
          */
         const val AUTOMIX_BLEND_ENTRY_ANGLE = 0.245f
         const val AUTOMIX_FILTER_ENTRY_ANGLE = 0.18f
+        const val AUTOMIX_PHRASE_CUT_ENTRY_ANGLE = 0.06f
 
         /** Ramp used when a fade is interrupted. */
         const val BAIL_MS = 120L
