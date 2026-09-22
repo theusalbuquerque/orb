@@ -260,6 +260,26 @@ class AutomixPlannerTest(unittest.TestCase):
         self.assertAlmostEqual(float(pair["releaseFraction"]), 0.5, delta=0.10)
         self.assertGreaterEqual(float(pair["phraseAlignment"]), 0.78)
 
+    def test_good_energy_without_structural_anchors_never_becomes_dj_overlap(self) -> None:
+        a = track(bpm=128.0, key="C major", vocal=0.10)
+        b = track(bpm=129.0, key="A minor", vocal=0.10)
+
+        # Remove every trustworthy bar/phrase anchor while leaving tempo, key,
+        # vocal and energy otherwise ideal.
+        a["downbeats"] = []
+        a["phraseBoundaries"] = []
+        a["mixOutCandidates"] = []
+        b["downbeats"] = []
+        b["phraseBoundaries"] = []
+        b["mixInCandidates"] = []
+
+        best, candidates = automix._remote_plan(a, b)
+        overlap_styles = {"DJ_BLEND", "DJ_FILTER", "EQ_SWAP"}
+
+        self.assertNotIn(best["style"], overlap_styles)
+        self.assertFalse(any(c["style"] in overlap_styles for c in candidates))
+
+
     def test_compatible_clean_pair_can_choose_real_dj_mix(self) -> None:
         a = track(bpm=128.0, key="C major", vocal=0.10)
         b = track(bpm=130.0, key="A minor", vocal=0.10)
