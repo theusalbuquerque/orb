@@ -71,12 +71,10 @@ object AppSettings {
     val crossfadeSeconds = MutableStateFlow(0)
 
     /**
-     * Lets Automix's analyzer decide the transition's timing and length
-     * from each track's tempo, energy and structure, replacing the fixed
-     * [crossfadeSeconds] window rather than needing it set to anything first
-     * — [crossfadeSeconds] only matters here as a fallback while a pair is
-     * still being analysed. Off by default: analysis costs a background
-     * decode per track.
+     * Lets Automix choose a musical operation from key, tempo, beat/phrase,
+     * energy and vocal evidence. This is independent from [crossfadeSeconds]:
+     * missing or weak evidence means natural playback, not a hidden Crossfade.
+     * Off by default because analysis costs background work per track.
      *
      * See [com.music.orb.playback.smart.TransitionPlanner].
      */
@@ -228,15 +226,9 @@ object AppSettings {
     val audioSessionId = MutableStateFlow(0)
 
     /**
-     * True only while a Automix transition that is actually *mixing* is
-     * audible — one that beat-matched, cued the incoming track into its
-     * arrangement, or rode a filter.
-     *
-     * Deliberately not "a crossfade is running". The fallback case, where
-     * neither track was analysed in time and the incoming one starts from 0:00
-     * under a plain equal-power fade, is exactly what this must stay dark for:
-     * the whole point is that seeing it means the analysis landed and did
-     * something a plain crossfade could not.
+     * True only while an Automix operation is audible: beat/key bridge, EQ
+     * swap, filtered bridge or structural cut. Manual Crossfade never sets it,
+     * and NO_TRANSITION deliberately leaves it dark.
      */
     val smartMixInProgress = MutableStateFlow(false)
 
@@ -251,9 +243,9 @@ object AppSettings {
      * Where on the *playing* track the next transition is planned to happen, as
      * fractions of its duration, or null when there is nothing worth drawing.
      *
-     * Only published once both tracks are measured. Before that the planner is
-     * still working from a fallback window that moves as evidence arrives, and
-     * a marker that slides around the bar would be worse than no marker.
+     * Only published once both tracks are measured and a real plan exists.
+     * While analysis/server planning is pending, or when NO_TRANSITION wins,
+     * there is intentionally no marker.
      */
     val smartTransitionWindow = MutableStateFlow<TransitionWindow?>(null)
 
