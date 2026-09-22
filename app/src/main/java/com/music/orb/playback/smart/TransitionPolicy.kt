@@ -3,13 +3,14 @@
  *
  * Copyright (C) 2026 SFG545 (original Orchard implementation)
  * Copyright (C) 2026 Kushagra Singh (BitChord adaptation)
+ * Copyright (C) 2026 THEUS (Orb Music adaptation)
  *
  * Orchard's original source is licensed under the GNU Affero General Public
  * License, version 3 or later. Per AGPLv3 section 13, this file is combined
  * here into BitChord -- a work licensed under the GNU General Public
  * License, version 3 or later -- and remains itself governed by the AGPLv3
  * as part of that combination.
- *
+ *a
  * This program is distributed in the hope that it will be useful, but
  * WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero
@@ -48,8 +49,8 @@ import kotlin.math.min
 const val MIN_BEATMATCH_CONFIDENCE = 0.55
 
 /**
- * Below this on both tracks, even DJ-assisted timing is not trustworthy.
- * Automix then declines to mix instead of disguising uncertainty as a crossfade.
+ * Below this on both tracks, even the DJ-assisted crossfade (beat-quantized
+ * anchors, EQ handoff) is off the table and the mix degrades to a plain fade.
  */
 const val MIN_DJ_CONFIDENCE = 0.2
 
@@ -57,14 +58,8 @@ const val MIN_DJ_CONFIDENCE = 0.2
 const val MIN_BPM = 40.0
 const val MAX_BPM = 220.0
 
-/**
- * Maximum total tempo distance for a beatmatched pair.
- *
- * The renderer now splits the correction across both decks around a meeting
- * tempo, so an 8% pair distance costs roughly 4% per side rather than forcing
- * the whole correction onto B.
- */
-const val MAX_STRETCH_DEVIATION = 0.08
+/** How far a tempo pairing may drift from unity and still be considered transparent to stretch. */
+const val MAX_STRETCH_DEVIATION = 0.04
 
 /**
  * A vocal-activity mask value at or above this counts as singing. A fallback
@@ -78,7 +73,16 @@ const val VOCAL_ACTIVE_THRESHOLD = 0.6
  * ending before its content does. A transition is allowed to leave a short
  * tail unplayed; it is not allowed to cut the song short.
  */
-const val MAX_DISCARDED_MUSIC_SECONDS = 12.0
+const val MAX_DISCARDED_MUSIC_SECONDS = 15.0
+
+/**
+ * Minimum structural, mostly-instrumental tail that may be treated as a bed
+ * instead of as content the listener must hear alone. This does NOT relax
+ * [MAX_DISCARDED_MUSIC_SECONDS]: a passive outro stays audible while B enters.
+ */
+private const val PASSIVE_OUTRO_MIN_SECONDS = 14.0
+private const val PASSIVE_OUTRO_MAX_VOCAL = 0.30
+private const val PASSIVE_OUTRO_MAX_LATE_ENERGY_RATIO = 0.90
 
 /**
  * Fraction of a track's own loud-end reference below which a sample counts as
@@ -152,15 +156,64 @@ fun vocalActivityBetween(analysis: TrackAnalysis, start: Double, end: Double): D
 }
 
 /**
+ * Perceptual musical activity over [start]..[end], normalized to the track's
+ * own loudness range. 0 means a sparse/quiet passage and 1 means a dense
+ * foreground passage. Vocals add weight only when a real vocal mask exists;
+ * instrumental drops/choruses can still score high from energy alone.
+ *
+ * This is deliberately scale-invariant: local and remote analyzers are free to
+ * use different absolute energy scales, while Automix still gets the same
+ * answer about whether a cut would land inside a busy section.
+ */
+fun musicalActivityBetween(analysis: TrackAnalysis, start: Double, end: Double): Double? {
+    val curve = analysis.energyCurve
+    if (curve.isEmpty() || end <= start) return null
+
+    val referenceValues = curve.asSequence()
+        .map { it.energy }
+        .filter { it.isFinite() && it >= 0.0 }
+        .sorted()
+        .toList()
+    if (referenceValues.isEmpty()) return null
+    val reference = referenceValues[
+        floor((referenceValues.size - 1) * 0.90).toInt().coerceIn(0, referenceValues.lastIndex)
+    ]
+    if (reference <= 1e-9) return 0.0
+
+    var sum = 0.0
+    var peak = 0.0
+    var count = 0
+    for (point in curve) {
+        if (!point.time.isFinite() || point.time < start || point.time > end) continue
+        if (!point.energy.isFinite()) continue
+        val normalized = (point.energy.coerceAtLeast(0.0) / reference).coerceIn(0.0, 1.0)
+        sum += normalized
+        peak = max(peak, normalized)
+        count += 1
+    }
+    if (count == 0) return null
+
+    val energyActivity = (0.68 * (sum / count) + 0.32 * peak).coerceIn(0.0, 1.0)
+    val vocal = vocalActivityBetween(analysis, start, end)
+    if (vocal == null) return energyActivity
+
+    // A loud instrumental passage is already busy. A vocal over that same
+    // passage raises the danger further, which is the chorus case we most want
+    // the planner to protect from an early cut.
+    val vocalBoost = 0.28 * vocal.coerceIn(0.0, 1.0) * (0.55 + 0.45 * energyActivity)
+    return (0.82 * energyActivity + vocalBoost).coerceIn(0.0, 1.0)
+}
+
+/**
  * Both windows measurably singing at once. Null means "no evidence", which
  * never blocks; absence of a mask is not absence of a vocal, but acting on it
  * would punish every track a fallback analyzer handled.
  */
 fun isVocalClash(outgoingActivity: Double?, incomingActivity: Double?): Boolean =
     outgoingActivity != null &&
-        incomingActivity != null &&
-        outgoingActivity >= VOCAL_ACTIVE_THRESHOLD &&
-        incomingActivity >= VOCAL_ACTIVE_THRESHOLD
+            incomingActivity != null &&
+            outgoingActivity >= VOCAL_ACTIVE_THRESHOLD &&
+            incomingActivity >= VOCAL_ACTIVE_THRESHOLD
 
 /**
  * How strongly two windows sing over each other: 0 for nothing worth acting on,
@@ -280,6 +333,94 @@ fun audibleSecondsBetween(analysis: TrackAnalysis, start: Double, end: Double): 
 }
 
 /**
+ * A structural outro that is safe to use as a long transition bed.
+ *
+ * The important distinction from [RankedMixCandidate.discardedMusicSeconds] is
+ * that this material is never discarded: the outgoing player keeps rendering
+ * it while the incoming song fades up. We therefore require stronger evidence
+ * than the ordinary mix-out ranking: a real outro boundary, a usable vocal
+ * mask, a mostly-instrumental tail, and energy that trends downward.
+ */
+internal data class PassiveOutroWindow(
+    val start: Double,
+    val end: Double,
+    val vocalActivity: Double,
+    /** Late-third energy divided by early-third energy; lower means a stronger fade. */
+    val lateEnergyRatio: Double,
+) {
+    val duration: Double get() = (end - start).coerceAtLeast(0.0)
+}
+
+internal fun passiveOutroWindow(
+    analysis: TrackAnalysis,
+    contentEnd: Double,
+): PassiveOutroWindow? {
+    val end = contentEnd.takeIf { it.isFinite() && it > 0.0 } ?: return null
+    val curve = analysis.energyCurve
+    val mask = analysis.vocalActivityMask
+    if (curve.size < 6 || mask.size != curve.size) return null
+
+    // The analyzer's structural marker is the safety rail: a quiet bridge or a
+    // mid-song instrumental break must never become a 40-second early exit.
+    val structuralStart = sequence {
+        analysis.outroStartTime.takeIf { it.isFinite() && it > 0.0 }?.let { yield(it) }
+        analysis.mixOutCandidates
+            .asSequence()
+            .filter { it.type == "outro_start" && it.time.isFinite() && it.time > 0.0 }
+            .map { it.time }
+            .forEach { yield(it) }
+    }.minOrNull()?.takeIf { it < end - 1.0 } ?: return null
+
+    // Do not begin the bed until the last clearly-active vocal inside the outro
+    // has finished. This lets an outro marker precede a final lyric without
+    // causing B to arrive underneath it.
+    val tailIndices = curve.indices.filter { index ->
+        val time = curve[index].time
+        time.isFinite() && time >= structuralStart && time <= end
+    }
+    if (tailIndices.size < 4) return null
+    val lastActiveVocal = tailIndices
+        .lastOrNull { mask[it].isFinite() && mask[it] >= VOCAL_ACTIVE_THRESHOLD }
+        ?.let { curve[it].time }
+    val sampleSeconds = tailIndices
+        .zipWithNext()
+        .mapNotNull { (a, b) ->
+            val delta = curve[b].time - curve[a].time
+            delta.takeIf { it.isFinite() && it > 0.0 }
+        }
+        .average()
+        .takeIf { it.isFinite() && it > 0.0 } ?: 0.0
+    val start = max(structuralStart, (lastActiveVocal ?: structuralStart) + sampleSeconds)
+    if (end - start < PASSIVE_OUTRO_MIN_SECONDS) return null
+
+    val vocal = vocalActivityBetween(analysis, start, end) ?: return null
+    if (vocal > PASSIVE_OUTRO_MAX_VOCAL) return null
+
+    val points = curve.filter {
+        it.time.isFinite() && it.energy.isFinite() && it.energy >= 0.0 && it.time >= start && it.time <= end
+    }
+    if (points.size < 6) return null
+    val third = max(2, points.size / 3)
+    val early = points.take(third).map { it.energy }.average()
+    val late = points.takeLast(third).map { it.energy }.average()
+    if (!early.isFinite() || early <= 0.0 || !late.isFinite()) return null
+    val lateRatio = late / early
+    if (lateRatio > PASSIVE_OUTRO_MAX_LATE_ENERGY_RATIO) return null
+
+    // A tail that is technically quiet but almost entirely below the audible
+    // floor is not useful as a bed; it is just trailing silence.
+    val audible = audibleSecondsBetween(analysis, start, end) ?: return null
+    if (audible < min(PASSIVE_OUTRO_MIN_SECONDS, (end - start) * 0.45)) return null
+
+    return PassiveOutroWindow(
+        start = start,
+        end = end,
+        vocalActivity = vocal,
+        lateEnergyRatio = lateRatio,
+    )
+}
+
+/**
  * The earliest point the analysis claims the track makes sound.
  *
  * [TrackAnalysis.firstBeat] is not nullable the way the other two are, and
@@ -393,13 +534,35 @@ fun rankMixOutCandidates(
     return mixOutCandidatesOf(analysis, end)
         .map { candidate ->
             val measured = audibleSecondsBetween(analysis, candidate.time, end)
+            val beat = analysis.beatInterval.orZero().takeIf { it > 0.0 }
+                ?: analysis.bpm.orZero().takeIf { it > 0.0 }?.let { 60.0 / it }
+                ?: 0.5
+            val activity = if (candidate.type == "content_end") {
+                null
+            } else {
+                musicalActivityBetween(
+                    analysis,
+                    max(0.0, candidate.time - beat * 2.0),
+                    min(end, candidate.time + beat * 2.0),
+                )
+            }
+            val activityPenalty = when {
+                activity == null -> 0.0
+                activity >= 0.82 -> 1.20
+                activity >= 0.70 -> 0.85
+                activity >= 0.58 -> 0.48
+                activity >= 0.48 -> 0.20
+                else -> 0.0
+            }
             // With no energy curve there is no way to tell skipped music from skipped silence, so
-            // the raw gap is charged in full and the budget errs toward playing the track.
+            // the raw gap is charged in full and the budget errs toward playing the track. A
+            // measured chorus/drop also pays an explicit activity penalty: a confident structural
+            // marker is not permission to cut through foreground music.
             RankedMixCandidate(
                 time = candidate.time,
                 score = candidate.score,
                 type = candidate.type,
-                rankScore = candidate.score + (MIX_OUT_TYPE_SCORE[candidate.type] ?: 0.0),
+                rankScore = candidate.score + (MIX_OUT_TYPE_SCORE[candidate.type] ?: 0.0) - activityPenalty,
                 discardedMusicSeconds = measured ?: max(0.0, end - candidate.time),
                 measured = measured != null,
             )
@@ -447,12 +610,12 @@ fun assessTransitionTier(
     if (outgoingBpm < MIN_BPM || outgoingBpm > MAX_BPM) reasons += "outgoing-tempo"
     if (incomingBpm < MIN_BPM || incomingBpm > MAX_BPM) reasons += "incoming-tempo"
     if (reasons.isNotEmpty()) {
-        return TransitionPolicyVerdict(TransitionTier.NO_TRANSITION, reasons, floorConfidence)
+        return TransitionPolicyVerdict(TransitionTier.PLAIN_CROSSFADE, reasons, floorConfidence)
     }
 
     if (outgoingConfidence < MIN_DJ_CONFIDENCE && incomingConfidence < MIN_DJ_CONFIDENCE) {
         return TransitionPolicyVerdict(
-            TransitionTier.NO_TRANSITION,
+            TransitionTier.PLAIN_CROSSFADE,
             listOf("beat-confidence"),
             floorConfidence,
         )
