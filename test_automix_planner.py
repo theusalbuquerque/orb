@@ -55,6 +55,65 @@ def track(
 
 
 class AutomixPlannerTest(unittest.TestCase):
+    def test_client_model_evidence_overrides_cached_transition_windows(self) -> None:
+        cached = track(bpm=128.0, key="C major", vocal=0.10, duration=10.0)
+        cached["downbeats"] = [0.0, 2.0, 4.0, 6.0, 8.0]
+        cached["beatConfidence"] = 0.45
+        cached["vocalActivityMask"] = [0.10 for _ in cached["energyCurve"]]
+
+        client = dict(cached)
+        client["beatConfidence"] = 0.90
+        client["downbeats"] = [1.0, 3.0, 7.0, 9.0]
+        client["vocalActivityMask"] = [
+            0.90,
+            0.85,
+            0.50,
+            0.50,
+            0.50,
+            0.50,
+            0.50,
+            0.50,
+            0.75,
+            0.80,
+            0.82,
+        ]
+
+        merged = automix._merge_plan_evidence(cached, client)
+
+        self.assertEqual(merged["downbeats"], [1.0, 3.0, 7.0, 9.0])
+        self.assertEqual(merged["beatEvidence"], "client-model")
+        self.assertEqual(merged["vocalEvidence"], "client-model-window")
+        # Model evidence replaces head/tail.
+        self.assertAlmostEqual(merged["vocalActivityMask"][0], 0.90)
+        self.assertAlmostEqual(merged["vocalActivityMask"][-1], 0.82)
+        # Neutral model placeholders do not erase the server's full-track evidence.
+        self.assertAlmostEqual(merged["vocalActivityMask"][5], 0.10)
+
+    def test_provisional_client_evidence_never_erases_cached_structure(self) -> None:
+        cached = track(bpm=128.0, key="C major", vocal=0.20, duration=10.0)
+        original_downbeats = list(cached["downbeats"])
+        original_mask = list(cached["vocalActivityMask"])
+        client = {
+            "trackId": "same",
+            "duration": 10.0,
+            "bpm": 128.0,
+            "beatConfidence": 0.30,
+            "downbeats": [],
+            "energyCurve": [],
+            "vocalActivityMask": [],
+            "phraseBoundaries": [],
+            "mixInCandidates": [],
+            "mixOutCandidates": [],
+        }
+
+        merged = automix._merge_plan_evidence(cached, client)
+
+        self.assertEqual(merged["downbeats"], original_downbeats)
+        self.assertEqual(merged["vocalActivityMask"], original_mask)
+        self.assertTrue(merged["phraseBoundaries"])
+        self.assertTrue(merged["energyCurve"])
+
+
     def test_downbeat_phase_follows_recurring_accents(self) -> None:
         hop = 0.10
         beats = [i * 0.50 for i in range(24)]
