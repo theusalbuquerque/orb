@@ -1,6 +1,7 @@
 package com.music.orb.playback.smart
 
 import android.util.Log
+import com.music.orb.BuildConfig
 import com.music.orb.data.Http
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
@@ -31,7 +32,7 @@ import kotlin.math.roundToInt
  */
 object RemoteAutomixClient {
     private const val TAG = "OrbRemoteAutomix"
-    private const val ENDPOINT = "https://orb-4mrh.onrender.com/api/automix/plan"
+    private val ENDPOINT = BuildConfig.MODULE_INDEX_URL.trimEnd('/') + "/api/automix/plan"
     private const val API_VERSION = 5
     private const val CACHE_TTL_MS = 30L * 60L * 1000L
     private const val MAX_CACHE_ENTRIES = 96
