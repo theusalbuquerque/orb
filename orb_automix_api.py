@@ -472,29 +472,6 @@ def _audible_start(track: dict[str, Any]) -> float:
     return 0.0
 
 
-def _bed_cue_start(track: dict[str, Any]) -> float:
-    """Earliest safe cue for a quiet instrumental bed, independent from audibleStartTime.
-
-    A thresholded audible-start estimate is not a track-start estimate. Very soft pads/filtered
-    drums can remain below that threshold for tens of seconds and are often exactly the material
-    we want underneath A. Prefer the real 0:00 head whenever its first few seconds are low-vocal
-    and not aggressively dense; otherwise fall back to the measured audible start, capped to the
-    first eight seconds so a long intro can never be amputated just to satisfy a detector.
-    """
-    end = _content_end(track)
-    if end <= 0.0:
-        return 0.0
-    head_end = min(end, 8.0)
-    vocal = _vocal_curve(track)
-    energy = _curve(track, "energyCurve")
-    default_vocal = _clamp(_finite(track.get("vocalProbability")), 0.0, 1.0)
-    head_vocal = _mean_window(vocal, 0.0, head_end, default_vocal)
-    head_activity = _mean_window(energy, 0.0, head_end, 0.0)
-    if head_vocal <= 0.30 and head_activity <= 0.82:
-        return 0.0
-    return min(max(0.0, _audible_start(track)), 8.0)
-
-
 def _max_window_mean(
     points: list[tuple[float, float]],
     start: float,
@@ -774,41 +751,47 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     vocal_clash = min(a_tail_vocal, b_open_vocal)
     candidates: list[dict[str, Any]] = []
 
-    # 1) Beat/key bridge. Bars, tempo and harmonic fit decide whether the pair can stay open.
-    # Volume is rendering detail; it is not the reason this transition exists.
+    # 1) Beat/key bridge. A filter is not permission to mix incompatible songs:
+    # both DJ families need a trustworthy rhythmic relationship, and a flat
+    # blend additionally needs harmonic compatibility. When those gates fail,
+    # CUT/PHRASE_CUT/NO_TRANSITION remain the honest choices.
     if a_end > 0.0 and 40.0 <= a_bpm <= 220.0 and 40.0 <= b_bpm <= 220.0:
-        harmonic_open = key_fit >= 0.58
-        style = (
-            "DJ_BLEND"
-            if tempo >= 0.62 and conf >= 0.35 and harmonic_open and vocal_clash < 0.58
-            else "DJ_FILTER"
-        )
-        beat = 60.0 / a_bpm
-        beats = 16.0 if style == "DJ_BLEND" and key_fit >= 0.72 else 8.0
-        span = _clamp(beats * beat, 4.0, 12.0)
-        start = max(0.0, max(a_release, a_end - span))
-        score = (
-            0.24 + 0.24 * tempo + 0.15 * conf + 0.20 * key_fit +
-            0.12 * (1.0 - vocal_clash)
-        )
-        if protected and style == "DJ_BLEND":
-            score -= 0.16
-        candidates.append(_candidate_plan(
-            style, score, "server-beat-key-bridge" if style == "DJ_BLEND" else "server-filtered-bridge",
-            transitionStart=round(start, 4), transitionEnd=round(a_end, 4),
-            incomingCueTime=round(max(b_start, _finite(b.get("mixInTime"), b_start)), 4),
-            incomingHandoffTime=round(max(b_start, _finite(b.get("mixInTime"), b_start)), 4),
-            outgoingPlaybackRate=round(bridge_out_rate, 5),
-            incomingPlaybackRate=round(bridge_in_rate, 5),
-            transitionBeats=int(beats),
-            handoffFraction=0.66 if style == "DJ_BLEND" else 0.52,
-            bassSwap=bool(_low_curve(a) and _low_curve(b)),
-            bassSwapFraction=0.66,
-            filterSweep=0.0 if style == "DJ_BLEND" else 0.72,
-            keyCompatibility=round(key_fit, 4),
-            tempoCompatibility=round(tempo, 4),
-            gainEnvelope=[],
-        ))
+        blend_ok = tempo >= 0.62 and conf >= 0.35 and key_fit >= 0.58 and vocal_clash < 0.58
+        filter_ok = tempo >= 0.35 and conf >= 0.28 and key_fit >= 0.35
+
+        style: str | None = None
+        if blend_ok:
+            style = "DJ_BLEND"
+        elif filter_ok:
+            style = "DJ_FILTER"
+
+        if style is not None:
+            beat = 60.0 / a_bpm
+            beats = 16.0 if style == "DJ_BLEND" and key_fit >= 0.72 else 8.0
+            span = _clamp(beats * beat, 4.0, 12.0)
+            start = max(0.0, max(a_release, a_end - span))
+            score = (
+                0.24 + 0.24 * tempo + 0.15 * conf + 0.20 * key_fit +
+                0.12 * (1.0 - vocal_clash)
+            )
+            if protected and style == "DJ_BLEND":
+                score -= 0.16
+            candidates.append(_candidate_plan(
+                style, score, "server-beat-key-bridge" if style == "DJ_BLEND" else "server-filtered-bridge",
+                transitionStart=round(start, 4), transitionEnd=round(a_end, 4),
+                incomingCueTime=round(max(b_start, _finite(b.get("mixInTime"), b_start)), 4),
+                incomingHandoffTime=round(max(b_start, _finite(b.get("mixInTime"), b_start)), 4),
+                outgoingPlaybackRate=round(bridge_out_rate, 5),
+                incomingPlaybackRate=round(bridge_in_rate, 5),
+                transitionBeats=int(beats),
+                handoffFraction=0.66 if style == "DJ_BLEND" else 0.52,
+                bassSwap=bool(_low_curve(a) and _low_curve(b)),
+                bassSwapFraction=0.66,
+                filterSweep=0.0 if style == "DJ_BLEND" else 0.72,
+                keyCompatibility=round(key_fit, 4),
+                tempoCompatibility=round(tempo, 4),
+                gainEnvelope=[],
+            ))
 
     # 2) EQ swap is a separate candidate, not a synonym for blend. It earns a place only when
     # both low-band curves exist and the shared grid is trustworthy enough to exchange the bass.
