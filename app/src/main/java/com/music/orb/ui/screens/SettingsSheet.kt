@@ -90,6 +90,7 @@ import com.music.orb.data.model.Account
 import com.music.orb.BuildConfig
 import com.music.orb.R
 import com.music.orb.data.settings.AppSettings
+import com.music.orb.data.settings.AutomixVersion
 import com.music.orb.data.sources.SourceKind
 import com.music.orb.data.sources.SourceRegistry
 import com.music.orb.data.settings.AudioQuality
@@ -117,6 +118,8 @@ fun SettingsScreen(
     val metered by AppSettings.meteredConnection.collectAsStateWithLifecycle()
     val crossfade by AppSettings.crossfadeSeconds.collectAsStateWithLifecycle()
     val smartFade by AppSettings.smartFadeEnabled.collectAsStateWithLifecycle()
+    val automixVersion by AppSettings.automixVersion.collectAsStateWithLifecycle()
+    val automix25Available by AppSettings.automix25Available.collectAsStateWithLifecycle()
     val skipSilence by AppSettings.skipSilence.collectAsStateWithLifecycle()
     val spatialAudio by AppSettings.spatialAudio.collectAsStateWithLifecycle()
     val atmosSupported by DolbyAtmos.supported.collectAsStateWithLifecycle()
@@ -273,7 +276,10 @@ fun SettingsScreen(
                 icon = Icons.Rounded.AutoAwesome,
                 title = stringResource(R.string.settings_automix),
                 subtitle = if (smartFade) {
-                    stringResource(R.string.settings_automix_subtitle_on)
+                    stringResource(
+                        R.string.settings_automix_subtitle_on_version,
+                        if (automixVersion == AutomixVersion.V2_5) "2.5" else "2.0",
+                    )
                 } else {
                     stringResource(R.string.settings_automix_subtitle_off)
                 },
@@ -289,6 +295,31 @@ fun SettingsScreen(
                 },
                 onClick = { AppSettings.setSmartFadeEnabled(!smartFade) },
             )
+            if (automix25Available) {
+                RowDivider()
+                SettingsRow(
+                    icon = Icons.Rounded.Tune,
+                    title = stringResource(R.string.settings_automix_version),
+                    subtitle = stringResource(R.string.settings_automix_25_premium_preview),
+                )
+                SegmentedControl(
+                    options = listOf(
+                        stringResource(R.string.settings_automix_20),
+                        stringResource(R.string.settings_automix_25),
+                    ),
+                    selectedIndex = if (automixVersion == AutomixVersion.V2_5) 1 else 0,
+                    onSelect = { index ->
+                        AppSettings.setAutomixVersion(
+                            if (index == 1) AutomixVersion.V2_5 else AutomixVersion.V2_0,
+                        )
+                    },
+                    modifier = Modifier.padding(
+                        start = ROW_INSET,
+                        end = ROW_INSET,
+                        bottom = 14.dp,
+                    ),
+                )
+            }
             RowDivider()
             SettingsRow(
                 icon = Icons.AutoMirrored.Rounded.VolumeOff,
