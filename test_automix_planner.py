@@ -199,6 +199,34 @@ class AutomixPlannerTest(unittest.TestCase):
         self.assertTrue(merged["energyCurve"])
 
 
+    def test_curve_alignment_fine_tunes_incoming_beat_phase(self) -> None:
+        a = track(bpm=120.0, key="C major", vocal=0.10)
+        b = track(bpm=120.0, key="A minor", vocal=0.10)
+        a["beats"] = [i * 0.5 for i in range(241)]
+        b["beats"] = [i * 0.5 for i in range(241)]
+
+        # Structural detection is intentionally 200 ms late. The fine pass must
+        # stay inside the same local musical neighbourhood and move B back onto
+        # the actual beat rather than accepting that audible flam.
+        refined = automix._refine_curve_aligned_cue(
+            a,
+            b,
+            10.0,
+            18.0,
+            0.20,
+            0.0,
+            120.0,
+            120.0,
+            120.0,
+            1.0,
+            1.0,
+        )
+
+        self.assertAlmostEqual(float(refined["cue"]), 0.0, delta=0.04)
+        self.assertLess(float(refined["shiftMs"]), -150.0)
+        self.assertGreater(float(refined["beatPhaseFit"]), 0.95)
+        self.assertLess(abs(float(refined["shiftMs"])), 410.0)
+
     def test_curve_metrics_reward_harmonic_and_transient_alignment(self) -> None:
         a = add_curve_analysis(track(bpm=128.0, key="C major"), pitch_class=0)
         b = add_curve_analysis(track(bpm=128.0, key="C major"), pitch_class=0)
