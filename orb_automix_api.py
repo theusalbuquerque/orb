@@ -800,6 +800,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     a_bpm, b_bpm, tempo = _tempo_pair(a, b)
     conf = min(_clamp(_finite(a.get("beatConfidence")), 0.0, 1.0), _clamp(_finite(b.get("beatConfidence")), 0.0, 1.0))
     key_fit = _key_compatibility(a, b)
+    key_evidence = _trusted_key(a) is not None and _trusted_key(b) is not None
     bridge_out_rate, bridge_in_rate = _tempo_bridge_rates(a_bpm, b_bpm)
     tempo_distance = abs(b_bpm / a_bpm - 1.0) if a_bpm > 0.0 and b_bpm > 0.0 else 1.0
     tempo_bridge_ok = tempo_distance <= 0.08
@@ -811,8 +812,8 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     # blend additionally needs harmonic compatibility. When those gates fail,
     # CUT/PHRASE_CUT/NO_TRANSITION remain the honest choices.
     if a_end > 0.0 and 40.0 <= a_bpm <= 220.0 and 40.0 <= b_bpm <= 220.0:
-        blend_ok = tempo_bridge_ok and tempo >= 0.62 and conf >= 0.35 and key_fit >= 0.58 and vocal_clash < 0.58
-        filter_ok = tempo_bridge_ok and tempo >= 0.35 and conf >= 0.28 and key_fit >= 0.35
+        blend_ok = key_evidence and tempo_bridge_ok and tempo >= 0.62 and conf >= 0.35 and key_fit >= 0.58 and vocal_clash < 0.58
+        filter_ok = key_evidence and tempo_bridge_ok and tempo >= 0.35 and conf >= 0.28 and key_fit >= 0.35
 
         style = None
         if blend_ok:
@@ -867,7 +868,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
 
     # 2) EQ swap is a separate candidate, not a synonym for blend. It earns a place only when
     # both low-band curves exist and the shared grid is trustworthy enough to exchange the bass.
-    if a_end > 0.0 and tempo_bridge_ok and tempo >= 0.68 and conf >= 0.38 and key_fit >= 0.58 and _low_curve(a) and _low_curve(b):
+    if a_end > 0.0 and key_evidence and tempo_bridge_ok and tempo >= 0.68 and conf >= 0.38 and key_fit >= 0.58 and _low_curve(a) and _low_curve(b):
         beat = 60.0 / a_bpm if a_bpm > 0 else 0.5
         span = _clamp(16.0 * beat, 5.0, 14.0)
         desired_start = max(0.0, max(a_release, a_end - span))
@@ -982,7 +983,10 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     # conflict or a vocal collision can make natural playback better than an artificial blend.
     if a_end > 0.0:
         weak_evidence = 1.0 - _clamp(0.55 * conf + 0.45 * tempo, 0.0, 1.0)
-        no_mix_score = 0.34 + 0.28 * weak_evidence + 0.18 * (1.0 - key_fit) + 0.12 * vocal_clash
+        no_mix_score = (
+            0.34 + 0.28 * weak_evidence + 0.18 * (1.0 - key_fit) +
+            0.12 * vocal_clash + (0.10 if not key_evidence else 0.0)
+        )
         candidates.append(_candidate_plan(
             "NO_TRANSITION", no_mix_score, "server-no-transition",
             transitionStart=round(a_end, 4), transitionEnd=round(a_end, 4),
