@@ -16,14 +16,15 @@ from pydantic import BaseModel, Field, field_validator
 router = APIRouter(prefix="/api/billing", tags=["billing"])
 
 MP_API = "https://api.mercadopago.com"
-ASAAS_API = os.getenv("ASAAS_API_BASE_URL", "https://api.asaas.com/v3").rstrip("/")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://orb-4mrh.onrender.com").rstrip("/")
 REQUEST_TIMEOUT = httpx.Timeout(25.0, connect=10.0)
 
 MP_ACCESS_TOKEN = os.getenv("MERCADO_PAGO_ACCESS_TOKEN", "").strip()
 MP_WEBHOOK_SECRET = os.getenv("MERCADO_PAGO_WEBHOOK_SECRET", "").strip()
-ASAAS_API_KEY = os.getenv("ASAAS_API_KEY", "").strip()
-ASAAS_WEBHOOK_TOKEN = os.getenv("ASAAS_WEBHOOK_TOKEN", "").strip()
+PREMIUM_SIGNUPS_ENABLED = os.getenv(
+    "ORB_PREMIUM_SIGNUPS_ENABLED",
+    "false",
+).strip().lower() in {"1", "true", "yes", "on"}
 
 DB_PATH = os.getenv("ORB_BILLING_DB_PATH", "orb_billing.sqlite3").strip()
 
@@ -382,11 +383,9 @@ async def _mercado_pago_status_by_plan_id(plan_id: str) -> dict[str, Any] | None
 @router.get("/providers")
 async def providers():
     return {
-        "mercadoPago": {"configured": bool(MP_ACCESS_TOKEN)},
-        "asaas": {
-            "configured": bool(ASAAS_API_KEY),
-            "pixAutomatic": False,
-            "note": "Pix Automático requires a separate Asaas authorization flow.",
+        "mercadoPago": {
+            "configured": bool(MP_ACCESS_TOKEN),
+            "signupsEnabled": PREMIUM_SIGNUPS_ENABLED,
         },
         "plans": {
             "monthlyConfigured": bool(os.getenv("ORB_PREMIUM_MONTHLY_PRICE", "").strip()),
@@ -397,6 +396,11 @@ async def providers():
 
 @router.post("/checkout/mercadopago")
 async def create_mercado_pago_checkout(body: CheckoutRequest):
+    if not PREMIUM_SIGNUPS_ENABLED:
+        raise HTTPException(
+            status_code=403,
+            detail="Orb Premium subscriptions are not open yet",
+        )
     if not MP_ACCESS_TOKEN:
         raise HTTPException(status_code=503, detail="Mercado Pago is not configured")
 
@@ -460,86 +464,6 @@ async def create_mercado_pago_checkout(body: CheckoutRequest):
         "status": "pending",
         "checkoutMode": "subscription_plan",
     }
-
-@router.post("/checkout/asaas")
-async def create_asaas_checkout(body: CheckoutRequest):
-    if not ASAAS_API_KEY:
-        raise HTTPException(status_code=503, detail="Asaas is not configured")
-    if not body.email:
-        raise HTTPException(status_code=422, detail="email is required for Asaas checkout")
-
-    amount = _price(body.plan)
-    checkout_ref = str(uuid.uuid4())
-    payload: dict[str, Any] = {
-        "billingTypes": ["CREDIT_CARD"],
-        "chargeTypes": ["RECURRENT"],
-        "minutesToExpire": 60,
-        "externalReference": checkout_ref,
-        "callback": {
-            "successUrl": f"{PUBLIC_BASE_URL}/api/billing/return/asaas?result=success",
-            "cancelUrl": f"{PUBLIC_BASE_URL}/api/billing/return/asaas?result=cancel",
-            "expiredUrl": f"{PUBLIC_BASE_URL}/api/billing/return/asaas?result=expired",
-        },
-        "items": [
-            {
-                "name": "Orb Premium",
-                "description": "Assinatura Orb Premium",
-                "quantity": 1,
-                "value": amount,
-            }
-        ],
-        "customerData": {
-            "name": body.name or str(body.email).split("@", 1)[0],
-            "email": str(body.email),
-        },
-        "subscription": {
-            "cycle": "MONTHLY" if body.plan == "monthly" else "YEARLY",
-            "nextDueDate": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        },
-    }
-
-    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-        response = await client.post(
-            f"{ASAAS_API}/checkouts",
-            headers={
-                "access_token": ASAAS_API_KEY,
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            json=payload,
-        )
-
-    if response.status_code >= 400:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Asaas checkout failed: {response.text[:800]}",
-        )
-
-    data = response.json()
-    checkout_id = str(data.get("id") or "")
-    if not checkout_id:
-        raise HTTPException(status_code=502, detail="Asaas returned an invalid checkout")
-
-    checkout_url = f"https://asaas.com/checkoutSession/show?id={checkout_id}"
-    _save_checkout(
-        checkout_ref=checkout_ref,
-        customer_ref=body.customer_ref,
-        provider="asaas",
-        provider_subscription_id=None,
-        checkout_id=checkout_id,
-        email=str(body.email),
-        plan=body.plan,
-        amount=amount,
-        status="pending",
-        checkout_url=checkout_url,
-    )
-    return {
-        "checkoutRef": checkout_ref,
-        "provider": "asaas",
-        "checkoutUrl": checkout_url,
-        "status": "pending",
-    }
-
 
 @router.get("/status/mercadopago")
 async def mercado_pago_plan_status(
@@ -697,72 +621,6 @@ async def mercado_pago_webhook(request: Request):
                 }.get(payment_status)
                 if checkout_ref and mapped:
                     _update_by_checkout_ref(checkout_ref, status=mapped)
-
-    return {"ok": True}
-
-
-@router.post("/webhooks/asaas")
-async def asaas_webhook(
-    request: Request,
-    asaas_access_token: str | None = Header(default=None, alias="asaas-access-token"),
-):
-    if not ASAAS_WEBHOOK_TOKEN:
-        raise HTTPException(status_code=503, detail="Asaas webhook token is not configured")
-    if not asaas_access_token or not hmac.compare_digest(asaas_access_token, ASAAS_WEBHOOK_TOKEN):
-        raise HTTPException(status_code=401, detail="Invalid Asaas webhook token")
-
-    body = await request.json()
-    event = str(body.get("event") or "")
-    event_id = str(body.get("id") or "")
-    if event_id and not _event_once("asaas", event_id):
-        return {"ok": True, "duplicate": True}
-
-    checkout = body.get("checkout") or {}
-    subscription = body.get("subscription") or {}
-    payment = body.get("payment") or {}
-
-    checkout_id = str(checkout.get("id") or "")
-    checkout_ref = str(
-        checkout.get("externalReference")
-        or subscription.get("externalReference")
-        or payment.get("externalReference")
-        or ""
-    )
-    subscription_id = str(
-        subscription.get("id")
-        or payment.get("subscription")
-        or ""
-    )
-
-    if event == "CHECKOUT_PAID" and checkout_id:
-        _update_by_checkout_id("asaas", checkout_id, status="active")
-    elif event in {"CHECKOUT_CANCELED", "CHECKOUT_EXPIRED"} and checkout_id:
-        _update_by_checkout_id("asaas", checkout_id, status="canceled")
-    elif event == "SUBSCRIPTION_CREATED":
-        if checkout_ref:
-            _update_by_checkout_ref(
-                checkout_ref,
-                provider_subscription_id=subscription_id or None,
-            )
-    elif event in {"PAYMENT_RECEIVED", "PAYMENT_CONFIRMED"}:
-        if subscription_id:
-            _update_by_provider_id("asaas", subscription_id, status="active")
-        elif checkout_ref:
-            _update_by_checkout_ref(checkout_ref, status="active")
-    elif event in {
-        "PAYMENT_OVERDUE",
-        "PAYMENT_REPROVED_BY_RISK_ANALYSIS",
-    }:
-        if subscription_id:
-            _update_by_provider_id("asaas", subscription_id, status="past_due")
-    elif event in {
-        "PAYMENT_REFUNDED",
-        "PAYMENT_CHARGEBACK_REQUESTED",
-        "PAYMENT_CHARGEBACK_DISPUTE",
-        "PAYMENT_DELETED",
-    }:
-        if subscription_id:
-            _update_by_provider_id("asaas", subscription_id, status="inactive")
 
     return {"ok": True}
 
