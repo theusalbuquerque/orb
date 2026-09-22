@@ -37,6 +37,7 @@ _analysis_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
 class PlanRequest(BaseModel):
     version: int = API_VERSION
+    preview: bool = False
     outgoing: dict[str, Any]
     incoming: dict[str, Any]
 
@@ -1788,6 +1789,8 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
 async def plan(request: PlanRequest) -> dict[str, Any]:
     if request.version > API_VERSION:
         raise HTTPException(status_code=409, detail="unsupported Automix protocol version")
+    if not request.preview:
+        raise HTTPException(status_code=403, detail="Automix v6 preview is not enabled for this client")
     outgoing = _plan_track(request.outgoing)
     incoming = _plan_track(request.incoming)
     plan_result, candidates = _remote_plan(outgoing, incoming)
