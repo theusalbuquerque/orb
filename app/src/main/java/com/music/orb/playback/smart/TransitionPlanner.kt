@@ -240,9 +240,18 @@ private fun harmonicallyCompatible(left: String, right: String): Boolean {
     val (rightIndex, rightMode) = splitKey(right)
     if (leftIndex == null || rightIndex == null) return false
     val distance = min((leftIndex - rightIndex + 12) % 12, (rightIndex - leftIndex + 12) % 12)
-    if (leftMode != null && rightMode != null && leftMode != rightMode) return distance <= 1
-    // A fifth is as close as a second here: it is the move every DJ makes.
-    return distance <= 2 || distance == 5
+
+    // Harmonic-mixing relationships, not geometric closeness on a piano:
+    // - same tonic + same mode
+    // - relative major/minor (three semitones)
+    // - fourth/fifth with the same mode (five semitones in the folded distance)
+    // A semitone apart is physically close but harmonically one of the worst
+    // places to leave two full arrangements open.
+    return if (leftMode != null && rightMode != null && leftMode != rightMode) {
+        distance == 3
+    } else {
+        distance == 0 || distance == 5
+    }
 }
 
 /** A key the analyzer was not confident about is no key at all. */
