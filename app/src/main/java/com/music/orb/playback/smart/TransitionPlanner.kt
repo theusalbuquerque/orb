@@ -1098,6 +1098,7 @@ fun planTransition(
         pickupSeconds = pickupSeconds,
         transitionBeats = transitionBeats,
         bassSwap = sameBeatBlend || hasBassContent,
+        handoffFraction = 0.66,
         transitionStyle = TransitionStyle.DJ_BLEND,
         // The local fallback is intentionally incapable of inventing a filtered
         // overlap. DJ_FILTER remains a server decision where key/tempo/structure
