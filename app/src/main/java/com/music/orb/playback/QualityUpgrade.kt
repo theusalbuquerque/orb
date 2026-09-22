@@ -449,6 +449,16 @@ object QualityUpgrade {
         }
     }
 
+    fun rearmAfterHandoff(mediaId: String) {
+        asked.remove(mediaId)
+        refused.remove(mediaId)
+    }
+
+    fun settlePreparedQueueTrack(mediaId: String) {
+        pending.remove(mediaId)?.inFlight?.cancel()
+        NerdStats.onLosslessRaceEnd(mediaId)
+    }
+
     /** Abandons the second look for [mediaId] — the queue has moved on. */
     fun forget(mediaId: String) {
         pending.remove(mediaId)?.inFlight?.cancel()

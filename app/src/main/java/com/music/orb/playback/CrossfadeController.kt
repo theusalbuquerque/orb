@@ -17,6 +17,7 @@ import com.music.orb.data.settings.TrackAnalysisState
 import com.music.orb.data.settings.TransitionWindow
 import com.music.orb.playback.smart.CrossfadeMode
 import com.music.orb.playback.smart.RemoteAutomixClient
+import com.music.orb.playback.smart.PreparedTransitionStems
 import com.music.orb.playback.smart.TrackAnalysis
 import com.music.orb.playback.smart.TransitionGainPoint
 import com.music.orb.playback.smart.TransitionTempoPoint
@@ -143,6 +144,10 @@ class CrossfadeController(
      * equal-power blend this class ran before.
      */
     private val filters: TransitionFilters = TransitionFilters.None,
+    private val requestIncomingStems: (MediaItem, startMs: Long, endMs: Long) -> Unit = { _, _, _ -> },
+    private val stemsFor: (MediaItem, positionMs: Long) -> PreparedTransitionStems? = { _, _ -> null },
+    private val stemDeck: () -> TransitionStemDeck? = { null },
+    private val incomingAudioReadyFor: (MediaItem) -> Boolean = { true },
     /**
      * Whether a decode and inference for a media item is running right now.
      * Only feeds the stats line — nothing about a transition waits on it.
@@ -394,6 +399,10 @@ class CrossfadeController(
         }
     }
 
+    fun onPlayersRebuilt() {
+        if (phase == Phase.IDLE) listenTo(active())
+    }
+
     fun release() {
         listeningTo?.removeListener(listener)
         listeningTo = null
@@ -541,6 +550,7 @@ class CrossfadeController(
         if (nextIndex == C.INDEX_UNSET) return
         val nextItem = player.getMediaItemAt(nextIndex)
         val nextDuration = nextItemDurationMs(nextIndex, nextItem)
+        if (!incomingAudioReadyFor(nextItem)) return
 
         // Authored album playback remains untouched even if AutoPlay already
         // populated a recommendation tail below it.

@@ -85,6 +85,16 @@ object PlaybackTracker {
      * watched time is flushed before it is dropped, so a track skipped at the
      * two-minute mark is reported as two minutes rather than lost.
      */
+    fun onTrackChanged(
+        positionSeconds: Long,
+        nextVideoId: String?,
+        nextPositionSeconds: Long,
+        previousEnded: Boolean,
+    ) {
+        onTrackChanged(positionSeconds)
+        if (!nextVideoId.isNullOrBlank()) onPlaying(nextVideoId)
+    }
+
     fun onTrackChanged(positionSeconds: Long) {
         val closing = session ?: return
         session = null

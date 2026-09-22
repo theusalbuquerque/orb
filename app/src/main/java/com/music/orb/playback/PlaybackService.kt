@@ -5429,6 +5429,7 @@ class PlaybackService : MediaSessionService() {
         const val AUTOPLAY_PREVIEW_ANALYSIS_LOOKAHEAD = 8
         const val AUTOPLAY_PREVIEW_BUDGET_MS = 7_000L
         const val AUTOPLAY_PREVIEW_POLL_MS = 250L
+        const val ACTION_OPEN_NOW_PLAYING = "com.music.orb.action.OPEN_NOW_PLAYING"
 
         private const val REMOTE_AUTOMIX_PROBE_RETRY_MS = 120_000L
         /**
