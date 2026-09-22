@@ -30,13 +30,15 @@ DB_PATH = os.getenv("ORB_BILLING_DB_PATH", "orb_billing.sqlite3").strip()
 
 class CheckoutRequest(BaseModel):
     customer_ref: str = Field(min_length=8, max_length=200)
-    email: str = Field(min_length=5, max_length=254)
+    email: str | None = Field(default=None, min_length=5, max_length=254)
     name: str | None = Field(default=None, max_length=200)
     plan: Literal["monthly", "yearly"]
 
     @field_validator("email")
     @classmethod
-    def validate_email(cls, value: str) -> str:
+    def validate_email(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         email = value.strip()
         if "@" not in email or email.startswith("@") or email.endswith("@"):
             raise ValueError("invalid email")
@@ -193,15 +195,23 @@ def _update_by_provider_id(
         conn.commit()
 
 
-def _update_by_checkout_id(provider: str, checkout_id: str, *, status: str) -> None:
+def _update_by_checkout_id(
+    provider: str,
+    checkout_id: str,
+    *,
+    status: str,
+    provider_subscription_id: str | None = None,
+) -> None:
     with _db() as conn:
         conn.execute(
             """
             UPDATE billing_subscriptions
-            SET status=?, updated_at=?
+            SET status=?,
+                provider_subscription_id=COALESCE(?, provider_subscription_id),
+                updated_at=?
             WHERE provider=? AND checkout_id=?
             """,
-            (status, _now(), provider, checkout_id),
+            (status, provider_subscription_id, _now(), provider, checkout_id),
         )
         conn.commit()
 
@@ -263,17 +273,15 @@ async def create_mercado_pago_checkout(body: CheckoutRequest):
         "currency_id": "BRL",
     }
     payload = {
-        "reason": "Orb Premium",
+        "reason": "Orb Premium Mensal" if body.plan == "monthly" else "Orb Premium Anual",
         "external_reference": checkout_ref,
-        "payer_email": str(body.email),
         "auto_recurring": recurring,
         "back_url": f"{PUBLIC_BASE_URL}/api/billing/return/mercadopago",
-        "status": "pending",
     }
 
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
         response = await client.post(
-            f"{MP_API}/preapproval",
+            f"{MP_API}/preapproval_plan",
             headers={
                 "Authorization": f"Bearer {MP_ACCESS_TOKEN}",
                 "Content-Type": "application/json",
@@ -284,39 +292,44 @@ async def create_mercado_pago_checkout(body: CheckoutRequest):
     if response.status_code >= 400:
         raise HTTPException(
             status_code=502,
-            detail=f"Mercado Pago checkout failed: {response.text[:800]}",
+            detail=f"Mercado Pago plan checkout failed: {response.text[:800]}",
         )
 
     data = response.json()
-    provider_id = str(data.get("id") or "")
+    plan_id = str(data.get("id") or "")
     checkout_url = data.get("init_point")
-    if not provider_id or not checkout_url:
-        raise HTTPException(status_code=502, detail="Mercado Pago returned an invalid checkout")
+    if not plan_id or not checkout_url:
+        raise HTTPException(
+            status_code=502,
+            detail="Mercado Pago returned an invalid plan checkout",
+        )
 
     _save_checkout(
         checkout_ref=checkout_ref,
         customer_ref=body.customer_ref,
         provider="mercadopago",
-        provider_subscription_id=provider_id,
-        checkout_id=None,
-        email=str(body.email),
+        provider_subscription_id=None,
+        checkout_id=plan_id,
+        email=body.email or "",
         plan=body.plan,
         amount=amount,
-        status=_normalize_mp_status(data.get("status")),
+        status="pending",
         checkout_url=checkout_url,
     )
     return {
         "checkoutRef": checkout_ref,
         "provider": "mercadopago",
         "checkoutUrl": checkout_url,
-        "status": _normalize_mp_status(data.get("status")),
+        "status": "pending",
+        "checkoutMode": "subscription_plan",
     }
-
 
 @router.post("/checkout/asaas")
 async def create_asaas_checkout(body: CheckoutRequest):
     if not ASAAS_API_KEY:
         raise HTTPException(status_code=503, detail="Asaas is not configured")
+    if not body.email:
+        raise HTTPException(status_code=422, detail="email is required for Asaas checkout")
 
     amount = _price(body.plan)
     checkout_ref = str(uuid.uuid4())
@@ -477,12 +490,33 @@ async def mercado_pago_webhook(request: Request):
             )
             if response.status_code < 400:
                 sub = response.json()
+                subscription_id = str(sub.get("id") or data_id)
+                plan_id = str(sub.get("preapproval_plan_id") or "")
                 checkout_ref = str(sub.get("external_reference") or "")
+                status = _normalize_mp_status(sub.get("status"))
+
+                if not checkout_ref and plan_id:
+                    plan_response = await client.get(
+                        f"{MP_API}/preapproval_plan/{plan_id}",
+                        headers={"Authorization": f"Bearer {MP_ACCESS_TOKEN}"},
+                    )
+                    if plan_response.status_code < 400:
+                        checkout_ref = str(
+                            (plan_response.json() or {}).get("external_reference") or ""
+                        )
+
                 if checkout_ref:
                     _update_by_checkout_ref(
                         checkout_ref,
-                        status=_normalize_mp_status(sub.get("status")),
-                        provider_subscription_id=str(sub.get("id") or data_id),
+                        status=status,
+                        provider_subscription_id=subscription_id,
+                    )
+                elif plan_id:
+                    _update_by_checkout_id(
+                        "mercadopago",
+                        plan_id,
+                        status=status,
+                        provider_subscription_id=subscription_id,
                     )
         elif event_type == "payment":
             response = await client.get(
