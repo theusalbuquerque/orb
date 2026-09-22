@@ -113,10 +113,8 @@ class CrossfadeController(
     private val onHandoff: (outgoing: ExoPlayer, incoming: ExoPlayer) -> Unit,
     /**
      * Stored Automix analysis for a media item, or an empty [TrackAnalysis]
-     * when there is none yet. This is the seam Phase 1's DSP analyzer plugs
-     * into: until analysis finishes, a track reads as "no evidence", which
-     * [planTransition] answers with the same fixed-length crossfade this
-     * class always ran before Automix existed.
+     * when there is none yet. Analysis is gathered ahead of the boundary;
+     * Automix does not manufacture a Crossfade while evidence is missing.
      */
     private val analysisFor: (MediaItem) -> TrackAnalysis = { TrackAnalysis() },
     /**
@@ -554,21 +552,18 @@ class CrossfadeController(
             return
         }
 
-        val planSource: String
-        val rawPlan = remote.plan ?: run {
-            planSource = "local-fallback"
-            planTransition(
-                analysis = currentAnalysis,
-                nextAnalysis = nextAnalysis,
-                currentTrack = currentTrack,
-                nextTrack = nextTrack,
-                currentTime = currentTimeSeconds,
-                duration = duration / 1000.0,
-                fadeSeconds = fallbackSeconds,
-                mode = CrossfadeMode.SMART,
-            )
-        }
-        if (remote.plan != null) planSource = "remote"
+        val remotePlan = remote.plan
+        val planSource = if (remotePlan != null) "remote" else "local-fallback"
+        val rawPlan = remotePlan ?: planTransition(
+            analysis = currentAnalysis,
+            nextAnalysis = nextAnalysis,
+            currentTrack = currentTrack,
+            nextTrack = nextTrack,
+            currentTime = currentTimeSeconds,
+            duration = duration / 1000.0,
+            fadeSeconds = fallbackSeconds,
+            mode = CrossfadeMode.SMART,
+        )
 
         // Remote plans are pair-level recipes and do not know the live
         // playhead. The controller owns the start predicate; every other
