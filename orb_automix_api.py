@@ -2275,13 +2275,26 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
             pair_fit = float(pair["pairScore"])
             actual_beats = int(round(float(pair["actualBeats"])))
             release_fraction = float(pair["releaseFraction"])
+            eq_curve_fit = float(pair.get("curveCompatibility", 0.5))
+            eq_curve_evidence = bool(pair.get("curveEvidence", False))
+            eq_onset_fit = float(pair.get("onsetCurveFit", 0.5))
+            eq_harmonic_fit = float(pair.get("harmonicCurveFit", 0.5))
+            eq_spectral_fit = float(pair.get("spectralCurveFit", 0.5))
+            eq_phase_fit = float(pair.get("beatPhaseFit", 0.5))
+            eq_phase_error_ms = float(pair.get("beatPhaseErrorMs", 0.0))
+            eq_local_tempo = float(pair.get("localTempoFit", tempo))
+            eq_out_rate = float(pair.get("outgoingRate", bridge_out_rate))
+            eq_in_rate = float(pair.get("incomingRate", bridge_in_rate))
+            eq_low_collision = float(pair.get("lowBandCollision", 0.0))
 
             eq_score = (
-                0.17 + 0.19 * tempo + 0.11 * conf + 0.17 * key_fit
-                + 0.11 * (1.0 - overlap_vocal_clash)
-                + 0.08 * phrase_fit
-                + 0.06 * energy_fit
-                + 0.11 * pair_fit
+                0.13 + 0.13 * eq_local_tempo + 0.08 * conf + 0.13 * key_fit
+                + 0.10 * (1.0 - overlap_vocal_clash)
+                + 0.07 * phrase_fit
+                + 0.05 * energy_fit
+                + 0.10 * pair_fit
+                + 0.08 * eq_phase_fit
+                + (0.13 * eq_curve_fit if eq_curve_evidence else 0.0)
             )
             if protected:
                 eq_score -= 0.16
@@ -2291,6 +2304,9 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                 and actual_beats >= 8
                 and span_fit >= 0.35
                 and phrase_fit >= 0.55
+                and (not eq_curve_evidence or eq_harmonic_fit >= 0.42)
+                and (not eq_curve_evidence or eq_onset_fit >= 0.30 or eq_phase_fit >= 0.55)
+                and eq_low_collision <= 0.82
             ):
                 candidates.append(_candidate_plan(
                     "EQ_SWAP",
@@ -2300,8 +2316,8 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                     transitionEnd=round(a_end, 4),
                     incomingCueTime=round(cue, 4),
                     incomingHandoffTime=round(cue, 4),
-                    outgoingPlaybackRate=round(bridge_out_rate, 5),
-                    incomingPlaybackRate=round(bridge_in_rate, 5),
+                    outgoingPlaybackRate=round(eq_out_rate, 5),
+                    incomingPlaybackRate=round(eq_in_rate, 5),
                     transitionBeats=actual_beats,
                     requestedTransitionBeats=16,
                     handoffFraction=round(_clamp(release_fraction, 0.50, 0.90), 4),
@@ -2315,6 +2331,15 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                     spanCompatibility=round(span_fit, 4),
                     outgoingAnchor=str(pair["outgoingAnchor"]),
                     incomingAnchor=str(pair["incomingAnchor"]),
+                    curveCompatibility=round(eq_curve_fit, 4),
+                    onsetCurveFit=round(eq_onset_fit, 4),
+                    harmonicCurveFit=round(eq_harmonic_fit, 4),
+                    spectralCurveFit=round(eq_spectral_fit, 4),
+                    beatPhaseFit=round(eq_phase_fit, 4),
+                    beatPhaseErrorMs=round(eq_phase_error_ms, 2),
+                    localTempoCompatibility=round(eq_local_tempo, 4),
+                    outgoingLocalBpm=round(float(pair.get("outgoingBpm", a_bpm)), 4),
+                    incomingLocalBpm=round(float(pair.get("incomingBpm", b_bpm)), 4),
                     gainEnvelope=[],
                 ))
 
