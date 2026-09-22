@@ -187,7 +187,7 @@ object RemoteAutomixClient {
                 phraseAlignment = value.finiteDouble("phraseAlignment", 0.0),
                 pairCompatibility = value.finiteDouble("pairCompatibility", 0.0),
                 energyCompatibility = value.finiteDouble("energyCompatibility", 0.0),
-                overlapVocalClash = value.finiteDouble("overlapVocalClash", 0.0),
+                overlapVocalClash = overlapVocalClash,
                 spanCompatibility = value.finiteDouble("spanCompatibility", 0.0),
                 requestedTransitionBeats = value.optInt("requestedTransitionBeats", 0).coerceAtLeast(0),
                 outgoingAnchor = value.optString("outgoingAnchor", ""),
@@ -240,6 +240,9 @@ object RemoteAutomixClient {
         val filterSweep = value.finiteDouble("filterSweep", 0.0)
             .coerceIn(0.0, 1.0)
         val transitionBeats = value.optInt("transitionBeats", 0).coerceAtLeast(0)
+        val overlapVocalClash = value
+            .finiteDouble("overlapVocalClash", value.finiteDouble("vocalOverlap", 0.0))
+            .coerceIn(0.0, 1.0)
 
         return TransitionPlan(
             markerVisible = true,
@@ -256,6 +259,7 @@ object RemoteAutomixClient {
             handoffFraction = handoffFraction,
             bassSwapFraction = bassSwapFraction,
             filterSweep = filterSweep,
+            vocalOverlap = overlapVocalClash,
             outgoingBpm = outgoing.bpm,
             incomingBpm = incoming.bpm,
             keyCompatibility = value.finiteDouble("keyCompatibility", 0.0),
