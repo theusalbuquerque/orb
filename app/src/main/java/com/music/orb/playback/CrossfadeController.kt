@@ -585,6 +585,7 @@ class CrossfadeController(
             "|pair=${"%.2f".format(plan.pairCompatibility)}" +
             "|phrase=${"%.2f".format(plan.phraseAlignment)}" +
             "|tempo=${"%.2f".format(plan.tempoCompatibility)}" +
+            "|transitionBpm=${"%.2f".format(plan.outgoingBpm)}->${"%.2f".format(plan.incomingBpm)}" +
             "|key=${"%.2f".format(plan.keyCompatibility)}" +
             "|transitionKeys=${plan.outgoingTransitionKey}->${plan.incomingTransitionKey}" +
             "|energy=${"%.2f".format(plan.energyCompatibility)}" +
