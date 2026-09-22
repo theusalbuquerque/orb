@@ -599,7 +599,7 @@ async def health() -> dict[str, Any]:
         "version": API_VERSION,
         "automixVersion": "2.5",
         "analyzer": "orb-remote-dsp-v6",
-        "plannerRevision": "mix-v3",
+        "plannerRevision": "mix-v4",
     }
 
 
@@ -1674,6 +1674,99 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                     gainEnvelope=[],
                 ))
 
+    # 2.5) Rhythmic filtered bridge. This is the practical middle ground used when
+    # tempo/downbeat evidence is good but harmony/phrase confidence is not strong enough
+    # for an open DJ blend. It is still a real overlap: B becomes audible several beats
+    # before A ends, both decks share a meeting tempo, and the filter/EQ gesture masks
+    # weaker harmonic evidence. CUT/NO_TRANSITION remain fallbacks *after* this search.
+    if (
+        a_end > 0.0
+        and 40.0 <= a_bpm <= 220.0
+        and 40.0 <= b_bpm <= 220.0
+        and tempo_distance <= 0.10
+        and tempo >= 0.38
+        and conf >= 0.30
+    ):
+        conflict_key = key_evidence and key_fit < 0.35
+        target_beats = 4 if conflict_key else 8
+        desired_cue = max(b_start, _finite(b.get("mixInTime"), b_start))
+        pair = _best_structural_pair(
+            a,
+            b,
+            a_release,
+            a_end,
+            b_start,
+            b_end,
+            desired_cue,
+            target_beats,
+            a_bpm,
+            b_bpm,
+            bridge_in_rate,
+        )
+        if pair is not None:
+            start = float(pair["start"])
+            cue = float(pair["cue"])
+            phrase_fit = float(pair["phraseAlignment"])
+            overlap_vocal_clash = float(pair["vocalClash"])
+            energy_fit = float(pair["energyFit"])
+            span_fit = float(pair["spanFit"])
+            pair_fit = float(pair["pairScore"])
+            actual_beats = int(round(float(pair["actualBeats"])))
+            release_fraction = float(pair["releaseFraction"])
+
+            vocal_limit = 0.28 if conflict_key else 0.68
+            structure_floor = 0.40 if conflict_key else 0.42
+            minimum_beats = 4
+            if (
+                actual_beats >= minimum_beats
+                and span_fit >= 0.24
+                and phrase_fit >= structure_floor
+                and overlap_vocal_clash < vocal_limit
+            ):
+                rhythmic_score = (
+                    0.20
+                    + 0.22 * tempo
+                    + 0.14 * conf
+                    + 0.16 * (1.0 - overlap_vocal_clash)
+                    + 0.10 * energy_fit
+                    + 0.08 * phrase_fit
+                    + 0.10 * pair_fit
+                )
+                if key_evidence:
+                    rhythmic_score += 0.05 * key_fit
+                candidates.append(_candidate_plan(
+                    "DJ_FILTER",
+                    rhythmic_score,
+                    "server-rhythmic-filter-bridge",
+                    transitionStart=round(start, 4),
+                    transitionEnd=round(a_end, 4),
+                    incomingCueTime=round(cue, 4),
+                    incomingHandoffTime=round(cue, 4),
+                    outgoingPlaybackRate=round(bridge_out_rate, 5),
+                    incomingPlaybackRate=round(bridge_in_rate, 5),
+                    transitionBeats=actual_beats,
+                    requestedTransitionBeats=target_beats,
+                    handoffFraction=round(_clamp(release_fraction, 0.48, 0.82), 4),
+                    bassSwap=bool(
+                        key_evidence
+                        and key_fit >= 0.58
+                        and _low_curve(a)
+                        and _low_curve(b)
+                    ),
+                    bassSwapFraction=round(_clamp(release_fraction, 0.50, 0.82), 4),
+                    filterSweep=0.92 if conflict_key else 0.82,
+                    keyCompatibility=round(key_fit, 4),
+                    tempoCompatibility=round(tempo, 4),
+                    phraseAlignment=round(phrase_fit, 4),
+                    overlapVocalClash=round(overlap_vocal_clash, 4),
+                    energyCompatibility=round(energy_fit, 4),
+                    pairCompatibility=round(pair_fit, 4),
+                    spanCompatibility=round(span_fit, 4),
+                    outgoingAnchor=str(pair["outgoingAnchor"]),
+                    incomingAnchor=str(pair["incomingAnchor"]),
+                    gainEnvelope=[],
+                ))
+
     # 3) Phrase cut: a deliberate phrase/downbeat transfer, not a tiny crossfade.
     # Both sides must expose a usable structural point close to the intended handoff.
     strong_entry = max(b_start, _finite(b.get("mixInTime"), b_impact))
@@ -1790,21 +1883,35 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
 
     candidates.sort(key=lambda x: x["score"], reverse=True)
 
-    style_floor = {
-        "DJ_BLEND": 0.46,
-        "DJ_FILTER": 0.42,
-        "EQ_SWAP": 0.45,
-        "PHRASE_CUT": 0.34,
-        "CUT": 0.34,
+    # The 2.5 product is a mixing engine, not a silence skipper. A valid overlap
+    # outranks a cut even when the cut's scalar score is slightly higher. Only when
+    # no safe overlap exists do we consider phrase/cut handoffs; natural playback is last.
+    overlap_floor = {
+        "DJ_BLEND": 0.42,
+        "DJ_FILTER": 0.36,
+        "EQ_SWAP": 0.42,
     }
-    musical_candidates = [
+    overlap_candidates = [
         candidate
         for candidate in candidates
-        if candidate.get("style") != "NO_TRANSITION"
-        and candidate.get("score", 0.0) >= style_floor.get(candidate.get("style"), 1.0)
+        if candidate.get("style") in overlap_floor
+        and candidate.get("score", 0.0) >= overlap_floor[candidate.get("style")]
     ]
-    if musical_candidates:
-        best = max(musical_candidates, key=lambda x: x["score"])
+    cut_floor = {
+        "PHRASE_CUT": 0.34,
+        "CUT": 0.36,
+    }
+    cut_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.get("style") in cut_floor
+        and candidate.get("score", 0.0) >= cut_floor[candidate.get("style")]
+    ]
+
+    if overlap_candidates:
+        best = max(overlap_candidates, key=lambda x: x["score"])
+    elif cut_candidates:
+        best = max(cut_candidates, key=lambda x: x["score"])
     else:
         best = max(candidates, key=lambda x: x["score"])
     second = max(
@@ -1825,7 +1932,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     best["outgoingTransitionBpm"] = round(a_bpm, 4)
     best["incomingTransitionBpm"] = round(b_bpm, 4)
     best["tempoCompatibility"] = round(tempo, 4)
-    best["planner"] = "orb-automix-2.5-mix-v3"
+    best["planner"] = "orb-automix-2.5-mix-v4"
     best["serverAuthoritative"] = True
     return best, candidates[:5]
 
@@ -1848,7 +1955,7 @@ async def plan(request: PlanRequest) -> dict[str, Any]:
     # minimal fallback is selected here on the server; Android may only reject impossible bounds.
     plan_result = dict(plan_result)
     plan_result["serverAuthoritative"] = True
-    plan_result["planner"] = "orb-automix-2.5-mix-v3"
+    plan_result["planner"] = "orb-automix-2.5-mix-v4"
     return {
         "version": API_VERSION,
         "automixVersion": "2.5",
