@@ -1,0 +1,26 @@
+name: Package Orb ZIP
+
+on:
+  push:
+    paths:
+      - ".github/workflows/package-orb.yml"
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Package repository
+        run: |
+          zip -qr Orb-Automix-atualizado.zip .             -x ".git/*"             -x ".gradle/*"             -x "**/build/*"             -x "Orb-Automix-atualizado.zip"
+
+      - name: Upload ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Orb-Automix-atualizado
+          path: Orb-Automix-atualizado.zip
+          if-no-files-found: error
+          retention-days: 7
