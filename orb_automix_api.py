@@ -980,10 +980,13 @@ def _best_structural_pair(
     out_beat = 60.0 / outgoing_bpm
     in_beat = 60.0 / incoming_bpm
     target_span = target_beats * out_beat
-    desired_start = max(0.0, max(a_release, a_end - target_span))
+    desired_start = max(0.0, a_end - target_span)
 
-    # Do not move A far away from the intended phrase merely to manufacture compatibility.
-    a_lo = max(0.0, a_release, desired_start - 4.0 * out_beat)
+    # Overlap start and authority handoff are different musical events. B may become
+    # quietly audible before A releases, provided the pair is rhythmically/harmonically
+    # compatible and the actual overlap has low vocal collision. A's release is converted
+    # into handoffFraction below instead of being used as a hard start gate.
+    a_lo = max(0.0, desired_start - 4.0 * out_beat)
     a_hi = max(a_lo, min(a_end - 0.20, desired_start + 4.0 * out_beat))
     outgoing = _timing_candidates(
         a,
@@ -991,7 +994,7 @@ def _best_structural_pair(
         a_lo,
         a_hi,
         out_beat,
-        "mixOutCandidates",
+        "",
         limit=8,
     )
 
@@ -1058,6 +1061,11 @@ def _best_structural_pair(
                 continue
 
             best_score = pair_score
+            release_fraction = _clamp(
+                (a_release - a_start) / max(actual_span, 1e-6),
+                0.0,
+                1.0,
+            )
             best = {
                 "start": a_start,
                 "cue": cue,
@@ -1069,6 +1077,7 @@ def _best_structural_pair(
                 "spanFit": span_fit,
                 "pairScore": _clamp(pair_score, 0.0, 1.0),
                 "actualBeats": max(1.0, actual_beats),
+                "releaseFraction": release_fraction,
                 "outgoingAnchor": a_kind,
                 "incomingAnchor": b_kind,
             }
@@ -1146,6 +1155,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                 span_fit = float(pair["spanFit"])
                 pair_fit = float(pair["pairScore"])
                 actual_beats = int(round(float(pair["actualBeats"])))
+                release_fraction = float(pair["releaseFraction"])
 
                 style = requested_style
                 # A flat blend with real vocal-on-vocal collision is demoted to a filtered
@@ -1179,7 +1189,14 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                         incomingPlaybackRate=round(bridge_in_rate, 5),
                         transitionBeats=actual_beats,
                         requestedTransitionBeats=target_beats,
-                        handoffFraction=0.66 if style == "DJ_BLEND" else 0.52,
+                        handoffFraction=round(
+                            _clamp(
+                                release_fraction,
+                                0.52 if style == "DJ_BLEND" else 0.42,
+                                0.80 if style == "DJ_BLEND" else 0.74,
+                            ),
+                            4,
+                        ),
                         bassSwap=bool(_low_curve(a) and _low_curve(b)),
                         bassSwapFraction=0.66,
                         filterSweep=0.0 if style == "DJ_BLEND" else 0.72,
@@ -1229,6 +1246,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
             span_fit = float(pair["spanFit"])
             pair_fit = float(pair["pairScore"])
             actual_beats = int(round(float(pair["actualBeats"])))
+            release_fraction = float(pair["releaseFraction"])
 
             eq_score = (
                 0.17 + 0.19 * tempo + 0.11 * conf + 0.17 * key_fit
@@ -1253,9 +1271,9 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                     incomingPlaybackRate=round(bridge_in_rate, 5),
                     transitionBeats=actual_beats,
                     requestedTransitionBeats=16,
-                    handoffFraction=0.56,
+                    handoffFraction=round(_clamp(release_fraction, 0.50, 0.78), 4),
                     bassSwap=True,
-                    bassSwapFraction=0.56,
+                    bassSwapFraction=round(_clamp(release_fraction, 0.50, 0.78), 4),
                     filterSweep=0.0,
                     phraseAlignment=round(phrase_fit, 4),
                     overlapVocalClash=round(overlap_vocal_clash, 4),
