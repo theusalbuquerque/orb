@@ -703,6 +703,48 @@ def _merge_plan_evidence(
         merged["vocalActivityMask"] = vocal_mask
         merged["vocalEvidence"] = "client-model-window"
 
+    # Phrase phase must live on the same bar grid as the selected downbeats. If Beat This!
+    # replaced the server's inferred bar phase, recompute four-bar boundaries from the full
+    # server energy/low curves plus the fused vocal evidence instead of keeping stale phrases.
+    if merged.get("beatEvidence") == "client-model":
+        energy_points = _curve(merged, "energyCurve")
+        low_points = _curve(merged, "lowEnergyCurve")
+        vocal_points = _vocal_curve(merged)
+        if energy_points and len(merged.get("downbeats") or []) >= 4:
+            times = np.asarray([time_s for time_s, _ in energy_points], dtype=np.float64)
+            energy_values = np.asarray([value for _, value in energy_points], dtype=np.float64)
+
+            def values_on_grid(
+                points: list[tuple[float, float]],
+                default: float,
+            ) -> np.ndarray:
+                if not points:
+                    return np.full(times.size, default, dtype=np.float64)
+                point_times = np.asarray([time_s for time_s, _ in points], dtype=np.float64)
+                point_values = np.asarray([value for _, value in points], dtype=np.float64)
+                indices = np.searchsorted(point_times, times, side="left")
+                indices = np.clip(indices, 0, len(point_times) - 1)
+                previous = np.clip(indices - 1, 0, len(point_times) - 1)
+                choose_previous = (
+                    np.abs(point_times[previous] - times)
+                    <= np.abs(point_times[indices] - times)
+                )
+                chosen = np.where(choose_previous, previous, indices)
+                return point_values[chosen]
+
+            low_values = values_on_grid(low_points, 0.5)
+            vocal_values = values_on_grid(vocal_points, 0.5)
+            phrases = _phrase_boundaries_from_structure(
+                [float(value) for value in merged["downbeats"]],
+                times,
+                energy_values,
+                low_values,
+                vocal_values,
+            )
+            if phrases:
+                merged["phraseBoundaries"] = phrases
+                merged["phraseEvidence"] = "server-structure-on-client-grid"
+
     # If the server lacks structural data entirely, a completed client pass is still better than
     # dropping those fields. Empty/provisional client lists never erase cached full-track data.
     for key in ("energyCurve", "lowEnergyCurve", "phraseBoundaries", "mixInCandidates", "mixOutCandidates"):
