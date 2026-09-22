@@ -566,10 +566,11 @@ def _analyze(path: str, track_id: str, declared_duration: float) -> dict[str, An
     times = np.arange(frames.shape[0], dtype=np.float64) * (hop / SAMPLE_RATE)
     rms = np.sqrt(np.mean(frames.astype(np.float64) ** 2, axis=1) + 1e-12)
     energy = _normalized(rms)
-    low = _normalized(_spectral_band_energy(frames, 35.0, 250.0))
-    mid = _spectral_band_energy(frames, 250.0, 4000.0)
-    high = _spectral_band_energy(frames, 4000.0, 9000.0)
-    vocal_raw = mid / (mid + 0.7 * high + 1e-9)
+    low_raw, mid_raw, high_raw, brightness, chroma = _spectral_transition_features(frames)
+    low = _normalized(low_raw)
+    mid = _normalized(mid_raw)
+    high = _normalized(high_raw)
+    vocal_raw = mid_raw / (mid_raw + 0.7 * high_raw + 1e-9)
     vocal = _normalized(vocal_raw) * np.clip(energy * 1.25, 0.0, 1.0)
     vocal_probability = float(np.clip(np.mean(vocal[energy > 0.12]) if np.any(energy > 0.12) else 0.0, 0.0, 1.0))
 
@@ -580,6 +581,18 @@ def _analyze(path: str, track_id: str, declared_duration: float) -> dict[str, An
     onset = np.maximum(0.0, np.diff(np.log1p(beat_rms * 1000.0), prepend=0.0))
     bpm, beat_conf, beats = _beat_grid(onset, beat_frame / SAMPLE_RATE)
     beat_interval = 60.0 / bpm if bpm > 0 else 0.0
+    tempo_curve = _tempo_curve(onset, beat_frame / SAMPLE_RATE, duration)
+
+    # Coarse transient curve on the same 500 ms timeline as the spectral curves.
+    # The beat grid stays at 100 ms; this curve is for A↔B contour matching, not beat detection.
+    onset_curve = np.zeros_like(energy, dtype=np.float64)
+    fine_hop = beat_frame / SAMPLE_RATE
+    for index, time_s in enumerate(times):
+        lo = max(0, int(math.floor(time_s / fine_hop)))
+        hi = min(onset.size, int(math.ceil((time_s + hop / SAMPLE_RATE) / fine_hop)))
+        if hi > lo:
+            onset_curve[index] = float(np.max(onset[lo:hi]))
+    onset_curve = _normalized(onset_curve)
 
     # Tempo gives a beat grid, not bar/phrase phase. Infer both phases from accents and
     # arrangement changes instead of assuming the first detected beat is beat 1.
@@ -647,7 +660,25 @@ def _analyze(path: str, track_id: str, declared_duration: float) -> dict[str, An
     mix_in = float(mix_in_candidates[0]["time"]) if mix_in_candidates else intro_end
     mix_out = float(mix_out_candidates[0]["time"]) if mix_out_candidates else content_end
 
+    # Smooth pitch-class vectors over ~2 seconds and emit them every 1 second.
+    # This is stable enough to follow chord/key motion while staying compact in JSON.
+    chroma_curve: list[dict[str, Any]] = []
+    if chroma.size:
+        radius = 2
+        for index in range(0, chroma.shape[0], 2):
+            lo = max(0, index - radius)
+            hi = min(chroma.shape[0], index + radius + 1)
+            vector = np.mean(chroma[lo:hi], axis=0)
+            total = float(np.sum(vector))
+            if total > 1e-9:
+                vector = vector / total
+            chroma_curve.append({
+                "time": round(float(times[index]), 3),
+                "chroma": [round(float(value), 5) for value in vector],
+            })
+
     return {
+        "analysisSchema": ANALYSIS_SCHEMA,
         "duration": round(duration, 4),
         "bpm": round(bpm, 5),
         "beatInterval": round(beat_interval, 6),
@@ -674,6 +705,8 @@ def _analyze(path: str, track_id: str, declared_duration: float) -> dict[str, An
         "mixOutTime": round(mix_out, 4),
         "mixInCandidates": mix_in_candidates,
         "mixOutCandidates": mix_out_candidates,
+        "beats": [round(float(x), 4) for x in beats[:4096]],
+        "tempoCurve": tempo_curve,
         "energyCurve": [
             {"time": round(float(t), 3), "energy": round(float(e), 5)}
             for t, e in zip(times, energy, strict=False)
@@ -682,6 +715,23 @@ def _analyze(path: str, track_id: str, declared_duration: float) -> dict[str, An
             {"time": round(float(t), 3), "energy": round(float(e), 5)}
             for t, e in zip(times, low, strict=False)
         ],
+        "midEnergyCurve": [
+            {"time": round(float(t), 3), "energy": round(float(e), 5)}
+            for t, e in zip(times, mid, strict=False)
+        ],
+        "highEnergyCurve": [
+            {"time": round(float(t), 3), "energy": round(float(e), 5)}
+            for t, e in zip(times, high, strict=False)
+        ],
+        "brightnessCurve": [
+            {"time": round(float(t), 3), "energy": round(float(e), 5)}
+            for t, e in zip(times, brightness, strict=False)
+        ],
+        "onsetCurve": [
+            {"time": round(float(t), 3), "energy": round(float(e), 5)}
+            for t, e in zip(times, onset_curve, strict=False)
+        ],
+        "chromaCurve": chroma_curve,
         "vocalActivityMask": [round(float(x), 5) for x in vocal],
         "vocalProbability": round(vocal_probability, 5),
         "trackId": track_id,
