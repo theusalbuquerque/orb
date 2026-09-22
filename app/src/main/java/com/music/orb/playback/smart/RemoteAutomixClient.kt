@@ -318,7 +318,7 @@ object RemoteAutomixClient {
     }
 
     private fun doubles(values: List<Double>): JSONArray = JSONArray().apply {
-        values.filter { it.isFinite() }.forEach(::put)
+        values.filter { it.isFinite() }.forEach { value -> put(value) }
     }
 
     private fun curve(values: List<EnergySample>): JSONArray = JSONArray().apply {
