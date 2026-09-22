@@ -260,19 +260,18 @@ class AutomixPlannerTest(unittest.TestCase):
         self.assertAlmostEqual(float(pair["releaseFraction"]), 0.5, delta=0.10)
         self.assertGreaterEqual(float(pair["phraseAlignment"]), 0.78)
 
-    def test_long_instrumental_intro_can_become_impact_aligned_bed(self) -> None:
+    def test_removed_transition_families_never_selected(self) -> None:
         a = track(bpm=128.0, key="C major", vocal=0.10, duration=180.0)
         b = track(bpm=128.0, key="A minor", vocal=0.10, duration=180.0)
 
-        # A stays dense/vocal to the end, so the planner should protect it while
-        # using B's intro underneath rather than taking A away early.
+        # Even a pair that previously looked ideal for a long instrumental bed
+        # must now resolve through the active strategy set.
         for index, point in enumerate(a["energyCurve"]):
             if point["time"] >= 100.0:
                 point["energy"] = 0.84
                 a["vocalActivityMask"][index] = 0.72
         a["vocalProbability"] = 0.72
 
-        # B has a long quiet/instrumental opening and a real impact at ~56 s.
         for index, point in enumerate(b["energyCurve"]):
             if point["time"] < 56.0:
                 point["energy"] = 0.18
@@ -285,39 +284,10 @@ class AutomixPlannerTest(unittest.TestCase):
         b["vocalProbability"] = 0.16
 
         best, candidates = automix._remote_plan(a, b)
+        removed = {"INTRO_BED", "INTRO_BRIDGE_FILTER", "FOREGROUND_TAKEOVER"}
 
-        self.assertEqual(best["style"], "INTRO_BED")
-        self.assertGreater(float(best["introBedSeconds"]), 40.0)
-        self.assertLess(float(best["incomingCueTime"]), 8.0)
-        self.assertGreater(float(best["impactTime"]), 45.0)
-        self.assertGreater(float(best["handoffFraction"]), 0.90)
-        self.assertTrue(any(c["style"] == "INTRO_BED" for c in candidates))
-
-    def test_vocal_heavy_long_intro_is_not_used_as_bed(self) -> None:
-        a = track(bpm=128.0, key="C major", vocal=0.10, duration=180.0)
-        b = track(bpm=128.0, key="A minor", vocal=0.85, duration=180.0)
-
-        for index, point in enumerate(a["energyCurve"]):
-            if point["time"] >= 100.0:
-                point["energy"] = 0.84
-                a["vocalActivityMask"][index] = 0.72
-        a["vocalProbability"] = 0.72
-
-        for index, point in enumerate(b["energyCurve"]):
-            if point["time"] < 56.0:
-                point["energy"] = 0.22
-                b["lowEnergyCurve"][index]["energy"] = 0.16
-                b["vocalActivityMask"][index] = 0.82
-            else:
-                point["energy"] = 0.86
-                b["lowEnergyCurve"][index]["energy"] = 0.78
-                b["vocalActivityMask"][index] = 0.75
-        b["vocalProbability"] = 0.80
-
-        best, candidates = automix._remote_plan(a, b)
-
-        self.assertNotEqual(best["style"], "INTRO_BED")
-        self.assertFalse(any(c["style"] == "INTRO_BED" for c in candidates))
+        self.assertNotIn(best["style"], removed)
+        self.assertFalse(any(candidate["style"] in removed for candidate in candidates))
 
 
     def test_good_energy_without_structural_anchors_never_becomes_dj_overlap(self) -> None:
@@ -387,7 +357,7 @@ class AutomixPlannerTest(unittest.TestCase):
 
         best, _ = automix._remote_plan(a, b)
 
-        if best["style"] in {"DJ_BLEND", "DJ_FILTER", "EQ_SWAP", "INTRO_BED"}:
+        if best["style"] in {"DJ_BLEND", "DJ_FILTER", "EQ_SWAP"}:
             self.assertGreaterEqual(float(best["handoffFraction"]), 0.84)
         else:
             self.assertIn(best["style"], {"PHRASE_CUT", "CUT", "NO_TRANSITION"})
