@@ -139,6 +139,16 @@ data class TransitionGainPoint(
     val outgoingGain: Double,
 )
 
+/** Progress-indexed local-tempo lock authored by the 2.5 server. */
+data class TransitionTempoPoint(
+    val progress: Double,
+    val outgoingRate: Double,
+    val incomingRate: Double,
+    val outgoingBpm: Double,
+    val incomingBpm: Double,
+    val confidence: Double = 0.0,
+)
+
 /**
  * The planned transition for one pair of tracks, in outgoing-track timeline
  * seconds.
@@ -176,6 +186,14 @@ data class TransitionPlan(
     val filterSweep: Double = 0.0,
     /** Server-authored gain choreography. Empty means use the style fallback. */
     val gainEnvelope: List<TransitionGainPoint> = emptyList(),
+    /** Curve Lock tempo/rate trajectory across the overlap. */
+    val tempoEnvelope: List<TransitionTempoPoint> = emptyList(),
+    /**
+     * Small harmonic correction for B during the overlap. The server only
+     * authorizes -1..+1 semitone when local chroma curves improve materially.
+     */
+    val incomingPitchSemitones: Double = 0.0,
+    val harmonicLockScore: Double = 0.0,
     /**
      * How strongly the two tracks are expected to be singing over each other
      * through this overlap, 0..1; see [vocalOverlapAmount].

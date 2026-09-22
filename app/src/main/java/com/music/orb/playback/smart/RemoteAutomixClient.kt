@@ -46,6 +46,9 @@ data class RemoteTransitionDirective(
     val bassSwapFraction: Double,
     val filterSweep: Double,
     val gainEnvelope: List<TransitionGainPoint>,
+    val tempoEnvelope: List<TransitionTempoPoint>,
+    val incomingPitchSemitones: Double,
+    val harmonicLockScore: Double,
     val protectedOutgoing: Boolean = false,
     val outgoingReleaseTime: Double = 0.0,
     val incomingImpactTime: Double = 0.0,
@@ -87,8 +90,8 @@ data class Decision(
 internal object RemoteAutomixClient {
     private const val TAG = "OrbRemoteAutomix"
     private const val BASE_URL = "https://orb-4mrh.onrender.com"
-    private const val VERSION = 6
-    private const val REQUIRED_PLANNER_REVISION = "mix-v7"
+    private const val VERSION = 7
+    private const val REQUIRED_PLANNER_REVISION = "mix-v8"
     private const val REQUIRED_ANALYSIS_SCHEMA = 2
     private const val MAX_REMOTE_AUDIO_BYTES = 24L * 1024L * 1024L
     private const val MAX_PLAN_CURVE_POINTS = 1800
@@ -236,6 +239,9 @@ internal object RemoteAutomixClient {
             bassSwapFraction = bassSwapFraction.coerceIn(0.0, 1.0),
             filterSweep = filterSweep.coerceIn(0.0, 1.0),
             gainEnvelope = gainEnvelope,
+            tempoEnvelope = tempoEnvelope,
+            incomingPitchSemitones = incomingPitchSemitones.coerceIn(-1.0, 1.0),
+            harmonicLockScore = harmonicLockScore.coerceIn(0.0, 1.0),
             vocalOverlap = overlapVocalClash.coerceIn(0.0, 1.0),
             outgoingBpm = outgoingLocalBpm.takeIf { it > 0.0 } ?: outgoing.bpm,
             incomingBpm = incomingLocalBpm.takeIf { it > 0.0 } ?: incoming.bpm,
@@ -433,6 +439,11 @@ internal object RemoteAutomixClient {
             bassSwapFraction = plan.optDouble("bassSwapFraction", 0.7).takeIf { it.isFinite() }?.coerceIn(0.0, 1.0) ?: 0.7,
             filterSweep = plan.optDouble("filterSweep", 0.0).takeIf { it.isFinite() }?.coerceIn(0.0, 1.0) ?: 0.0,
             gainEnvelope = plan.optGainEnvelope("gainEnvelope"),
+            tempoEnvelope = plan.optTempoEnvelope("tempoEnvelope"),
+            incomingPitchSemitones = plan.optDouble("incomingPitchSemitones", 0.0)
+                .takeIf { it.isFinite() }?.coerceIn(-1.0, 1.0) ?: 0.0,
+            harmonicLockScore = plan.optDouble("harmonicLockScore", 0.0)
+                .takeIf { it.isFinite() }?.coerceIn(0.0, 1.0) ?: 0.0,
             protectedOutgoing = plan.optBoolean("protectedOutgoing", false),
             outgoingReleaseTime = plan.optDouble("outgoingReleaseTime", 0.0).takeIf { it.isFinite() } ?: 0.0,
             incomingImpactTime = plan.optDouble("incomingImpactTime", 0.0).takeIf { it.isFinite() } ?: 0.0,
@@ -802,6 +813,39 @@ internal object RemoteAutomixClient {
                             progress = progress.coerceIn(0.0, 1.0),
                             incomingGain = incoming.coerceIn(0.0, 1.0),
                             outgoingGain = outgoing.coerceIn(0.0, 1.0),
+                        ),
+                    )
+                }
+            }
+        }.sortedBy { it.progress }
+    }
+
+    private fun JSONObject.optTempoEnvelope(name: String): List<TransitionTempoPoint> {
+        val values = optJSONArray(name) ?: return emptyList()
+        return buildList(values.length()) {
+            for (i in 0 until values.length()) {
+                val point = values.optJSONObject(i) ?: continue
+                val progress = point.optDouble("progress", Double.NaN)
+                val outgoingRate = point.optDouble("outgoingRate", Double.NaN)
+                val incomingRate = point.optDouble("incomingRate", Double.NaN)
+                val outgoingBpm = point.optDouble("outgoingBpm", Double.NaN)
+                val incomingBpm = point.optDouble("incomingBpm", Double.NaN)
+                val confidence = point.optDouble("confidence", 0.0)
+                if (
+                    progress.isFinite() &&
+                    outgoingRate.isFinite() &&
+                    incomingRate.isFinite() &&
+                    outgoingBpm.isFinite() &&
+                    incomingBpm.isFinite()
+                ) {
+                    add(
+                        TransitionTempoPoint(
+                            progress = progress.coerceIn(0.0, 1.0),
+                            outgoingRate = outgoingRate.coerceIn(0.94, 1.06),
+                            incomingRate = incomingRate.coerceIn(0.94, 1.06),
+                            outgoingBpm = outgoingBpm.coerceAtLeast(0.0),
+                            incomingBpm = incomingBpm.coerceAtLeast(0.0),
+                            confidence = confidence.takeIf { it.isFinite() }?.coerceIn(0.0, 1.0) ?: 0.0,
                         ),
                     )
                 }

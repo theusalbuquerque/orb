@@ -227,6 +227,55 @@ class AutomixPlannerTest(unittest.TestCase):
         self.assertGreater(float(refined["beatPhaseFit"]), 0.95)
         self.assertLess(abs(float(refined["shiftMs"])), 410.0)
 
+    def test_curve_lock_can_apply_one_semitone_when_chroma_materially_improves(self) -> None:
+        a = add_curve_analysis(track(bpm=124.0, key="C major", vocal=0.10), pitch_class=0)
+        b = add_curve_analysis(track(bpm=124.0, key="C# major", vocal=0.10), pitch_class=1)
+
+        shift, locked, unshifted = automix._harmonic_lock_shift(
+            a,
+            b,
+            104.0,
+            112.0,
+            0.0,
+            1.0,
+            1.0,
+            0.10,
+        )
+
+        self.assertEqual(shift, -1.0)
+        self.assertGreater(locked, 0.90)
+        self.assertGreater(locked, unshifted + 0.20)
+
+    def test_curve_lock_tempo_envelope_keeps_effective_bpms_together(self) -> None:
+        a = add_curve_analysis(track(bpm=124.0, key="C major"), pitch_class=0, local_bpm=124.0)
+        b = add_curve_analysis(track(bpm=128.0, key="A minor"), pitch_class=9, local_bpm=128.0)
+        a["tempoCurve"] = [
+            {"time": 104.0, "bpm": 124.0, "confidence": 0.90},
+            {"time": 108.0, "bpm": 125.0, "confidence": 0.90},
+            {"time": 112.0, "bpm": 126.0, "confidence": 0.90},
+        ]
+        b["tempoCurve"] = [
+            {"time": 0.0, "bpm": 128.0, "confidence": 0.90},
+            {"time": 4.0, "bpm": 127.0, "confidence": 0.90},
+            {"time": 8.0, "bpm": 126.0, "confidence": 0.90},
+        ]
+
+        envelope = automix._tempo_envelope_for_overlap(
+            a,
+            b,
+            104.0,
+            112.0,
+            0.0,
+            1.0,
+            1.0,
+        )
+
+        self.assertGreaterEqual(len(envelope), 5)
+        for point in envelope:
+            effective_a = float(point["outgoingBpm"]) * float(point["outgoingRate"])
+            effective_b = float(point["incomingBpm"]) * float(point["incomingRate"])
+            self.assertAlmostEqual(effective_a, effective_b, delta=0.15)
+
     def test_curve_metrics_reward_harmonic_and_transient_alignment(self) -> None:
         a = add_curve_analysis(track(bpm=128.0, key="C major"), pitch_class=0)
         b = add_curve_analysis(track(bpm=128.0, key="C major"), pitch_class=0)

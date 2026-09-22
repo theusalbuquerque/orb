@@ -6,6 +6,7 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
@@ -18,6 +19,7 @@ import com.music.orb.playback.smart.CrossfadeMode
 import com.music.orb.playback.smart.RemoteAutomixClient
 import com.music.orb.playback.smart.TrackAnalysis
 import com.music.orb.playback.smart.TransitionGainPoint
+import com.music.orb.playback.smart.TransitionTempoPoint
 import com.music.orb.playback.smart.TransitionStyle
 import com.music.orb.playback.smart.TransitionTrackInfo
 import com.music.orb.playback.smart.planTransition
@@ -273,6 +275,9 @@ class CrossfadeController(
         val filterSweep: Double = 0.0,
         val vocalOverlap: Double = 0.0,
         val gainEnvelope: List<TransitionGainPoint> = emptyList(),
+        val tempoEnvelope: List<TransitionTempoPoint> = emptyList(),
+        val incomingPitchSemitones: Double = 0.0,
+        val harmonicLockScore: Double = 0.0,
         /** Preserve the public Automix 2.0 gain/tempo choreography. */
         val legacy20: Boolean = false,
     )
@@ -789,6 +794,9 @@ class CrossfadeController(
                 filterSweep = plan.filterSweep,
                 vocalOverlap = plan.vocalOverlap,
                 gainEnvelope = plan.gainEnvelope,
+                tempoEnvelope = plan.tempoEnvelope,
+                incomingPitchSemitones = plan.incomingPitchSemitones,
+                harmonicLockScore = plan.harmonicLockScore,
             ),
         )
     }
@@ -961,7 +969,13 @@ class CrossfadeController(
         // Stacks on top of the listener's speed control rather than replacing
         // it, so a beatmatched transition and "play everything at 1.25x" don't
         // fight each other. Undone in [finish].
-        into.setPlaybackSpeed((AppSettings.playbackSpeed.value * incomingPlaybackRate).toFloat())
+        val initialTempo = tempoFrameAt(0f)
+        val initialIncomingRate = initialTempo?.incomingRate ?: incomingPlaybackRate
+        setDeckPlayback(
+            into,
+            speed = AppSettings.playbackSpeed.value.toDouble() * initialIncomingRate,
+            pitchSemitones = render.incomingPitchSemitones,
+        )
         into.volume = 0f
         into.setMediaItems(items, nextIndex, incomingCueTimeMs)
         // Buffers without sounding. Started for real in [startFade].
@@ -1039,9 +1053,12 @@ class CrossfadeController(
         // The pre-roll has already converged A to the meeting tempo. This tiny
         // final assignment removes residual interpolation error; late readiness
         // is rejected in [driveArming] rather than turned into a speed jump here.
-        if (smartFadeActive && abs(outgoingPlaybackRate - 1.0) > TEMPO_RATE_EPSILON) {
-            out.setPlaybackSpeed(
-                (AppSettings.playbackSpeed.value * outgoingPlaybackRate).toFloat(),
+        val firstOutRate = tempoFrameAt(0f)?.outgoingRate ?: outgoingPlaybackRate
+        if (smartFadeActive && abs(firstOutRate - 1.0) > TEMPO_RATE_EPSILON) {
+            setDeckPlayback(
+                out,
+                speed = AppSettings.playbackSpeed.value.toDouble() * firstOutRate,
+                pitchSemitones = 0.0,
             )
         }
         into.volume = 0f
@@ -1258,7 +1275,11 @@ class CrossfadeController(
                 // Undoes whatever [begin] stacked on for a beatmatched handoff.
                 // Unconditional and idempotent, so this is correct whether or
                 // not a stretch was ever actually applied.
-                it.setPlaybackSpeed(AppSettings.playbackSpeed.value)
+                setDeckPlayback(
+                    it,
+                    speed = AppSettings.playbackSpeed.value.toDouble(),
+                    pitchSemitones = 0.0,
+                )
             }
             outgoing?.let(::retire)
         } else {
@@ -1267,7 +1288,11 @@ class CrossfadeController(
             // have entered the silent tempo pre-roll, so restore it as well.
             outgoing?.let {
                 it.volume = 1f
-                it.setPlaybackSpeed(AppSettings.playbackSpeed.value)
+                setDeckPlayback(
+                    it,
+                    speed = AppSettings.playbackSpeed.value.toDouble(),
+                    pitchSemitones = 0.0,
+                )
             }
             incoming?.let(::retire)
         }
@@ -1307,7 +1332,11 @@ class CrossfadeController(
         player.stop()
         player.clearMediaItems()
         player.volume = 1f
-        player.setPlaybackSpeed(AppSettings.playbackSpeed.value)
+        setDeckPlayback(
+            player,
+            speed = AppSettings.playbackSpeed.value.toDouble(),
+            pitchSemitones = 0.0,
+        )
     }
 
     // ---- Numbers ------------------------------------------------------------
@@ -1613,15 +1642,20 @@ class CrossfadeController(
         tempoPreRollProgress = progress
 
         val amount = smoothStep(progress).toDouble()
-        val rate = 1.0 + (outgoingPlaybackRate - 1.0) * amount
-        out.setPlaybackSpeed((AppSettings.playbackSpeed.value * rate).toFloat())
+        val targetRate = tempoFrameAt(0f)?.outgoingRate ?: outgoingPlaybackRate
+        val rate = 1.0 + (targetRate - 1.0) * amount
+        setDeckPlayback(
+            out,
+            speed = AppSettings.playbackSpeed.value.toDouble() * rate,
+            pitchSemitones = 0.0,
+        )
     }
 
     /**
-     * During the audible overlap both decks share one tempo grid from the first
-     * beat. A stays at the meeting tempo; only after the musical handoff does B
-     * glide back to its native tempo. Pitch remains unchanged through Media3's
-     * time-stretch processor.
+     * Curve Lock follows the local tempo trajectory authored by the server.
+     * Both decks therefore meet on the same changing musical grid rather than
+     * one scalar BPM. B's small chroma-authorized pitch correction lives only
+     * inside the overlap and is released smoothly after the authority handoff.
      */
     private fun rideTempoBridge(progress: Float, out: ExoPlayer, into: ExoPlayer) {
         val base = AppSettings.playbackSpeed.value.toDouble().coerceAtLeast(0.01)
@@ -1631,37 +1665,46 @@ class CrossfadeController(
             ((progress - releaseStart) / (1f - releaseStart)).coerceIn(0f, 1f),
         ).toDouble()
 
-        out.setPlaybackSpeed((base * outgoingPlaybackRate).toFloat())
+        val frame = tempoFrameAt(progress)
+        val curveOutRate = (frame?.outgoingRate ?: outgoingPlaybackRate).coerceIn(0.94, 1.06)
+        val curveInRate = (frame?.incomingRate ?: incomingPlaybackRate).coerceIn(0.94, 1.06)
+        val outBpm = frame?.outgoingBpm ?: 0.0
+        val inBpm = frame?.incomingBpm ?: 0.0
 
-        val nominalIncomingRate =
-            incomingPlaybackRate + (1.0 - incomingPlaybackRate) * release
+        setDeckPlayback(out, speed = base * curveOutRate, pitchSemitones = 0.0)
+
+        val nominalIncomingRate = curveInRate + (1.0 - curveInRate) * release
         val phaseCorrection = phaseLockCorrection(
             progress = progress,
             releaseStart = releaseStart,
             baseRate = base,
             out = out,
             into = into,
+            outgoingRate = curveOutRate,
+            incomingRate = curveInRate,
+            outgoingBpm = outBpm,
+            incomingBpm = inBpm,
         )
         val correctedIncomingRate = (nominalIncomingRate * (1.0 + phaseCorrection))
             .coerceIn(PHASE_LOCK_MIN_RATE, PHASE_LOCK_MAX_RATE)
-        into.setPlaybackSpeed((base * correctedIncomingRate).toFloat())
+        val pitchSemitones = render.incomingPitchSemitones.coerceIn(-1.0, 1.0) * (1.0 - release)
+        setDeckPlayback(
+            into,
+            speed = base * correctedIncomingRate,
+            pitchSemitones = pitchSemitones,
+        )
     }
 
-    /**
-     * A bounded PLL for the first part of a real DJ overlap.
-     *
-     * Both decks are already at the same musical tempo; this only removes the
-     * residual *phase* error caused by player start latency and scheduler
-     * granularity. No seek is performed. A late B is sped up very slightly, an
-     * early B slowed very slightly, and the correction disappears before the
-     * post-handoff return to B's native tempo.
-     */
     private fun phaseLockCorrection(
         progress: Float,
         releaseStart: Float,
         baseRate: Double,
         out: ExoPlayer,
         into: ExoPlayer,
+        outgoingRate: Double,
+        incomingRate: Double,
+        outgoingBpm: Double,
+        incomingBpm: Double,
     ): Double {
         val beatMatchedStyle = when (render.style) {
             TransitionStyle.RUNWAY_BLEND,
@@ -1677,9 +1720,20 @@ class CrossfadeController(
         val outMediaElapsed = (out.currentPosition - transitionStartMs).coerceAtLeast(0L).toDouble()
         val inMediaElapsed = (into.currentPosition - incomingCueTimeMs).coerceAtLeast(0L).toDouble()
 
-        val outElapsedMs = outMediaElapsed / (baseRate * outgoingPlaybackRate).coerceAtLeast(0.01)
-        val inElapsedMs = inMediaElapsed / (baseRate * incomingPlaybackRate).coerceAtLeast(0.01)
-        val errorMs = inElapsedMs - outElapsedMs
+        val errorMs = if (outgoingBpm > 0.0 && incomingBpm > 0.0) {
+            val outBeats = outMediaElapsed * outgoingBpm / 60_000.0
+            val inBeats = inMediaElapsed * incomingBpm / 60_000.0
+            var cycleError = inBeats - outBeats
+            cycleError -= kotlin.math.floor(cycleError + 0.5)
+            val effectiveOutBpm = outgoingBpm * outgoingRate
+            val effectiveInBpm = incomingBpm * incomingRate
+            val meetingBpm = ((effectiveOutBpm + effectiveInBpm) * 0.5).coerceAtLeast(1.0)
+            cycleError * (60_000.0 / meetingBpm)
+        } else {
+            val outElapsedMs = outMediaElapsed / (baseRate * outgoingRate).coerceAtLeast(0.01)
+            val inElapsedMs = inMediaElapsed / (baseRate * incomingRate).coerceAtLeast(0.01)
+            inElapsedMs - outElapsedMs
+        }
         phaseLockPeakErrorMs = maxOf(phaseLockPeakErrorMs, abs(errorMs))
 
         if (!phaseLockLogged && progress >= PHASE_LOCK_LOG_PROGRESS) {
@@ -1687,14 +1741,56 @@ class CrossfadeController(
             Log.d(
                 TAG,
                 "phase lock initial=${"%.1f".format(errorMs)}ms " +
-                    "peak=${"%.1f".format(phaseLockPeakErrorMs)}ms",
+                    "peak=${"%.1f".format(phaseLockPeakErrorMs)}ms " +
+                    "curve=${render.tempoEnvelope.isNotEmpty()} " +
+                    "pitch=${"%.2f".format(render.incomingPitchSemitones)}st",
             )
         }
 
         if (abs(errorMs) <= PHASE_LOCK_DEADBAND_MS) return 0.0
-
         return (-errorMs / PHASE_LOCK_CAPTURE_MS)
             .coerceIn(-PHASE_LOCK_MAX_DELTA, PHASE_LOCK_MAX_DELTA)
+    }
+
+    private fun tempoFrameAt(progress: Float): TransitionTempoPoint? {
+        val points = render.tempoEnvelope
+            .filter {
+                it.progress.isFinite() &&
+                    it.outgoingRate.isFinite() &&
+                    it.incomingRate.isFinite() &&
+                    it.outgoingBpm.isFinite() &&
+                    it.incomingBpm.isFinite()
+            }
+            .sortedBy { it.progress }
+        if (points.isEmpty()) return null
+        val p = progress.coerceIn(0f, 1f).toDouble()
+        if (p <= points.first().progress) return points.first()
+        if (p >= points.last().progress) return points.last()
+        val rightIndex = points.indexOfFirst { it.progress >= p }.coerceAtLeast(1)
+        val left = points[rightIndex - 1]
+        val right = points[rightIndex]
+        val span = (right.progress - left.progress).coerceAtLeast(1e-6)
+        val amount = ((p - left.progress) / span).coerceIn(0.0, 1.0)
+        fun lerp(a: Double, b: Double): Double = a + (b - a) * amount
+        return TransitionTempoPoint(
+            progress = p,
+            outgoingRate = lerp(left.outgoingRate, right.outgoingRate),
+            incomingRate = lerp(left.incomingRate, right.incomingRate),
+            outgoingBpm = lerp(left.outgoingBpm, right.outgoingBpm),
+            incomingBpm = lerp(left.incomingBpm, right.incomingBpm),
+            confidence = lerp(left.confidence, right.confidence),
+        )
+    }
+
+    private fun setDeckPlayback(
+        player: ExoPlayer,
+        speed: Double,
+        pitchSemitones: Double,
+    ) {
+        val safeSpeed = speed.coerceIn(0.25, 4.0).toFloat()
+        val safeSemitones = pitchSemitones.coerceIn(-1.0, 1.0)
+        val pitch = 2.0.pow(safeSemitones / 12.0).toFloat()
+        player.setPlaybackParameters(PlaybackParameters(safeSpeed, pitch))
     }
 
     private fun smoothStep(value: Float): Float {

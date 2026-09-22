@@ -25,7 +25,7 @@ from billing_api import premium_entitled_for_account_hash
 
 router = APIRouter(prefix="/api/automix", tags=["automix"])
 
-API_VERSION = 6
+API_VERSION = 7
 ANALYSIS_SCHEMA = 2
 SAMPLE_RATE = int(os.getenv("AUTOMIX_SAMPLE_RATE", "22050"))
 MAX_UPLOAD_BYTES = int(os.getenv("AUTOMIX_MAX_UPLOAD_BYTES", str(24 * 1024 * 1024)))
@@ -744,8 +744,8 @@ async def health() -> dict[str, Any]:
         "ok": True,
         "version": API_VERSION,
         "automixVersion": "2.5",
-        "analyzer": "orb-remote-dsp-v7",
-        "plannerRevision": "mix-v7",
+        "analyzer": "orb-remote-dsp-v8",
+        "plannerRevision": "mix-v8",
         "analysisSchema": ANALYSIS_SCHEMA,
     }
 
@@ -1739,6 +1739,188 @@ def _beat_phase_metrics(
     tolerance = max(0.025, 0.22 * beat_seconds)
     fit = _clamp(1.0 - error_seconds / tolerance, 0.0, 1.0)
     return fit, error_seconds * 1000.0
+
+
+
+def _tempo_envelope_for_overlap(
+    a: dict[str, Any],
+    b: dict[str, Any],
+    a_start: float,
+    a_end: float,
+    b_start: float,
+    fallback_out_rate: float,
+    fallback_in_rate: float,
+) -> list[dict[str, float]]:
+    """Build a progress-indexed meeting-tempo curve for the exact overlap.
+
+    A/B are sampled on their own local tempo curves. The B probe advances in
+    media time using the previous segment's rates, so the envelope follows
+    drift/live edits instead of pretending the whole overlap has one BPM.
+    """
+    if a_end <= a_start:
+        return []
+
+    span = a_end - a_start
+    b_end = _content_end(b)
+    points: list[dict[str, float]] = []
+    b_time = max(0.0, b_start)
+    previous_a = a_start
+    previous_out = _clamp(fallback_out_rate, 0.94, 1.06)
+    previous_in = _clamp(fallback_in_rate, 0.94, 1.06)
+
+    for progress in np.linspace(0.0, 1.0, 7, dtype=np.float64):
+        a_time = a_start + float(progress) * span
+        if points:
+            delta_a = max(0.0, a_time - previous_a)
+            wall_seconds = delta_a / max(previous_out, 1e-6)
+            b_time += wall_seconds * previous_in
+        if b_end > b_start:
+            b_time = _clamp(b_time, b_start, max(b_start, b_end - 0.05))
+
+        a_bpm, a_conf = _tempo_near(a, a_time, _finite(a.get("bpm"), 0.0))
+        b_bpm, b_conf = _tempo_near(b, b_time, _finite(b.get("bpm"), 0.0))
+        if a_bpm > 0.0 and b_bpm > 0.0:
+            while b_bpm / a_bpm > 1.5:
+                b_bpm /= 2.0
+            while b_bpm / a_bpm < 0.67:
+                b_bpm *= 2.0
+
+        out_rate, in_rate = _tempo_bridge_rates(a_bpm, b_bpm)
+        if (
+            out_rate == 1.0
+            and in_rate == 1.0
+            and (abs(fallback_out_rate - 1.0) > 1e-4 or abs(fallback_in_rate - 1.0) > 1e-4)
+            and min(a_conf, b_conf) < 0.20
+        ):
+            out_rate = fallback_out_rate
+            in_rate = fallback_in_rate
+
+        out_rate = _clamp(out_rate, 0.94, 1.06)
+        in_rate = _clamp(in_rate, 0.94, 1.06)
+        points.append({
+            "progress": round(float(progress), 4),
+            "outgoingRate": round(out_rate, 6),
+            "incomingRate": round(in_rate, 6),
+            "outgoingBpm": round(a_bpm, 5),
+            "incomingBpm": round(b_bpm, 5),
+            "confidence": round(_clamp(min(a_conf, b_conf), 0.0, 1.0), 4),
+        })
+        previous_a = a_time
+        previous_out = out_rate
+        previous_in = in_rate
+
+    return points
+
+
+def _harmonic_lock_shift(
+    a: dict[str, Any],
+    b: dict[str, Any],
+    a_start: float,
+    a_end: float,
+    b_start: float,
+    outgoing_rate: float,
+    incoming_rate: float,
+    vocal_clash: float = 0.0,
+) -> tuple[float, float, float]:
+    """Return (incoming semitone shift, locked fit, unshifted fit).
+
+    Only -1/0/+1 semitone is considered. A pitch move is accepted only when
+    the time-varying chroma evidence improves materially; otherwise selection
+    remains the harmonic control and playback pitch stays untouched.
+    """
+    a_chroma = _chroma_points(a)
+    b_chroma = _chroma_points(b)
+    if not a_chroma or not b_chroma or a_end <= a_start:
+        return 0.0, 0.5, 0.5
+
+    wall_duration = (a_end - a_start) / max(outgoing_rate, 1e-6)
+    progress = np.linspace(0.0, 1.0, 24, dtype=np.float64)
+    a_times = a_start + progress * (a_end - a_start)
+    b_times = b_start + progress * wall_duration * max(incoming_rate, 1e-6)
+
+    fits: dict[int, float] = {}
+    for shift in (-1, 0, 1):
+        similarities: list[float] = []
+        for a_time, b_time in zip(a_times, b_times, strict=False):
+            left = _chroma_near(a_chroma, float(a_time))
+            right = _chroma_near(b_chroma, float(b_time))
+            if left is None or right is None:
+                continue
+            shifted = np.roll(right, shift)
+            denom = float(np.linalg.norm(left) * np.linalg.norm(shifted))
+            if denom > 1e-9:
+                similarities.append(
+                    _clamp(float(np.dot(left, shifted) / denom), 0.0, 1.0)
+                )
+        if similarities:
+            fits[shift] = float(np.mean(similarities))
+
+    if 0 not in fits:
+        return 0.0, 0.5, 0.5
+
+    base = fits[0]
+    best_shift = max(fits, key=lambda shift: fits[shift] - 0.035 * abs(shift))
+    best_fit = fits[best_shift]
+    required_gain = 0.10 + 0.08 * _clamp(vocal_clash, 0.0, 1.0)
+
+    if (
+        best_shift != 0
+        and best_fit >= 0.68
+        and best_fit - base >= required_gain
+    ):
+        return float(best_shift), best_fit, base
+    return 0.0, base, base
+
+
+def _curve_lock_recipe(
+    a: dict[str, Any],
+    b: dict[str, Any],
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    """Turn analysis curves into executable tempo/phase/harmonic lock data."""
+    style = str(plan.get("style") or "")
+    if style not in {"RUNWAY_BLEND", "PHRASE_TAKEOVER", "DJ_BLEND", "DJ_FILTER", "EQ_SWAP"}:
+        return {
+            "tempoEnvelope": [],
+            "incomingPitchSemitones": 0.0,
+            "harmonicLockScore": 0.0,
+        }
+
+    a_start = _finite(plan.get("transitionStart"), 0.0)
+    a_end = _finite(plan.get("transitionEnd"), a_start)
+    b_start = _finite(plan.get("incomingCueTime"), 0.0)
+    out_rate = _finite(plan.get("outgoingPlaybackRate"), 1.0)
+    in_rate = _finite(plan.get("incomingPlaybackRate"), 1.0)
+
+    envelope = _tempo_envelope_for_overlap(
+        a,
+        b,
+        a_start,
+        a_end,
+        b_start,
+        out_rate,
+        in_rate,
+    )
+    first = envelope[0] if envelope else None
+    lock_out_rate = _finite(first.get("outgoingRate"), out_rate) if first else out_rate
+    lock_in_rate = _finite(first.get("incomingRate"), in_rate) if first else in_rate
+    semitones, locked_fit, base_fit = _harmonic_lock_shift(
+        a,
+        b,
+        a_start,
+        a_end,
+        b_start,
+        lock_out_rate,
+        lock_in_rate,
+        _finite(plan.get("overlapVocalClash"), 0.0),
+    )
+
+    return {
+        "tempoEnvelope": envelope,
+        "incomingPitchSemitones": round(_clamp(semitones, -1.0, 1.0), 4),
+        "harmonicLockScore": round(_clamp(locked_fit, 0.0, 1.0), 4),
+        "harmonicUnshiftedScore": round(_clamp(base_fit, 0.0, 1.0), 4),
+    }
 
 
 def _refine_curve_aligned_cue(
@@ -3132,7 +3314,30 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     best["outgoingTransitionBpm"] = round(a_bpm, 4)
     best["incomingTransitionBpm"] = round(b_bpm, 4)
     best["tempoCompatibility"] = round(tempo, 4)
-    best["planner"] = "orb-automix-2.5-mix-v7"
+
+    curve_lock = _curve_lock_recipe(a, b, best)
+    best.update(curve_lock)
+    tempo_envelope = curve_lock.get("tempoEnvelope") or []
+    if tempo_envelope:
+        first_lock = tempo_envelope[0]
+        best["outgoingPlaybackRate"] = round(
+            _clamp(_finite(first_lock.get("outgoingRate"), best.get("outgoingPlaybackRate", 1.0)), 0.94, 1.06),
+            6,
+        )
+        best["incomingPlaybackRate"] = round(
+            _clamp(_finite(first_lock.get("incomingRate"), best.get("incomingPlaybackRate", 1.0)), 0.94, 1.06),
+            6,
+        )
+        best["outgoingLocalBpm"] = round(
+            _finite(first_lock.get("outgoingBpm"), best.get("outgoingLocalBpm", a_bpm)),
+            4,
+        )
+        best["incomingLocalBpm"] = round(
+            _finite(first_lock.get("incomingBpm"), best.get("incomingLocalBpm", b_bpm)),
+            4,
+        )
+
+    best["planner"] = "orb-automix-2.5-mix-v8"
     best["serverAuthoritative"] = True
     return best, candidates[:5]
 
@@ -3155,7 +3360,7 @@ async def plan(request: PlanRequest) -> dict[str, Any]:
     # minimal fallback is selected here on the server; Android may only reject impossible bounds.
     plan_result = dict(plan_result)
     plan_result["serverAuthoritative"] = True
-    plan_result["planner"] = "orb-automix-2.5-mix-v7"
+    plan_result["planner"] = "orb-automix-2.5-mix-v8"
     return {
         "version": API_VERSION,
         "automixVersion": "2.5",
