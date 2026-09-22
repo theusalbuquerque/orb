@@ -110,6 +110,18 @@ enum class TransitionStyle {
     /** Beat-aware filtered bridge when the pair should not stay spectrally open. */
     DJ_FILTER,
 
+    /**
+     * Long runway: B starts from its opening well before the handoff and its
+     * structural impact is aligned to A's measured release. B never restarts.
+     */
+    RUNWAY_BLEND,
+
+    /**
+     * B takes foreground on a phrase boundary after A has genuinely released,
+     * even when A still has a short musical tail left in the file.
+     */
+    PHRASE_TAKEOVER,
+
     /** Explicit low-end handoff on a compatible beat/key grid. */
     EQ_SWAP,
 
@@ -119,6 +131,13 @@ enum class TransitionStyle {
     /** Clean, click-safe end-of-A to start-of-B transfer; deliberately not a crossfade. */
     CUT,
 }
+
+/** Activity-aware deck gain point for server-authored Automix choreography. */
+data class TransitionGainPoint(
+    val progress: Double,
+    val incomingGain: Double,
+    val outgoingGain: Double,
+)
 
 /**
  * The planned transition for one pair of tracks, in outgoing-track timeline
@@ -155,6 +174,8 @@ data class TransitionPlan(
     val bedPosition: Double = BED_POSITION,
     val bassSwapFraction: Double = 0.7,
     val filterSweep: Double = 0.0,
+    /** Server-authored gain choreography. Empty means use the style fallback. */
+    val gainEnvelope: List<TransitionGainPoint> = emptyList(),
     /**
      * How strongly the two tracks are expected to be singing over each other
      * through this overlap, 0..1; see [vocalOverlapAmount].
