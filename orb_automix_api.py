@@ -745,7 +745,7 @@ async def health() -> dict[str, Any]:
         "version": API_VERSION,
         "automixVersion": "2.5",
         "analyzer": "orb-remote-dsp-v7",
-        "plannerRevision": "mix-v6",
+        "plannerRevision": "mix-v7",
         "analysisSchema": ANALYSIS_SCHEMA,
     }
 
@@ -1741,6 +1741,132 @@ def _beat_phase_metrics(
     return fit, error_seconds * 1000.0
 
 
+def _refine_curve_aligned_cue(
+    a: dict[str, Any],
+    b: dict[str, Any],
+    a_start: float,
+    a_end: float,
+    initial_cue: float,
+    b_start: float,
+    b_end: float,
+    a_bpm: float,
+    b_bpm: float,
+    a_rate: float,
+    b_rate: float,
+) -> dict[str, float | bool]:
+    """Fine-align B around a structural cue using the actual transition curves.
+
+    The structural planner gets us onto the correct phrase/downbeat. This second
+    pass searches a small neighbourhood around that musical anchor so imperfect
+    beat/downbeat estimates do not leave kick/snare attacks, chroma motion or
+    spectral changes audibly offset. The search never jumps to a different
+    phrase: it stays within roughly half a beat either side of the chosen cue.
+    """
+    if a_end <= a_start or b_end <= b_start:
+        return {"cue": initial_cue, "score": 0.0, "shiftMs": 0.0, "evidence": False}
+
+    beat_seconds = 60.0 / b_bpm if b_bpm > 0.0 else 0.5
+    radius = min(0.40, max(0.12, beat_seconds * 0.48))
+    step = min(0.025, max(0.0125, beat_seconds / 24.0))
+
+    candidates: set[float] = {initial_cue}
+    steps = int(math.ceil(radius / step))
+    for index in range(-steps, steps + 1):
+        candidates.add(initial_cue + index * step)
+
+    # Real beat anchors get explicit consideration in addition to the fine search.
+    for name in ("beats", "downbeats"):
+        raw = b.get(name)
+        if not isinstance(raw, list):
+            continue
+        for value in raw:
+            time_s = _finite(value, -1.0)
+            if initial_cue - radius <= time_s <= initial_cue + radius:
+                candidates.add(time_s)
+
+    best_cue = initial_cue
+    best_score = float("-inf")
+    best_curve = 0.5
+    best_phase = 0.5
+    best_phase_error = 0.0
+    best_harmonic = 0.5
+    best_onset = 0.5
+    best_spectral = 0.5
+    best_energy = 0.5
+    evidence_seen = False
+
+    for raw_cue in candidates:
+        cue = _clamp(raw_cue, b_start, max(b_start, b_end - 0.25))
+        curve = _transition_curve_metrics(
+            a,
+            b,
+            a_start,
+            a_end,
+            cue,
+            a_rate,
+            b_rate,
+        )
+        phase_fit, phase_error_ms = _beat_phase_metrics(
+            a,
+            b,
+            a_start,
+            cue,
+            a_bpm,
+            b_bpm,
+            a_rate,
+            b_rate,
+        )
+        has_curves = bool(curve.get("evidence"))
+        evidence_seen = evidence_seen or has_curves
+        curve_fit = float(curve.get("compatibility", 0.5))
+        onset_fit = float(curve.get("onsetFit", 0.5))
+        harmonic_fit = float(curve.get("harmonicFit", 0.5))
+        spectral_fit = float(curve.get("spectralFit", 0.5))
+        energy_fit = float(curve.get("energyContinuity", 0.5))
+        proximity = 1.0 - _clamp(abs(cue - initial_cue) / max(radius, 1e-6), 0.0, 1.0)
+
+        # Rhythm leads the fine alignment; harmony and spectrum decide between
+        # phase-equivalent placements. Proximity keeps the pass from wandering
+        # away from the phrase/downbeat selected by the structural planner.
+        if has_curves:
+            score = (
+                0.26 * phase_fit
+                + 0.22 * onset_fit
+                + 0.19 * harmonic_fit
+                + 0.13 * spectral_fit
+                + 0.10 * energy_fit
+                + 0.06 * curve_fit
+                + 0.04 * proximity
+            )
+        else:
+            score = 0.80 * phase_fit + 0.20 * proximity
+
+        if score > best_score:
+            best_score = score
+            best_cue = cue
+            best_curve = curve_fit
+            best_phase = phase_fit
+            best_phase_error = phase_error_ms
+            best_harmonic = harmonic_fit
+            best_onset = onset_fit
+            best_spectral = spectral_fit
+            best_energy = energy_fit
+
+    return {
+        "cue": best_cue,
+        "score": _clamp(best_score, 0.0, 1.0),
+        "shiftMs": (best_cue - initial_cue) * 1000.0,
+        "evidence": evidence_seen,
+        "curveCompatibility": best_curve,
+        "beatPhaseFit": best_phase,
+        "beatPhaseErrorMs": best_phase_error,
+        "harmonicCurveFit": best_harmonic,
+        "onsetCurveFit": best_onset,
+        "spectralCurveFit": best_spectral,
+        "energyContinuity": best_energy,
+    }
+
+
 def _best_structural_pair(
     a: dict[str, Any],
     b: dict[str, Any],
@@ -1836,6 +1962,40 @@ def _best_structural_pair(
             local_out_rate, local_in_rate = _tempo_bridge_rates(a_local_bpm, b_local_bpm)
             if local_out_rate == 1.0 and local_in_rate == 1.0 and incoming_rate != 1.0:
                 # No trustworthy local curve: retain the transition-level bridge.
+                local_in_rate = incoming_rate
+
+            aligned = _refine_curve_aligned_cue(
+                a,
+                b,
+                a_start,
+                a_end,
+                cue,
+                b_start,
+                b_end,
+                a_local_bpm,
+                b_local_bpm,
+                local_out_rate,
+                local_in_rate,
+            )
+            structural_cue = cue
+            cue = float(aligned.get("cue", cue))
+
+            # Re-sample the local incoming tempo after fine cue alignment. A small
+            # media-time shift can cross a local tempo boundary in live edits.
+            b_probe_time = cue + min(actual_span * 0.50, max(0.0, b_end - cue))
+            b_local_bpm, b_local_conf = _tempo_near(b, b_probe_time, incoming_bpm)
+            if a_local_bpm > 0.0 and b_local_bpm > 0.0:
+                while b_local_bpm / a_local_bpm > 1.5:
+                    b_local_bpm /= 2.0
+                while b_local_bpm / a_local_bpm < 0.67:
+                    b_local_bpm *= 2.0
+            local_tempo_fit = (
+                _clamp(1.0 - abs(b_local_bpm / a_local_bpm - 1.0) / 0.14, 0.0, 1.0)
+                if a_local_bpm > 0.0 and b_local_bpm > 0.0
+                else 0.0
+            )
+            local_out_rate, local_in_rate = _tempo_bridge_rates(a_local_bpm, b_local_bpm)
+            if local_out_rate == 1.0 and local_in_rate == 1.0 and incoming_rate != 1.0:
                 local_in_rate = incoming_rate
 
             vocal_clash, energy_fit = _overlap_pair_metrics(
@@ -1934,6 +2094,10 @@ def _best_structural_pair(
                 "energyShapeFit": float(curve_metrics.get("energyShapeFit", 0.5)),
                 "lowBandCollision": float(curve_metrics.get("lowCollision", 0.0)),
                 "brightnessGap": float(curve_metrics.get("brightnessGap", 0.0)),
+                "curveAlignedCue": cue,
+                "curveCueShiftMs": float(aligned.get("shiftMs", 0.0)),
+                "curveAlignmentScore": float(aligned.get("score", 0.0)),
+                "structuralCue": structural_cue,
             }
 
     return best
@@ -2968,7 +3132,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     best["outgoingTransitionBpm"] = round(a_bpm, 4)
     best["incomingTransitionBpm"] = round(b_bpm, 4)
     best["tempoCompatibility"] = round(tempo, 4)
-    best["planner"] = "orb-automix-2.5-mix-v6"
+    best["planner"] = "orb-automix-2.5-mix-v7"
     best["serverAuthoritative"] = True
     return best, candidates[:5]
 
@@ -2991,7 +3155,7 @@ async def plan(request: PlanRequest) -> dict[str, Any]:
     # minimal fallback is selected here on the server; Android may only reject impossible bounds.
     plan_result = dict(plan_result)
     plan_result["serverAuthoritative"] = True
-    plan_result["planner"] = "orb-automix-2.5-mix-v6"
+    plan_result["planner"] = "orb-automix-2.5-mix-v7"
     return {
         "version": API_VERSION,
         "automixVersion": "2.5",
