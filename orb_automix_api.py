@@ -805,93 +805,6 @@ def _overlap_pair_metrics(
     return vocal_clash, energy_fit
 
 
-def _best_incoming_cue(
-    a: dict[str, Any],
-    b: dict[str, Any],
-    a_start: float,
-    a_end: float,
-    desired: float,
-    b_start: float,
-    b_end: float,
-    incoming_rate: float,
-    beat_seconds: float,
-) -> tuple[float, float, float, float]:
-    """Pick B's entry by how well the actual A/B windows fit, not by one scalar mixInTime."""
-    raw = b.get("mixInCandidates")
-    options: list[tuple[float, float]] = []
-
-    if isinstance(raw, list):
-        for item in raw[:8]:
-            if not isinstance(item, dict):
-                continue
-            time_s = _finite(item.get("time"), -1.0)
-            if time_s < b_start or (b_end > 0.0 and time_s >= b_end - 0.25):
-                continue
-            analyzer_score = _clamp(_finite(item.get("score"), 0.5), 0.0, 1.0)
-            options.append((time_s, 0.62 + 0.38 * analyzer_score))
-
-    fallback_cue, fallback_structure = _structural_snap(
-        b,
-        desired,
-        b_start,
-        max(b_start, b_end - 0.25),
-        beat_seconds,
-    )
-    options.append((fallback_cue, fallback_structure))
-
-    # Deduplicate candidates that snap to essentially the same beat.
-    unique: list[tuple[float, float]] = []
-    for time_s, structure in sorted(options, key=lambda x: x[0]):
-        if unique and abs(unique[-1][0] - time_s) < max(0.08, beat_seconds * 0.20):
-            if structure > unique[-1][1]:
-                unique[-1] = (time_s, structure)
-            continue
-        unique.append((time_s, structure))
-
-    best: tuple[float, float, float, float, float] | None = None
-    for raw_cue, structure in unique:
-        cue, snapped_structure = _structural_snap(
-            b,
-            raw_cue,
-            b_start,
-            max(b_start, b_end - 0.25),
-            beat_seconds,
-        )
-        structure_fit = max(structure, snapped_structure)
-        vocal_clash, energy_fit = _overlap_pair_metrics(
-            a,
-            b,
-            a_start,
-            a_end,
-            cue,
-            incoming_rate,
-        )
-
-        skipped = max(0.0, cue - b_start)
-        # Early arrangement is valuable. Past eight seconds, a cue has to earn the skip.
-        skip_penalty = _clamp((skipped - 8.0) / 24.0, 0.0, 1.0)
-        proximity = 1.0 - _clamp(abs(cue - desired) / max(8.0, 8.0 * beat_seconds), 0.0, 1.0)
-        pair_score = (
-            0.28 * structure_fit
-            + 0.28 * (1.0 - vocal_clash)
-            + 0.20 * energy_fit
-            + 0.14 * proximity
-            - 0.18 * skip_penalty
-        )
-        candidate = (pair_score, cue, structure_fit, vocal_clash, energy_fit)
-        if best is None or candidate[0] > best[0]:
-            best = candidate
-
-    if best is None:
-        vocal_clash, energy_fit = _overlap_pair_metrics(
-            a, b, a_start, a_end, fallback_cue, incoming_rate,
-        )
-        return fallback_cue, fallback_structure, vocal_clash, energy_fit
-
-    _, cue, structure_fit, vocal_clash, energy_fit = best
-    return cue, structure_fit, vocal_clash, energy_fit
-
-
 def _timing_candidates(
     track: dict[str, Any],
     desired: float,
@@ -1111,7 +1024,6 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     b_open_activity = _mean_window(b_energy, b_start, b_open_end, 0.0)
     a_tail_start = max(0.0, a_end - 10.0)
     a_tail_vocal = _mean_window(a_vocal_curve, a_tail_start, a_end, _finite(a.get("vocalProbability"), 0.5))
-    a_tail_activity = _mean_window(a_energy, a_tail_start, a_end, 0.5)
     a_bpm, b_bpm, tempo = _tempo_pair(a, b)
     conf = min(_clamp(_finite(a.get("beatConfidence")), 0.0, 1.0), _clamp(_finite(b.get("beatConfidence")), 0.0, 1.0))
     key_fit = _key_compatibility(a, b)
