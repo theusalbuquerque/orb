@@ -5,6 +5,10 @@ on:
     paths:
       - "app/src/main/java/com/music/orb/playback/**"
       - "app/src/main/java/com/music/orb/playback/smart/**"
+      - "app/src/main/java/com/music/orb/data/settings/**"
+      - "app/src/main/java/com/music/orb/ui/**"
+      - "app/src/main/java/com/music/orb/MainActivity.kt"
+      - "app/src/main/res/**"
       - "app/build.gradle.kts"
       - "build.gradle.kts"
       - "settings.gradle.kts"
@@ -14,6 +18,10 @@ on:
     paths:
       - "app/src/main/java/com/music/orb/playback/**"
       - "app/src/main/java/com/music/orb/playback/smart/**"
+      - "app/src/main/java/com/music/orb/data/settings/**"
+      - "app/src/main/java/com/music/orb/ui/**"
+      - "app/src/main/java/com/music/orb/MainActivity.kt"
+      - "app/src/main/res/**"
       - "app/build.gradle.kts"
       - "build.gradle.kts"
       - "settings.gradle.kts"
