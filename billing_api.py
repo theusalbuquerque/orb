@@ -243,6 +243,87 @@ def _premium(status: str) -> bool:
     return status == "active"
 
 
+async def _recover_mercado_pago_status(checkout_ref: str) -> dict[str, Any] | None:
+    if not MP_ACCESS_TOKEN:
+        return None
+
+    headers = {"Authorization": f"Bearer {MP_ACCESS_TOKEN}"}
+    plan: dict[str, Any] | None = None
+    offset = 0
+    limit = 20
+
+    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+        while offset < 200:
+            response = await client.get(
+                f"{MP_API}/preapproval_plan/search",
+                headers=headers,
+                params={"offset": offset, "limit": limit},
+            )
+            if response.status_code >= 400:
+                return None
+
+            payload = response.json() or {}
+            results = payload.get("results") or []
+            for item in results:
+                if str(item.get("external_reference") or "") == checkout_ref:
+                    plan = item
+                    break
+
+            if plan is not None:
+                break
+
+            paging = payload.get("paging") or {}
+            total = int(paging.get("total") or 0)
+            offset += limit
+            if not results or offset >= total:
+                break
+
+        if plan is None:
+            return None
+
+        plan_id = str(plan.get("id") or "")
+        subscriptions_response = await client.get(
+            f"{MP_API}/preapproval/search",
+            headers=headers,
+            params={"preapproval_plan_id": plan_id},
+        )
+
+        subscriptions: list[dict[str, Any]] = []
+        if subscriptions_response.status_code < 400:
+            subscriptions = (subscriptions_response.json() or {}).get("results") or []
+
+    selected: dict[str, Any] | None = None
+    if subscriptions:
+        subscriptions.sort(
+            key=lambda item: str(item.get("date_created") or ""),
+            reverse=True,
+        )
+        selected = subscriptions[0]
+
+    recurring = plan.get("auto_recurring") or {}
+    frequency = int(recurring.get("frequency") or 1)
+    frequency_type = str(recurring.get("frequency_type") or "months").lower()
+    plan_name = "yearly" if frequency_type == "months" and frequency >= 12 else "monthly"
+    amount = float(recurring.get("transaction_amount") or 0.0)
+
+    mp_status = str((selected or {}).get("status") or "pending")
+    status = _normalize_mp_status(mp_status)
+    subscription_id = str((selected or {}).get("id") or "") or None
+
+    return {
+        "checkoutRef": checkout_ref,
+        "provider": "mercadopago",
+        "plan": plan_name,
+        "amount": amount,
+        "currency": str(recurring.get("currency_id") or "BRL"),
+        "status": status,
+        "premium": _premium(status),
+        "providerSubscriptionId": subscription_id,
+        "providerPlanId": plan_id,
+        "recoveredFromProvider": True,
+    }
+
+
 @router.get("/providers")
 async def providers():
     return {
@@ -415,19 +496,30 @@ async def checkout_status(checkout_ref: str = Query(..., min_length=32, max_leng
             """,
             (checkout_ref,),
         ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Checkout not found")
-    data = dict(row)
-    return {
-        "checkoutRef": data["checkout_ref"],
-        "provider": data["provider"],
-        "plan": data["plan"],
-        "amount": data["amount"],
-        "currency": data["currency"],
-        "status": data["status"],
-        "premium": _premium(data["status"]),
-        "updatedAt": data["updated_at"],
-    }
+
+    if row is not None:
+        data = dict(row)
+        if data["provider"] == "mercadopago" and data["status"] != "active":
+            recovered = await _recover_mercado_pago_status(checkout_ref)
+            if recovered is not None:
+                return recovered
+        return {
+            "checkoutRef": data["checkout_ref"],
+            "provider": data["provider"],
+            "plan": data["plan"],
+            "amount": data["amount"],
+            "currency": data["currency"],
+            "status": data["status"],
+            "premium": _premium(data["status"]),
+            "updatedAt": data["updated_at"],
+            "recoveredFromProvider": False,
+        }
+
+    recovered = await _recover_mercado_pago_status(checkout_ref)
+    if recovered is not None:
+        return recovered
+
+    raise HTTPException(status_code=404, detail="Checkout not found")
 
 
 def _verify_mp_webhook(request: Request, data_id: str) -> None:
