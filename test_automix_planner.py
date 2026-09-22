@@ -85,6 +85,7 @@ class AutomixPlannerTest(unittest.TestCase):
         self.assertEqual(result["automixVersion"], "2.5")
         self.assertEqual(result["authority"], "server")
         self.assertIn(result["style"], {
+            "RUNWAY_BLEND", "PHRASE_TAKEOVER",
             "DJ_BLEND", "DJ_FILTER", "EQ_SWAP", "PHRASE_CUT", "CUT", "NO_TRANSITION",
         })
 
@@ -269,6 +270,73 @@ class AutomixPlannerTest(unittest.TestCase):
         self.assertGreaterEqual(automix._key_compatibility(c_major, f_major), 0.85)
         self.assertLessEqual(automix._key_compatibility(c_major, c_sharp_major), 0.20)
 
+    def test_reference_long_runway_aligns_b_impact_with_a_release(self) -> None:
+        a = track(bpm=128.0, key="C major", vocal=0.65, duration=120.0)
+        b = track(bpm=128.0, key="A minor", vocal=0.08, duration=160.0)
+
+        # A stays foreground until 107 s, then genuinely releases with 13 s of tail.
+        for index, point in enumerate(a["energyCurve"]):
+            if point["time"] < 107.0:
+                point["energy"] = 0.74
+                a["vocalActivityMask"][index] = 0.64
+            else:
+                point["energy"] = 0.20
+                a["vocalActivityMask"][index] = 0.08
+        a["outroStartTime"] = 100.0
+        a["vocalProbability"] = 0.50
+
+        # B has a real low-vocal runway and a strong arrival around 20 s.
+        for index, point in enumerate(b["energyCurve"]):
+            if point["time"] < 20.0:
+                point["energy"] = 0.14
+                b["lowEnergyCurve"][index]["energy"] = 0.12
+                b["vocalActivityMask"][index] = 0.05
+            else:
+                point["energy"] = 0.84
+                b["lowEnergyCurve"][index]["energy"] = 0.76
+                b["vocalActivityMask"][index] = 0.16
+        b["introEndTime"] = 20.0
+        b["mixInTime"] = 20.0
+        b["mixInCandidates"] = [{"time": 20.0, "score": 0.95, "type": "phrase"}]
+        b["vocalProbability"] = 0.12
+
+        best, candidates = automix._remote_plan(a, b)
+
+        self.assertEqual(best["style"], "RUNWAY_BLEND")
+        self.assertAlmostEqual(float(best["incomingCueTime"]), 0.0, delta=0.2)
+        self.assertAlmostEqual(float(best["incomingHandoffTime"]), 20.0, delta=2.5)
+        self.assertLess(float(best["transitionStart"]), 95.0)
+        self.assertGreater(float(best["transitionEnd"]) - float(best["transitionStart"]), 24.0)
+        self.assertTrue(any(c["style"] == "RUNWAY_BLEND" for c in candidates))
+
+    def test_phrase_takeover_can_leave_a_tail_unplayed(self) -> None:
+        a = track(bpm=122.0, key="C major", vocal=0.55, duration=120.0)
+        b = track(bpm=123.0, key="A minor", vocal=0.45, duration=150.0)
+
+        for index, point in enumerate(a["energyCurve"]):
+            if point["time"] < 108.0:
+                point["energy"] = 0.70
+                a["vocalActivityMask"][index] = 0.58
+            else:
+                point["energy"] = 0.18
+                a["vocalActivityMask"][index] = 0.08
+        a["outroStartTime"] = 104.0
+
+        # B is assertive almost immediately, so there is no long quiet runway.
+        b["mixInTime"] = 1.0
+        b["mixInCandidates"] = [{"time": 1.0, "score": 0.95, "type": "phrase"}]
+        for index, point in enumerate(b["energyCurve"]):
+            point["energy"] = 0.70
+            b["lowEnergyCurve"][index]["energy"] = 0.60
+            b["vocalActivityMask"][index] = 0.45
+
+        best, candidates = automix._remote_plan(a, b)
+
+        self.assertEqual(best["style"], "PHRASE_TAKEOVER")
+        self.assertLess(float(best["transitionEnd"]), 120.0)
+        self.assertLessEqual(float(best["incomingCueTime"]), 2.0)
+        self.assertTrue(any(c["style"] == "PHRASE_TAKEOVER" for c in candidates))
+
     def test_structural_pair_tracks_release_as_handoff(self) -> None:
         a = track(bpm=128.0)
         b = track(bpm=128.0)
@@ -396,10 +464,10 @@ class AutomixPlannerTest(unittest.TestCase):
 
         best, _ = automix._remote_plan(a, b)
 
-        if best["style"] in {"DJ_BLEND", "DJ_FILTER", "EQ_SWAP"}:
+        if best["style"] in {"RUNWAY_BLEND", "DJ_BLEND", "DJ_FILTER", "EQ_SWAP"}:
             self.assertGreaterEqual(float(best["handoffFraction"]), 0.84)
         else:
-            self.assertIn(best["style"], {"PHRASE_CUT", "CUT", "NO_TRANSITION"})
+            self.assertIn(best["style"], {"PHRASE_TAKEOVER", "PHRASE_CUT", "CUT", "NO_TRANSITION"})
 
 
     def test_heavy_vocal_collision_rejects_long_overlap(self) -> None:
