@@ -993,6 +993,211 @@ def _curve(track: dict[str, Any], name: str) -> list[tuple[float, float]]:
     return out
 
 
+def _tempo_points(track: dict[str, Any]) -> list[tuple[float, float, float]]:
+    raw = track.get("tempoCurve")
+    if not isinstance(raw, list):
+        return []
+    points: list[tuple[float, float, float]] = []
+    for point in raw:
+        if not isinstance(point, dict):
+            continue
+        time_s = _finite(point.get("time"), float("nan"))
+        bpm = _finite(point.get("bpm"), float("nan"))
+        confidence = _clamp(_finite(point.get("confidence"), 0.0), 0.0, 1.0)
+        if math.isfinite(time_s) and 40.0 <= bpm <= 220.0:
+            points.append((max(0.0, time_s), bpm, confidence))
+    return points
+
+
+def _tempo_near(track: dict[str, Any], time_s: float, fallback: float) -> tuple[float, float]:
+    points = _tempo_points(track)
+    if not points:
+        return fallback, 0.0
+    point = min(points, key=lambda item: abs(item[0] - time_s))
+    # A local estimate more than 12 s away is not really local to the join.
+    if abs(point[0] - time_s) > 12.0 or point[2] < 0.18:
+        return fallback, point[2]
+    return point[1], point[2]
+
+
+def _chroma_points(track: dict[str, Any]) -> list[tuple[float, np.ndarray]]:
+    raw = track.get("chromaCurve")
+    if not isinstance(raw, list):
+        return []
+    points: list[tuple[float, np.ndarray]] = []
+    for point in raw:
+        if not isinstance(point, dict):
+            continue
+        time_s = _finite(point.get("time"), float("nan"))
+        values = point.get("chroma")
+        if not math.isfinite(time_s) or not isinstance(values, list) or len(values) != 12:
+            continue
+        vector = np.asarray([max(0.0, _finite(value)) for value in values], dtype=np.float64)
+        total = float(np.sum(vector))
+        if total > 1e-9:
+            vector /= total
+        points.append((max(0.0, time_s), vector))
+    return points
+
+
+def _chroma_near(points: list[tuple[float, np.ndarray]], time_s: float) -> np.ndarray | None:
+    if not points:
+        return None
+    return min(points, key=lambda item: abs(item[0] - time_s))[1]
+
+
+def _curve_values_at(
+    points: list[tuple[float, float]],
+    times: np.ndarray,
+    default: float = 0.5,
+) -> np.ndarray:
+    if not points or not times.size:
+        return np.full(times.size, default, dtype=np.float64)
+    point_times = np.asarray([time_s for time_s, _ in points], dtype=np.float64)
+    values = np.asarray([value for _, value in points], dtype=np.float64)
+    indices = np.searchsorted(point_times, times, side="left")
+    indices = np.clip(indices, 0, len(point_times) - 1)
+    previous = np.clip(indices - 1, 0, len(point_times) - 1)
+    choose_previous = (
+        np.abs(point_times[previous] - times)
+        <= np.abs(point_times[indices] - times)
+    )
+    return values[np.where(choose_previous, previous, indices)]
+
+
+def _shape_similarity(left: np.ndarray, right: np.ndarray) -> float:
+    if left.size < 3 or right.size != left.size:
+        return 0.5
+    left_delta = np.diff(left)
+    right_delta = np.diff(right)
+    left_norm = float(np.linalg.norm(left_delta))
+    right_norm = float(np.linalg.norm(right_delta))
+    if left_norm <= 1e-9 or right_norm <= 1e-9:
+        return _clamp(1.0 - float(np.mean(np.abs(left - right))), 0.0, 1.0)
+    cosine = float(np.dot(left_delta, right_delta) / (left_norm * right_norm))
+    return _clamp((cosine + 1.0) * 0.5, 0.0, 1.0)
+
+
+def _transition_curve_metrics(
+    a: dict[str, Any],
+    b: dict[str, Any],
+    a_start: float,
+    a_end: float,
+    b_start: float,
+    outgoing_rate: float,
+    incoming_rate: float,
+) -> dict[str, float | bool]:
+    """Compare the actual time-varying audio contours that would overlap.
+
+    The score deliberately separates three questions:
+    - rhythm: do transient/onset contours land together?
+    - harmony: do local pitch-class trajectories agree through the overlap?
+    - spectrum/energy: will the combined low/mid/high balance stay controlled?
+    Missing curve evidence is neutral and never fabricates confidence.
+    """
+    if a_end <= a_start:
+        return {"evidence": False, "compatibility": 0.5}
+
+    wall_duration = (a_end - a_start) / max(outgoing_rate, 1e-6)
+    samples = 24
+    progress = np.linspace(0.0, 1.0, samples, dtype=np.float64)
+    a_times = a_start + progress * (a_end - a_start)
+    b_times = b_start + progress * wall_duration * max(incoming_rate, 1e-6)
+
+    a_energy_points = _curve(a, "energyCurve")
+    b_energy_points = _curve(b, "energyCurve")
+    spectral_names = (
+        "lowEnergyCurve",
+        "midEnergyCurve",
+        "highEnergyCurve",
+        "brightnessCurve",
+    )
+    has_spectral = all(_curve(a, name) and _curve(b, name) for name in spectral_names)
+    has_onset = bool(_curve(a, "onsetCurve") and _curve(b, "onsetCurve"))
+    a_chroma = _chroma_points(a)
+    b_chroma = _chroma_points(b)
+    has_chroma = bool(a_chroma and b_chroma)
+    evidence = bool((a_energy_points and b_energy_points) and (has_spectral or has_onset or has_chroma))
+    if not evidence:
+        return {"evidence": False, "compatibility": 0.5}
+
+    a_energy = _curve_values_at(a_energy_points, a_times)
+    b_energy = _curve_values_at(b_energy_points, b_times)
+    energy_shape = _shape_similarity(a_energy, b_energy)
+    # Continuity at the authority handoff is more important than identical average loudness.
+    handoff_index = samples // 2
+    energy_continuity = _clamp(
+        1.0 - abs(float(a_energy[handoff_index]) - float(b_energy[handoff_index])),
+        0.0,
+        1.0,
+    )
+
+    spectral_fit = 0.5
+    low_collision = 0.0
+    brightness_gap = 0.0
+    if has_spectral:
+        fits: list[float] = []
+        for name in spectral_names:
+            left = _curve_values_at(_curve(a, name), a_times)
+            right = _curve_values_at(_curve(b, name), b_times)
+            fits.append(_shape_similarity(left, right))
+            if name == "lowEnergyCurve":
+                low_collision = float(np.mean(np.minimum(left, right)))
+            if name == "brightnessCurve":
+                brightness_gap = float(np.mean(np.abs(left - right)))
+        # Shape similarity plus a penalty when both kick/bass regions are simultaneously dense.
+        spectral_fit = _clamp(
+            0.78 * float(np.mean(fits))
+            + 0.22 * (1.0 - _clamp(low_collision, 0.0, 1.0)),
+            0.0,
+            1.0,
+        )
+
+    onset_fit = 0.5
+    if has_onset:
+        a_onset = _curve_values_at(_curve(a, "onsetCurve"), a_times, 0.0)
+        b_onset = _curve_values_at(_curve(b, "onsetCurve"), b_times, 0.0)
+        a_norm = float(np.linalg.norm(a_onset))
+        b_norm = float(np.linalg.norm(b_onset))
+        if a_norm > 1e-9 and b_norm > 1e-9:
+            onset_fit = _clamp(float(np.dot(a_onset, b_onset) / (a_norm * b_norm)), 0.0, 1.0)
+
+    harmonic_fit = 0.5
+    if has_chroma:
+        similarities: list[float] = []
+        for a_time, b_time in zip(a_times, b_times, strict=False):
+            left = _chroma_near(a_chroma, float(a_time))
+            right = _chroma_near(b_chroma, float(b_time))
+            if left is None or right is None:
+                continue
+            denom = float(np.linalg.norm(left) * np.linalg.norm(right))
+            if denom > 1e-9:
+                similarities.append(_clamp(float(np.dot(left, right) / denom), 0.0, 1.0))
+        if similarities:
+            harmonic_fit = float(np.mean(similarities))
+
+    compatibility = _clamp(
+        0.24 * onset_fit
+        + 0.24 * harmonic_fit
+        + 0.20 * spectral_fit
+        + 0.17 * energy_shape
+        + 0.15 * energy_continuity,
+        0.0,
+        1.0,
+    )
+    return {
+        "evidence": True,
+        "compatibility": compatibility,
+        "onsetFit": onset_fit,
+        "harmonicFit": harmonic_fit,
+        "spectralFit": spectral_fit,
+        "energyShapeFit": energy_shape,
+        "energyContinuity": energy_continuity,
+        "lowCollision": _clamp(low_collision, 0.0, 1.0),
+        "brightnessGap": _clamp(brightness_gap, 0.0, 1.0),
+    }
+
+
 def _vocal_curve(track: dict[str, Any]) -> list[tuple[float, float]]:
     energy = _curve(track, "energyCurve")
     raw = track.get("vocalActivityMask")
