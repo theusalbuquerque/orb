@@ -153,6 +153,9 @@ object RemoteAutomixClient {
                             "plan ${outgoingTrack.id} -> ${incomingTrack.id}: " +
                                 "${plan.transitionStyle} ${plan.transitionStart}-${plan.transitionEnd}s " +
                                 "rates=${plan.outgoingPlaybackRate}/${plan.incomingPlaybackRate} " +
+                                "handoff=${plan.handoffFraction} pair=${"%.2f".format(plan.pairCompatibility)} " +
+                                "phrase=${"%.2f".format(plan.phraseAlignment)} " +
+                                "anchors=${plan.outgoingAnchor}->${plan.incomingAnchor} " +
                                 "reason=${plan.reason}",
                         )
                     }
@@ -179,6 +182,16 @@ object RemoteAutomixClient {
                 markerVisible = false,
                 transitionStart = end,
                 transitionEnd = end,
+                keyCompatibility = value.finiteDouble("keyCompatibility", 0.0),
+                tempoCompatibility = value.finiteDouble("tempoCompatibility", 0.0),
+                phraseAlignment = value.finiteDouble("phraseAlignment", 0.0),
+                pairCompatibility = value.finiteDouble("pairCompatibility", 0.0),
+                energyCompatibility = value.finiteDouble("energyCompatibility", 0.0),
+                overlapVocalClash = value.finiteDouble("overlapVocalClash", 0.0),
+                spanCompatibility = value.finiteDouble("spanCompatibility", 0.0),
+                requestedTransitionBeats = value.optInt("requestedTransitionBeats", 0).coerceAtLeast(0),
+                outgoingAnchor = value.optString("outgoingAnchor", ""),
+                incomingAnchor = value.optString("incomingAnchor", ""),
                 reason = "remote:$reason",
                 policyReasons = listOf("remote-authoritative"),
             )
@@ -245,6 +258,16 @@ object RemoteAutomixClient {
             filterSweep = filterSweep,
             outgoingBpm = outgoing.bpm,
             incomingBpm = incoming.bpm,
+            keyCompatibility = value.finiteDouble("keyCompatibility", 0.0),
+            tempoCompatibility = value.finiteDouble("tempoCompatibility", 0.0),
+            phraseAlignment = value.finiteDouble("phraseAlignment", 0.0),
+            pairCompatibility = value.finiteDouble("pairCompatibility", 0.0),
+            energyCompatibility = value.finiteDouble("energyCompatibility", 0.0),
+            overlapVocalClash = value.finiteDouble("overlapVocalClash", 0.0),
+            spanCompatibility = value.finiteDouble("spanCompatibility", 0.0),
+            requestedTransitionBeats = value.optInt("requestedTransitionBeats", 0).coerceAtLeast(0),
+            outgoingAnchor = value.optString("outgoingAnchor", ""),
+            incomingAnchor = value.optString("incomingAnchor", ""),
             policyReasons = listOf("remote-authoritative"),
             reason = "remote:$reason",
         )
