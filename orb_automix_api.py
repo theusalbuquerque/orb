@@ -2175,19 +2175,25 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
             candidate for candidate in overlap_candidates
             if candidate.get("style") == "RUNWAY_BLEND"
         ]
+        takeover_overlap = [
+            candidate for candidate in overlap_candidates
+            if candidate.get("style") == "PHRASE_TAKEOVER"
+        ]
         open_overlap = [
             candidate
             for candidate in overlap_candidates
             if candidate.get("style") in {"DJ_BLEND", "EQ_SWAP"}
         ]
-        # A real measured runway is an arrangement-level opportunity and should not be
-        # thrown away merely because a shorter 8/16-beat bridge scores a few hundredths more.
-        # Otherwise prefer richer open/bass-swap techniques before the conservative filter.
-        if runway_overlap and max(runway_overlap, key=lambda x: x["score"])["score"] >= (
-            max(open_overlap, key=lambda x: x["score"])["score"] - 0.06 if open_overlap else 0.0
-        ):
+        # Arrangement-specific opportunities outrank generic grid matches. A measured long
+        # runway is exactly the behaviour seen in the supplied Apple/Spotify references, and a
+        # real A-release + immediate B opening is better served by takeover than by stretching a
+        # full symmetric blend across music A has already released.
+        if runway_overlap:
             best = max(runway_overlap, key=lambda x: x["score"])
+        elif takeover_overlap:
+            best = max(takeover_overlap, key=lambda x: x["score"])
         else:
+            # Otherwise prefer richer open/bass-swap techniques before the conservative filter.
             best = max(open_overlap or overlap_candidates, key=lambda x: x["score"])
     elif cut_candidates:
         best = max(cut_candidates, key=lambda x: x["score"])
