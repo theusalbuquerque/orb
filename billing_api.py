@@ -257,8 +257,8 @@ async def create_mercado_pago_checkout(body: CheckoutRequest):
     amount = _price(body.plan)
     checkout_ref = str(uuid.uuid4())
     recurring = {
-        "frequency": 1,
-        "frequency_type": "months" if body.plan == "monthly" else "years",
+        "frequency": 1 if body.plan == "monthly" else 12,
+        "frequency_type": "months",
         "transaction_amount": amount,
         "currency_id": "BRL",
     }
