@@ -871,6 +871,10 @@ class CrossfadeController(
         // silence.
         if (expired && !ready) return bail()
 
+        // Only adapt A once B is genuinely ready. Playback never pays a tempo
+        // change for a transition that might still be lost to buffering.
+        if (ready && smartFadeActive) rideTempoPreRoll(out)
+
         // Wait for the track to actually reach the fade point. [fadeEndMs] is
         // the track's own duration in standard mode, or a Automix plan's
         // analyzed mix-out anchor when it ends before the file does.
@@ -895,6 +899,14 @@ class CrossfadeController(
         // with a copy of it; those tracks would otherwise be lost at the swap.
         reconcileQueue(out, into)
 
+        // The pre-roll normally arrives here already at the meeting tempo.
+        // If B became READY at the last possible tick, enforce the same grid
+        // before making B audible rather than starting the overlap off-phase.
+        if (smartFadeActive) {
+            out.setPlaybackSpeed(
+                (AppSettings.playbackSpeed.value * outgoingPlaybackRate).toFloat(),
+            )
+        }
         into.volume = 0f
         into.playWhenReady = true
         fadeStartedAt = SystemClock.elapsedRealtime()
@@ -1087,8 +1099,12 @@ class CrossfadeController(
             outgoing?.let(::retire)
         } else {
             // The transition never became audible, so the session player never
-            // moved and the standby is the one to throw away.
-            outgoing?.volume = 1f
+            // moved and the standby is the one to throw away. A may already
+            // have entered the silent tempo pre-roll, so restore it as well.
+            outgoing?.let {
+                it.volume = 1f
+                it.setPlaybackSpeed(AppSettings.playbackSpeed.value)
+            }
             incoming?.let(::retire)
         }
 
@@ -1383,32 +1399,42 @@ class CrossfadeController(
         )
 
     /**
-     * Makes tempo adaptation belong to both songs instead of forcing B onto A.
-     *
-     * B is prepared at the meeting tempo before it becomes audible. Once the
-     * overlap starts, A glides toward that same meeting tempo over the first
-     * third. In the final third, after the musical handoff is established, B
-     * glides back to its native tempo. Pitch stays unchanged because Media3's
-     * Sonic processor is already in the audio sink.
+     * Moves A toward the pair's meeting tempo while A is still the only audible
+     * deck. This is transport-safe because it only runs after B reached READY;
+     * if arming fails, [finish] restores A's native listener speed.
+     */
+    private fun rideTempoPreRoll(out: ExoPlayer) {
+        if (outgoingPlaybackRate == 1.0 || fadeEndMs <= 0L || fadeMs <= 0L) return
+
+        val transitionStartMs = (fadeEndMs - fadeMs).coerceAtLeast(0L)
+        val remainingMs = transitionStartMs - out.currentPosition
+        val preRollMs = (fadeMs / 4L)
+            .coerceIn(TEMPO_PREROLL_MIN_MS, TEMPO_PREROLL_MAX_MS)
+        if (remainingMs > preRollMs) return
+
+        val progress = (1f - remainingMs.coerceAtLeast(0L).toFloat() / preRollMs)
+            .coerceIn(0f, 1f)
+        val amount = smoothStep(progress).toDouble()
+        val rate = 1.0 + (outgoingPlaybackRate - 1.0) * amount
+        out.setPlaybackSpeed((AppSettings.playbackSpeed.value * rate).toFloat())
+    }
+
+    /**
+     * During the audible overlap both decks share one tempo grid from the first
+     * beat. A stays at the meeting tempo; only after the musical handoff does B
+     * glide back to its native tempo. Pitch remains unchanged through Media3's
+     * time-stretch processor.
      */
     private fun rideTempoBridge(progress: Float, out: ExoPlayer, into: ExoPlayer) {
         val base = AppSettings.playbackSpeed.value.toDouble()
         val handoff = musicalHandoffFraction()
-
-        // A reaches the shared tempo before the authority handoff. B only starts
-        // relaxing back to its native tempo after that handoff, so the beat grid
-        // cannot drift apart while A is still the foreground track.
-        val approachEnd = minOf(TEMPO_APPROACH_MAX, (handoff - 0.16f).coerceAtLeast(0.22f))
-        val releaseStart = maxOf(TEMPO_RELEASE_MIN, (handoff + 0.06f).coerceAtMost(0.90f))
-
-        val approach = smoothStep((progress / approachEnd).coerceIn(0f, 1f)).toDouble()
+        val releaseStart = maxOf(TEMPO_RELEASE_MIN, (handoff + 0.06f).coerceAtMost(0.92f))
         val release = smoothStep(
             ((progress - releaseStart) / (1f - releaseStart)).coerceIn(0f, 1f),
         ).toDouble()
 
-        val outRate = 1.0 + (outgoingPlaybackRate - 1.0) * approach
+        out.setPlaybackSpeed((base * outgoingPlaybackRate).toFloat())
         val inRate = incomingPlaybackRate + (1.0 - incomingPlaybackRate) * release
-        out.setPlaybackSpeed((base * outRate).toFloat())
         into.setPlaybackSpeed((base * inRate).toFloat())
     }
 
@@ -1505,8 +1531,9 @@ class CrossfadeController(
          */
         const val DEFAULT_SMART_FALLBACK_SECONDS = 6.0
 
-        /** Latest point by which A should have reached the pair's meeting tempo. */
-        const val TEMPO_APPROACH_MAX = 0.34f
+        /** Tempo adaptation of A happens silently before B enters, never while B is buffering. */
+        const val TEMPO_PREROLL_MIN_MS = 1_200L
+        const val TEMPO_PREROLL_MAX_MS = 3_000L
 
         /** Never release B back to native tempo before this point of the overlap. */
         const val TEMPO_RELEASE_MIN = 0.66f
