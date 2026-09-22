@@ -1,6 +1,8 @@
+import asyncio
 import unittest
 
 import numpy as np
+from fastapi import HTTPException
 
 import orb_automix_api as automix
 
@@ -55,6 +57,37 @@ def track(
 
 
 class AutomixPlannerTest(unittest.TestCase):
+    def test_automix_25_server_rejects_missing_entitlement(self) -> None:
+        request = automix.PlanRequest(
+            version=automix.API_VERSION,
+            preview=True,
+            accountHash="not-entitled",
+            outgoing=track(),
+            incoming=track(),
+        )
+
+        with self.assertRaises(HTTPException) as raised:
+            asyncio.run(automix.plan(request))
+
+        self.assertEqual(raised.exception.status_code, 403)
+
+    def test_automix_25_server_accepts_owner_beta_entitlement(self) -> None:
+        request = automix.PlanRequest(
+            version=automix.API_VERSION,
+            preview=True,
+            accountHash=automix._AUTOMIX25_OWNER_HASH,
+            outgoing=track(),
+            incoming=track(key="A minor"),
+        )
+
+        result = asyncio.run(automix.plan(request))
+
+        self.assertEqual(result["automixVersion"], "2.5")
+        self.assertEqual(result["authority"], "server")
+        self.assertIn(result["style"], {
+            "DJ_BLEND", "DJ_FILTER", "EQ_SWAP", "PHRASE_CUT", "CUT", "NO_TRANSITION",
+        })
+
     def test_client_model_evidence_overrides_cached_transition_windows(self) -> None:
         cached = track(bpm=128.0, key="C major", vocal=0.10, duration=10.0)
         cached["downbeats"] = [0.0, 2.0, 4.0, 6.0, 8.0]
