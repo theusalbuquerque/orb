@@ -19,7 +19,12 @@
     <string name="settings_on_mobile_data">Dados Móveis</string>
     <string name="settings_playback">Reprodução</string>
     <string name="settings_crossfade">Transição suave (Crossfade)</string>
-    <string name="settings_automix">Automix [BETA]</string>
+    <string name="settings_automix">Automix</string>
+    <string name="settings_automix_version">Versão do Automix</string>
+    <string name="settings_automix_20">2.0</string>
+    <string name="settings_automix_25">2.5</string>
+    <string name="settings_automix_25_premium_preview">Prévia Premium · disponível para esta conta</string>
+    <string name="settings_automix_subtitle_on_version">Automix %1$s ativado</string>
     <string name="settings_skip_silence">Pular silêncio</string>
     <string name="settings_spatial_audio">Áudio espacial</string>
     <string name="settings_equalizer">Equalizador</string>
