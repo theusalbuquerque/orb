@@ -717,6 +717,44 @@ def _tempo_bridge_rates(a_bpm: float, b_bpm: float) -> tuple[float, float]:
     )
 
 
+
+def _structural_snap(
+    track: dict[str, Any],
+    desired: float,
+    lo: float,
+    hi: float,
+    beat_seconds: float,
+) -> tuple[float, float]:
+    """Snap a timing target to a nearby phrase/downbeat without amputating arrangement.
+
+    Returns (time, confidence): phrase boundary=1.0, downbeat=0.78, unsnapped=0.45.
+    The search is intentionally local (about two beats either side), so musical alignment
+    cannot drag a transition tens of seconds away from the planner's structural intent.
+    """
+    if hi <= lo:
+        return _clamp(desired, lo, max(lo, hi)), 0.45
+    radius = max(0.35, 2.0 * beat_seconds)
+    search_lo = max(lo, desired - radius)
+    search_hi = min(hi, desired + radius)
+
+    def values(name: str) -> list[float]:
+        raw = track.get(name)
+        if not isinstance(raw, list):
+            return []
+        out = [_finite(x, -1.0) for x in raw]
+        return [x for x in out if search_lo <= x <= search_hi]
+
+    phrases = values("phraseBoundaries")
+    if phrases:
+        return min(phrases, key=lambda x: abs(x - desired)), 1.0
+
+    downbeats = values("downbeats")
+    if downbeats:
+        return min(downbeats, key=lambda x: abs(x - desired)), 0.78
+
+    return _clamp(desired, lo, hi), 0.45
+
+
 def _candidate_plan(style: str, score: float, reason: str, **kwargs: Any) -> dict[str, Any]:
     plan: dict[str, Any] = {
         "style": style,
@@ -748,6 +786,8 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     conf = min(_clamp(_finite(a.get("beatConfidence")), 0.0, 1.0), _clamp(_finite(b.get("beatConfidence")), 0.0, 1.0))
     key_fit = _key_compatibility(a, b)
     bridge_out_rate, bridge_in_rate = _tempo_bridge_rates(a_bpm, b_bpm)
+    tempo_distance = abs(b_bpm / a_bpm - 1.0) if a_bpm > 0.0 and b_bpm > 0.0 else 1.0
+    tempo_bridge_ok = tempo_distance <= 0.08
     vocal_clash = min(a_tail_vocal, b_open_vocal)
     candidates: list[dict[str, Any]] = []
 
@@ -756,8 +796,8 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     # blend additionally needs harmonic compatibility. When those gates fail,
     # CUT/PHRASE_CUT/NO_TRANSITION remain the honest choices.
     if a_end > 0.0 and 40.0 <= a_bpm <= 220.0 and 40.0 <= b_bpm <= 220.0:
-        blend_ok = tempo >= 0.62 and conf >= 0.35 and key_fit >= 0.58 and vocal_clash < 0.58
-        filter_ok = tempo >= 0.35 and conf >= 0.28 and key_fit >= 0.35
+        blend_ok = tempo_bridge_ok and tempo >= 0.62 and conf >= 0.35 and key_fit >= 0.58 and vocal_clash < 0.58
+        filter_ok = tempo_bridge_ok and tempo >= 0.35 and conf >= 0.28 and key_fit >= 0.35
 
         style: str | None = None
         if blend_ok:
@@ -769,18 +809,34 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
             beat = 60.0 / a_bpm
             beats = 16.0 if style == "DJ_BLEND" and key_fit >= 0.72 else 8.0
             span = _clamp(beats * beat, 4.0, 12.0)
-            start = max(0.0, max(a_release, a_end - span))
+            desired_start = max(0.0, max(a_release, a_end - span))
+            start, outgoing_phrase_fit = _structural_snap(
+                a,
+                desired_start,
+                max(0.0, a_release),
+                max(max(0.0, a_release), a_end - 0.25),
+                beat,
+            )
+            desired_cue = max(b_start, _finite(b.get("mixInTime"), b_start))
+            cue, incoming_phrase_fit = _structural_snap(
+                b,
+                desired_cue,
+                b_start,
+                max(b_start, b_end - 0.25),
+                60.0 / b_bpm if b_bpm > 0.0 else beat,
+            )
+            phrase_fit = min(outgoing_phrase_fit, incoming_phrase_fit)
             score = (
-                0.24 + 0.24 * tempo + 0.15 * conf + 0.20 * key_fit +
-                0.12 * (1.0 - vocal_clash)
+                0.21 + 0.23 * tempo + 0.14 * conf + 0.20 * key_fit +
+                0.12 * (1.0 - vocal_clash) + 0.10 * phrase_fit
             )
             if protected and style == "DJ_BLEND":
                 score -= 0.16
             candidates.append(_candidate_plan(
                 style, score, "server-beat-key-bridge" if style == "DJ_BLEND" else "server-filtered-bridge",
                 transitionStart=round(start, 4), transitionEnd=round(a_end, 4),
-                incomingCueTime=round(max(b_start, _finite(b.get("mixInTime"), b_start)), 4),
-                incomingHandoffTime=round(max(b_start, _finite(b.get("mixInTime"), b_start)), 4),
+                incomingCueTime=round(cue, 4),
+                incomingHandoffTime=round(cue, 4),
                 outgoingPlaybackRate=round(bridge_out_rate, 5),
                 incomingPlaybackRate=round(bridge_in_rate, 5),
                 transitionBeats=int(beats),
@@ -790,25 +846,38 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                 filterSweep=0.0 if style == "DJ_BLEND" else 0.72,
                 keyCompatibility=round(key_fit, 4),
                 tempoCompatibility=round(tempo, 4),
+                phraseAlignment=round(phrase_fit, 4),
                 gainEnvelope=[],
             ))
 
     # 2) EQ swap is a separate candidate, not a synonym for blend. It earns a place only when
     # both low-band curves exist and the shared grid is trustworthy enough to exchange the bass.
-    if a_end > 0.0 and tempo >= 0.68 and conf >= 0.38 and key_fit >= 0.58 and _low_curve(a) and _low_curve(b):
+    if a_end > 0.0 and tempo_bridge_ok and tempo >= 0.68 and conf >= 0.38 and key_fit >= 0.58 and _low_curve(a) and _low_curve(b):
         beat = 60.0 / a_bpm if a_bpm > 0 else 0.5
         span = _clamp(16.0 * beat, 5.0, 14.0)
-        start = max(0.0, max(a_release, a_end - span))
-        eq_score = 0.27 + 0.22 * tempo + 0.14 * conf + 0.18 * key_fit + 0.12 * (1.0 - vocal_clash)
+        desired_start = max(0.0, max(a_release, a_end - span))
+        start, outgoing_phrase_fit = _structural_snap(
+            a, desired_start, max(0.0, a_release), max(max(0.0, a_release), a_end - 0.25), beat,
+        )
+        desired_cue = max(b_start, _finite(b.get("mixInTime"), b_start))
+        cue, incoming_phrase_fit = _structural_snap(
+            b, desired_cue, b_start, max(b_start, b_end - 0.25),
+            60.0 / b_bpm if b_bpm > 0.0 else beat,
+        )
+        phrase_fit = min(outgoing_phrase_fit, incoming_phrase_fit)
+        eq_score = (
+            0.24 + 0.21 * tempo + 0.13 * conf + 0.18 * key_fit +
+            0.12 * (1.0 - vocal_clash) + 0.10 * phrase_fit
+        )
         if protected:
             eq_score -= 0.16
         candidates.append(_candidate_plan(
             "EQ_SWAP", eq_score, "server-eq-swap",
             transitionStart=round(start, 4), transitionEnd=round(a_end, 4),
-            incomingCueTime=round(b_start, 4), incomingHandoffTime=round(max(b_start, _finite(b.get("mixInTime"), b_start)), 4),
+            incomingCueTime=round(cue, 4), incomingHandoffTime=round(cue, 4),
             outgoingPlaybackRate=round(bridge_out_rate, 5), incomingPlaybackRate=round(bridge_in_rate, 5),
             handoffFraction=0.56, bassSwap=True, bassSwapFraction=0.56,
-            filterSweep=0.0, gainEnvelope=[],
+            filterSweep=0.0, phraseAlignment=round(phrase_fit, 4), gainEnvelope=[],
         ))
 
     # 3) Phrase cut: useful for a strong, immediate B entrance when a long overlap would create a
