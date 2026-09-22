@@ -38,5 +38,8 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Make Gradle wrapper executable
+        run: chmod +x gradlew
+
       - name: Compile Dev Kotlin
         run: ./gradlew :app:compileDevDebugKotlin --stacktrace
