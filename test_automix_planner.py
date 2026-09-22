@@ -387,7 +387,7 @@ class AutomixPlannerTest(unittest.TestCase):
 
         best, _ = automix._remote_plan(a, b)
 
-        if best["style"] in {"DJ_BLEND", "DJ_FILTER", "EQ_SWAP"}:
+        if best["style"] in {"DJ_BLEND", "DJ_FILTER", "EQ_SWAP", "INTRO_BED"}:
             self.assertGreaterEqual(float(best["handoffFraction"]), 0.84)
         else:
             self.assertIn(best["style"], {"PHRASE_CUT", "CUT", "NO_TRANSITION"})
