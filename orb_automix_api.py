@@ -1541,6 +1541,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                 not known_key_conflict
                 and intro_vocal < 0.38
                 and runway_vocal_clash < 0.42
+                and impact_rise >= 0.30
                 and span <= 82.0
             ):
                 runway_score = (
