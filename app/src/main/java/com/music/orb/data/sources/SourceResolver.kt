@@ -6,6 +6,7 @@ import com.music.orb.data.model.Song
 import com.music.orb.data.settings.AppSettings
 import com.music.orb.data.settings.AudioQuality
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Turns a queued track into an openable stream, using whichever source can
@@ -51,6 +52,9 @@ object SourceResolver {
             else -> StreamRequest.Best
         }
     }
+
+    suspend fun resolveImmediate(uri: Uri, budgetMs: Long = 1_800L): SourceStream? =
+        withTimeoutOrNull(budgetMs.coerceAtLeast(1L)) { resolve(uri) }
 
     /**
      * @param uri a `orb://source?...` URI as built by [SourceRegistry.trackUri].
@@ -541,6 +545,27 @@ object SourceResolver {
      * and a sped-up edit above the album cut still has the album cut in here
      * somewhere, and the extra rows cost one response body, not one request.
      */
+    fun isAtRequestedQualityCeiling(format: StreamFormat): Boolean = when (val request = requestForNow()) {
+        StreamRequest.Lossless -> format.isLossless == true
+        is StreamRequest.Aac -> format.isLossless != true && (format.kbps ?: 0) >= request.maxKbps
+        StreamRequest.Best -> format.isLossless != true && (format.kbps ?: 0) >= 320
+        is StreamRequest.Capped -> format.isLossless != true && (format.kbps ?: 0) >= request.maxKbps
+    }
+    fun preparedQueueCandidateAllowed(format: StreamFormat): Boolean = when (requestForNow()) {
+        StreamRequest.Lossless -> true
+        StreamRequest.Best, is StreamRequest.Aac -> format.isLossless != true
+        is StreamRequest.Capped -> false
+    }
+    suspend fun queuedBestCandidate(song: Song, budgetMs: Long): SourceStream? =
+        withTimeoutOrNull(budgetMs.coerceAtLeast(1L)) {
+            val target = TrackMatcher.targetOf(song)
+            val key = SourceRegistry.parseTrackKey(song.videoId)
+            if (key != null) resolve(key.first, key.second, target) else substituteForYouTube(target)
+        }
+    fun preparedLosslessIsDash(song: Song): Boolean = false
+    fun confirmPlaybackLossless(song: Song, tier: LosslessTier) = Unit
+    fun invalidateTrackLossless(song: Song) = Unit
+
     private const val MATCH_CANDIDATES = 15
 
     /**

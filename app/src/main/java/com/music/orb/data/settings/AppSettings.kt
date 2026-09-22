@@ -27,6 +27,10 @@ enum class AudioQuality(
     HIGH(Int.MAX_VALUE, "High", "Best available · ~171 kbps Opus", "77 MB/hr"),
 }
 
+enum class OutputPcmMode(val label: String) {
+    PCM_16("16-bit PCM"), FLOAT_32("32-bit float")
+}
+
 enum class ThemeMode(val label: String) {
     SYSTEM("System"), LIGHT("Light"), DARK("Dark")
 }
@@ -112,6 +116,8 @@ object AppSettings {
      */
     val spatialAudio = MutableStateFlow(false)
     val playbackSpeed = MutableStateFlow(1.0f)
+    val outputPcmMode = MutableStateFlow(OutputPcmMode.PCM_16)
+    val preferUsbDac = MutableStateFlow(false)
     val themeMode = MutableStateFlow(ThemeMode.DARK)
 
     /** Keep playing similar music once the queue runs out. */

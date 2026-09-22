@@ -1,6 +1,14 @@
 package com.music.orb.data.sources
 
 import com.music.orb.data.model.Song
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+
+enum class LosslessTier {
+    NONE, LOSSLESS, HI_RES_LOSSLESS;
+    val isLossless: Boolean get() = this != NONE
+    val isHiRes: Boolean get() = this == HI_RES_LOSSLESS
+}
+
 
 /**
  * What a source is about to hand the decoder, as far as the source will say.
@@ -20,6 +28,7 @@ data class StreamFormat(
     val kbps: Int? = null,
     val sampleRateHz: Int? = null,
     val bitDepth: Int? = null,
+    val declaredLosslessTier: LosslessTier? = null,
 ) {
     /**
      * Whether this is a bit-exact copy of the master the source holds.
@@ -31,6 +40,14 @@ data class StreamFormat(
      */
     val isLossless: Boolean?
         get() = codec?.let { it in LOSSLESS_CODECS }
+
+    val losslessTier: LosslessTier
+        get() = when {
+            isLossless != true -> LosslessTier.NONE
+            declaredLosslessTier?.isLossless == true -> declaredLosslessTier
+            (bitDepth ?: 0) > 16 || (sampleRateHz ?: 0) > 48_000 -> LosslessTier.HI_RES_LOSSLESS
+            else -> LosslessTier.LOSSLESS
+        }
 
     /** "24-bit · 192 kHz", "FLAC", "320 kbps" — whichever parts are known. */
     val summary: String
@@ -58,6 +75,7 @@ data class SourceStream(
     val url: String,
     val format: StreamFormat = StreamFormat(),
     val headers: Map<String, String> = emptyMap(),
+    val isDash: Boolean = false,
     /**
      * Whether this is less than was asked for, taken because nothing better
      * turned up in time.
@@ -83,7 +101,17 @@ data class SourceStream(
      * against the runtime being played.
      */
     val durationSec: Int? = null,
+    val losslessVerified: Boolean = false,
 )
+
+fun SourceStream.hasPlayableHttpUrl(): Boolean = url.isPlayableHttpStreamUrl()
+fun String.isPlayableHttpStreamUrl(): Boolean {
+    val candidate = trim()
+    if (candidate.isEmpty() || candidate.any { it.code < 0x20 || it.code == 0x7f }) return false
+    return candidate.toHttpUrlOrNull() != null
+}
+fun String.streamOriginForLog(): String =
+    trim().toHttpUrlOrNull()?.host ?: trim().substringBefore('?').take(96).ifBlank { "<blank>" }
 
 /**
  * How much of the stream the caller is willing to pay for.
@@ -100,6 +128,7 @@ sealed interface StreamRequest {
 
     /** A transcode at or below [maxKbps]. What a metered connection asks for. */
     data class Capped(val maxKbps: Int) : StreamRequest
+    data class Aac(val maxKbps: Int = 320) : StreamRequest
 
     /** Whatever the source considers its best lossy rendition. */
     data object Best : StreamRequest

@@ -5,6 +5,8 @@ import com.music.orb.data.TrackLog
 import com.music.orb.data.Http
 import com.music.orb.data.NerdStats
 import com.music.orb.data.settings.AppSettings
+import com.music.orb.data.sources.SourceStream
+import com.music.orb.data.sources.StreamFormat
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -313,6 +315,24 @@ object StreamResolver {
         remember(videoId, stream.url)
         return stream.url
     }
+
+    suspend fun resolveImmediatePlayback(videoId: String): SourceStream {
+        init
+        val resolved = coalescedResolve(videoId)
+        NerdStats.onStreamPicked(videoId, resolved.kbps)
+        remember(videoId, resolved.url)
+        val codec = when {
+            "mp4" in resolved.mimeType || "m4a" in resolved.mimeType -> "aac"
+            "opus" in resolved.mimeType || "webm" in resolved.mimeType -> "opus"
+            else -> null
+        }
+        return SourceStream(
+            url = resolved.url,
+            format = StreamFormat(codec = codec, kbps = resolved.kbps),
+            headers = PlayerClient.forStreamUrl(resolved.url).mediaHeaders(),
+        )
+    }
+    fun invalidatePlaybackUrl(videoId: String) { recent.remove(videoId) }
 
     /**
      * One walk per videoId at a time.
