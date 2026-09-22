@@ -5,7 +5,7 @@ import android.util.Log
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
-import java.util.concurrent.ConcurrentHashMap
+import com.music.orb.playback.SmallLruMap
 
 /**
  * Analysis results kept on disk, so a track is measured once and stays measured.
@@ -52,11 +52,11 @@ class AnalysisStore(private val context: Context) {
     private val directory by lazy { File(context.filesDir, DIRECTORY) }
 
     /**
-     * Track ids known to have no file, so a track analysed in neither this
-     * session nor a previous one does not hit the filesystem on every tick.
-     * Only ever grows within a session, and a write clears the entry.
+     * Track ids recently known to have/no have a file, so an unmeasured track does not hit the
+     * filesystem on every planner tick. This negative/positive lookup cache is intentionally
+     * bounded; a very old entry can simply be checked on disk again when revisited.
      */
-    private val known = ConcurrentHashMap<String, Boolean>()
+    private val known = SmallLruMap<String, Boolean>(KNOWN_RESULT_CACHE_ENTRIES)
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -140,11 +140,14 @@ class AnalysisStore(private val context: Context) {
     @Serializable
     private data class Stored(
         val version: Int = SCHEMA_VERSION,
+        val analysisSchema: Int = 0,
         val duration: Double = 0.0,
         val bpm: Double = 0.0,
         val beatInterval: Double = 0.0,
         val beatConfidence: Double = 0.0,
         val firstBeat: Double = 0.0,
+        val beats: List<Double> = emptyList(),
+        val tempoCurve: List<StoredTempo> = emptyList(),
         val downbeats: List<Double> = emptyList(),
         val phraseBoundaries: List<Double> = emptyList(),
         val key: String = "",
@@ -160,17 +163,25 @@ class AnalysisStore(private val context: Context) {
         val mixOutCandidates: List<StoredCue> = emptyList(),
         val energyCurve: List<StoredEnergy> = emptyList(),
         val lowEnergyCurve: List<StoredEnergy> = emptyList(),
+        val midEnergyCurve: List<StoredEnergy> = emptyList(),
+        val highEnergyCurve: List<StoredEnergy> = emptyList(),
+        val brightnessCurve: List<StoredEnergy> = emptyList(),
+        val onsetCurve: List<StoredEnergy> = emptyList(),
+        val chromaCurve: List<StoredChroma> = emptyList(),
         val vocalActivityMask: List<Double> = emptyList(),
         val vocalProbability: Double = 0.0,
     ) {
         fun toAnalysis(trackId: String) = TrackAnalysis(
             status = TrackAnalysis.STATUS_READY,
             trackId = trackId,
+            analysisSchema = analysisSchema,
             duration = duration,
             bpm = bpm,
             beatInterval = beatInterval,
             beatConfidence = beatConfidence,
             firstBeat = firstBeat,
+            beats = beats,
+            tempoCurve = tempoCurve.map { it.toSample() },
             downbeats = downbeats,
             phraseBoundaries = phraseBoundaries,
             key = key,
@@ -186,17 +197,25 @@ class AnalysisStore(private val context: Context) {
             mixOutCandidates = mixOutCandidates.map { it.toCue() },
             energyCurve = energyCurve.map { it.toSample() },
             lowEnergyCurve = lowEnergyCurve.map { it.toSample() },
+            midEnergyCurve = midEnergyCurve.map { it.toSample() },
+            highEnergyCurve = highEnergyCurve.map { it.toSample() },
+            brightnessCurve = brightnessCurve.map { it.toSample() },
+            onsetCurve = onsetCurve.map { it.toSample() },
+            chromaCurve = chromaCurve.map { it.toSample() },
             vocalActivityMask = vocalActivityMask,
             vocalProbability = vocalProbability,
         )
 
         companion object {
             fun of(analysis: TrackAnalysis) = Stored(
+                analysisSchema = analysis.analysisSchema,
                 duration = analysis.duration,
                 bpm = analysis.bpm,
                 beatInterval = analysis.beatInterval,
                 beatConfidence = analysis.beatConfidence,
                 firstBeat = analysis.firstBeat,
+                beats = analysis.beats.map(::round),
+                tempoCurve = analysis.tempoCurve.map(StoredTempo::of),
                 downbeats = analysis.downbeats.map(::round),
                 phraseBoundaries = analysis.phraseBoundaries.map(::round),
                 key = analysis.key,
@@ -212,8 +231,39 @@ class AnalysisStore(private val context: Context) {
                 mixOutCandidates = analysis.mixOutCandidates.map(StoredCue::of),
                 energyCurve = analysis.energyCurve.map(StoredEnergy::of),
                 lowEnergyCurve = analysis.lowEnergyCurve.map(StoredEnergy::of),
+                midEnergyCurve = analysis.midEnergyCurve.map(StoredEnergy::of),
+                highEnergyCurve = analysis.highEnergyCurve.map(StoredEnergy::of),
+                brightnessCurve = analysis.brightnessCurve.map(StoredEnergy::of),
+                onsetCurve = analysis.onsetCurve.map(StoredEnergy::of),
+                chromaCurve = analysis.chromaCurve.map(StoredChroma::of),
                 vocalActivityMask = analysis.vocalActivityMask.map(::round),
                 vocalProbability = analysis.vocalProbability,
+            )
+        }
+    }
+
+
+    @Serializable
+    private data class StoredTempo(val time: Double, val bpm: Double, val confidence: Double) {
+        fun toSample() = TempoSample(time = time, bpm = bpm, confidence = confidence)
+
+        companion object {
+            fun of(sample: TempoSample) = StoredTempo(
+                round(sample.time),
+                round(sample.bpm),
+                round(sample.confidence),
+            )
+        }
+    }
+
+    @Serializable
+    private data class StoredChroma(val time: Double, val chroma: List<Double>) {
+        fun toSample() = ChromaSample(time = time, chroma = chroma)
+
+        companion object {
+            fun of(sample: ChromaSample) = StoredChroma(
+                round(sample.time),
+                sample.chroma.take(12).map(::round),
             )
         }
     }
@@ -237,6 +287,7 @@ class AnalysisStore(private val context: Context) {
     }
 
     private companion object {
+        const val KNOWN_RESULT_CACHE_ENTRIES = 128
         const val TAG = "BitChordAnalysisStore"
         const val DIRECTORY = "smart_analysis"
 
@@ -246,7 +297,7 @@ class AnalysisStore(private val context: Context) {
          * re-analysis costs seconds, and a beat grid interpreted under the wrong
          * assumptions is silently wrong for the life of the file.
          */
-        const val SCHEMA_VERSION = 1
+        const val SCHEMA_VERSION = 2
 
         /** A few thousand tracks' worth, at tens of kilobytes each. */
         const val MAX_ENTRIES = 2_000
