@@ -41,5 +41,8 @@ jobs:
       - name: Make Gradle wrapper executable
         run: chmod +x gradlew
 
+      - name: Make Gradle wrapper executable
+        run: chmod +x gradlew
+
       - name: Compile Dev Kotlin
         run: ./gradlew :app:compileDevDebugKotlin --stacktrace
