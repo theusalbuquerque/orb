@@ -176,6 +176,27 @@ class AutomixPlannerTest(unittest.TestCase):
         self.assertGreaterEqual(confidence, 0.25)
 
 
+    def test_transition_uses_tail_and_head_keys_before_global_keys(self) -> None:
+        a = track(key="C major")
+        b = track(key="C# major")
+        a["tailKey"] = "G major"
+        a["tailKeyConfidence"] = 0.90
+        b["headKey"] = "G major"
+        b["headKeyConfidence"] = 0.90
+
+        self.assertEqual(automix._key_compatibility(a, b), 1.0)
+
+    def test_low_confidence_local_key_falls_back_to_global_key(self) -> None:
+        a = track(key="C major")
+        b = track(key="A minor")
+        a["tailKey"] = "C# major"
+        a["tailKeyConfidence"] = 0.10
+        b["headKey"] = "F# major"
+        b["headKeyConfidence"] = 0.10
+
+        self.assertGreaterEqual(automix._key_compatibility(a, b), 0.90)
+
+
     def test_harmonic_relationships_are_musical_not_chromatic(self) -> None:
         c_major = track(key="C major")
         a_minor = track(key="A minor")
