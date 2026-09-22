@@ -1438,11 +1438,12 @@ class CrossfadeController(
     private fun musicalHandoffFraction(): Float {
         val requested = render.handoffFraction.toFloat()
         return when (render.style) {
-            TransitionStyle.DJ_BLEND,
+            TransitionStyle.DJ_BLEND ->
+                requested.coerceIn(0.50f, 0.92f)
             TransitionStyle.EQ_SWAP ->
-                requested.coerceIn(0.50f, 0.80f)
+                requested.coerceIn(0.50f, 0.90f)
             TransitionStyle.DJ_FILTER ->
-                requested.coerceIn(0.40f, 0.78f)
+                requested.coerceIn(0.40f, 0.84f)
             TransitionStyle.PHRASE_CUT ->
                 requested.coerceIn(0.55f, 0.90f)
             TransitionStyle.CUT ->
