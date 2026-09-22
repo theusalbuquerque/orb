@@ -107,6 +107,39 @@ class AutomixPlannerTest(unittest.TestCase):
         self.assertNotIn(best["style"], overlap_styles)
         self.assertFalse(any(c["style"] in overlap_styles for c in candidates))
 
+    def test_unknown_key_cannot_authorize_long_overlap(self) -> None:
+        a = track(bpm=128.0, key="C major", vocal=0.10)
+        b = track(bpm=129.0, key="", vocal=0.10)
+        b["keyConfidence"] = 0.0
+
+        best, candidates = automix._remote_plan(a, b)
+        overlap_styles = {"DJ_BLEND", "DJ_FILTER", "EQ_SWAP"}
+
+        self.assertNotIn(best["style"], overlap_styles)
+        self.assertFalse(any(c["style"] in overlap_styles for c in candidates))
+
+    def test_protected_outgoing_track_hands_off_late(self) -> None:
+        a = track(bpm=128.0, key="C major", vocal=0.10)
+        b = track(bpm=129.0, key="A minor", vocal=0.10)
+
+        # Keep A dense and vocal through the final phrase so _release_landmarks()
+        # protects it almost to contentEnd instead of authorizing an early takeover.
+        for point in a["energyCurve"]:
+            if point["time"] >= 108.0:
+                point["energy"] = 0.82
+        for index, point in enumerate(a["energyCurve"]):
+            if point["time"] >= 108.0:
+                a["vocalActivityMask"][index] = 0.72
+        a["vocalProbability"] = 0.72
+
+        best, _ = automix._remote_plan(a, b)
+
+        if best["style"] in {"DJ_BLEND", "DJ_FILTER", "EQ_SWAP"}:
+            self.assertGreaterEqual(float(best["handoffFraction"]), 0.84)
+        else:
+            self.assertIn(best["style"], {"PHRASE_CUT", "CUT", "NO_TRANSITION"})
+
+
     def test_heavy_vocal_collision_rejects_long_overlap(self) -> None:
         a = track(bpm=128.0, key="C major", vocal=0.95)
         b = track(bpm=129.0, key="A minor", vocal=0.95)
