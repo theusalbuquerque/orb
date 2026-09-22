@@ -214,6 +214,19 @@ data class TransitionPlan(
     val outgoingTransitionKey: String = "",
     val incomingTransitionKey: String = "",
 
+    /** Curve-aware Automix 2.5 diagnostics. */
+    val curveCompatibility: Double = 0.0,
+    val onsetCurveFit: Double = 0.0,
+    val harmonicCurveFit: Double = 0.0,
+    val spectralCurveFit: Double = 0.0,
+    val beatPhaseFit: Double = 0.0,
+    val beatPhaseErrorMs: Double = 0.0,
+    val localTempoCompatibility: Double = 0.0,
+    val outgoingLocalBpm: Double = 0.0,
+    val incomingLocalBpm: Double = 0.0,
+    val curveCueShiftMs: Double = 0.0,
+    val curveAlignmentScore: Double = 0.0,
+
     /** Why the policy landed where it did, when it declined to be more ambitious. */
     val policyReasons: List<String> = emptyList(),
 ) {
