@@ -190,6 +190,8 @@ data class TransitionPlan(
     val requestedTransitionBeats: Int = 0,
     val outgoingAnchor: String = "",
     val incomingAnchor: String = "",
+    val outgoingTransitionKey: String = "",
+    val incomingTransitionKey: String = "",
 
     /** Why the policy landed where it did, when it declined to be more ambitious. */
     val policyReasons: List<String> = emptyList(),
