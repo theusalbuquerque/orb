@@ -1407,9 +1407,10 @@ class CrossfadeController(
         val spanMs = fadeMs.coerceAtLeast(1L).toDouble()
         val swapWidth = (INTRO_BED_BASS_SWAP_MS / spanMs)
             .coerceIn(INTRO_BED_MIN_SWAP_FRACTION, INTRO_BED_MAX_SWAP_FRACTION)
+            .toFloat()
         val swapStart = (handoff - swapWidth * 0.5f).coerceAtLeast(0f)
         val handover = smoothStep(
-            ((progress - swapStart) / swapWidth.toFloat()).coerceIn(0f, 1f),
+            ((progress - swapStart) / swapWidth).coerceIn(0f, 1f),
         ).toDouble()
 
         val clash = render.vocalOverlap.coerceIn(0.0, 1.0)
