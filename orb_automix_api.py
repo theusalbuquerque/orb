@@ -744,8 +744,9 @@ async def health() -> dict[str, Any]:
         "ok": True,
         "version": API_VERSION,
         "automixVersion": "2.5",
-        "analyzer": "orb-remote-dsp-v6",
-        "plannerRevision": "mix-v5",
+        "analyzer": "orb-remote-dsp-v7",
+        "plannerRevision": "mix-v6",
+        "analysisSchema": ANALYSIS_SCHEMA,
     }
 
 
@@ -877,6 +878,13 @@ def _merge_plan_evidence(
     structural = {
         "energyCurve",
         "lowEnergyCurve",
+        "midEnergyCurve",
+        "highEnergyCurve",
+        "brightnessCurve",
+        "onsetCurve",
+        "chromaCurve",
+        "tempoCurve",
+        "beats",
         "vocalActivityMask",
         "downbeats",
         "phraseBoundaries",
@@ -957,7 +965,20 @@ def _merge_plan_evidence(
 
     # If the server lacks structural data entirely, a completed client pass is still better than
     # dropping those fields. Empty/provisional client lists never erase cached full-track data.
-    for key in ("energyCurve", "lowEnergyCurve", "phraseBoundaries", "mixInCandidates", "mixOutCandidates"):
+    for key in (
+        "energyCurve",
+        "lowEnergyCurve",
+        "midEnergyCurve",
+        "highEnergyCurve",
+        "brightnessCurve",
+        "onsetCurve",
+        "chromaCurve",
+        "tempoCurve",
+        "beats",
+        "phraseBoundaries",
+        "mixInCandidates",
+        "mixOutCandidates",
+    ):
         client_value = payload.get(key)
         if (
             (key not in merged or not merged.get(key))
@@ -2817,7 +2838,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     best["outgoingTransitionBpm"] = round(a_bpm, 4)
     best["incomingTransitionBpm"] = round(b_bpm, 4)
     best["tempoCompatibility"] = round(tempo, 4)
-    best["planner"] = "orb-automix-2.5-mix-v5"
+    best["planner"] = "orb-automix-2.5-mix-v6"
     best["serverAuthoritative"] = True
     return best, candidates[:5]
 
@@ -2840,7 +2861,7 @@ async def plan(request: PlanRequest) -> dict[str, Any]:
     # minimal fallback is selected here on the server; Android may only reject impossible bounds.
     plan_result = dict(plan_result)
     plan_result["serverAuthoritative"] = True
-    plan_result["planner"] = "orb-automix-2.5-mix-v5"
+    plan_result["planner"] = "orb-automix-2.5-mix-v6"
     return {
         "version": API_VERSION,
         "automixVersion": "2.5",
