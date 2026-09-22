@@ -1491,7 +1491,13 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     # A's late phrase/downbeat and B's entry phrase/downbeat are scored together.
     if a_end > 0.0 and 40.0 <= a_bpm <= 220.0 and 40.0 <= b_bpm <= 220.0:
         blend_ok = key_evidence and tempo_bridge_ok and tempo >= 0.62 and conf >= 0.35 and key_fit >= 0.58
-        filter_ok = key_evidence and tempo_bridge_ok and tempo >= 0.35 and conf >= 0.28 and key_fit >= 0.35
+        # A missing/low-confidence key must not kill Automix by itself when the rhythmic grid is
+        # strong and the actual overlap is sparse in vocals. In that case only the filtered,
+        # shorter family is allowed; an open DJ_BLEND/EQ_SWAP still requires trusted harmony.
+        filter_ok = tempo_bridge_ok and tempo >= 0.48 and conf >= 0.35 and (
+            (key_evidence and key_fit >= 0.35)
+            or (not key_evidence and vocal_clash < 0.34)
+        )
 
         requested_style = "DJ_BLEND" if blend_ok else ("DJ_FILTER" if filter_ok else None)
         if requested_style is not None:
