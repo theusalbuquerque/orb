@@ -872,14 +872,12 @@ class CrossfadeController(
     }
 
     /**
-     * Starts the incoming track and moves the session onto it.
+     * Starts the incoming track and moves the MediaSession onto it.
      *
-     * The handoff happens *here*, as the first note sounds, not at the end of
-     * the blend. Everything hanging off the session player — queue index,
-     * metadata, the notification, the UI, audio focus — flips to the incoming
-     * song the moment it becomes audible, rather than trailing the song on its
-     * way out. From this point [outgoing] is the idle player, still audible,
-     * being faded away.
+     * This is the **session swap**, not the musical authority handoff. Metadata,
+     * queue index and system controls follow B as soon as it becomes audible,
+     * while the gain/tempo/filter choreography may deliberately keep A in the
+     * foreground until [Render.handoffFraction].
      */
     private fun startFade() {
         val out = outgoing ?: return bail()
@@ -1387,9 +1385,17 @@ class CrossfadeController(
      */
     private fun rideTempoBridge(progress: Float, out: ExoPlayer, into: ExoPlayer) {
         val base = AppSettings.playbackSpeed.value.toDouble()
-        val approach = smoothStep((progress / TEMPO_APPROACH_END).coerceIn(0f, 1f)).toDouble()
+        val handoff = musicalHandoffFraction()
+
+        // A reaches the shared tempo before the authority handoff. B only starts
+        // relaxing back to its native tempo after that handoff, so the beat grid
+        // cannot drift apart while A is still the foreground track.
+        val approachEnd = minOf(TEMPO_APPROACH_MAX, (handoff - 0.16f).coerceAtLeast(0.22f))
+        val releaseStart = maxOf(TEMPO_RELEASE_MIN, (handoff + 0.06f).coerceAtMost(0.90f))
+
+        val approach = smoothStep((progress / approachEnd).coerceIn(0f, 1f)).toDouble()
         val release = smoothStep(
-            ((progress - TEMPO_RELEASE_START) / (1f - TEMPO_RELEASE_START)).coerceIn(0f, 1f),
+            ((progress - releaseStart) / (1f - releaseStart)).coerceIn(0f, 1f),
         ).toDouble()
 
         val outRate = 1.0 + (outgoingPlaybackRate - 1.0) * approach
@@ -1421,6 +1427,22 @@ class CrossfadeController(
     private fun outgoingGain(progress: Float): Float =
         cos(gainAngle(progress))
 
+    private fun musicalHandoffFraction(): Float {
+        val requested = render.handoffFraction.toFloat()
+        return when (render.style) {
+            TransitionStyle.DJ_BLEND,
+            TransitionStyle.EQ_SWAP ->
+                requested.coerceIn(0.50f, 0.80f)
+            TransitionStyle.DJ_FILTER ->
+                requested.coerceIn(0.40f, 0.78f)
+            TransitionStyle.PHRASE_CUT ->
+                requested.coerceIn(0.55f, 0.90f)
+            TransitionStyle.CUT ->
+                requested.coerceIn(0.75f, 0.94f)
+            else -> 0.5f
+        }
+    }
+
     private fun gainAngle(progress: Float): Float {
         val p = progress.coerceIn(0f, 1f)
         if (!smartFadeActive || render.style == TransitionStyle.EQUAL_POWER ||
@@ -1430,21 +1452,8 @@ class CrossfadeController(
         }
 
         // The server chooses the musical authority handoff. The phone only applies
-        // style-specific safety bounds so a malformed plan cannot make the takeover
-        // happen at the very first or very last sample of the overlap.
-        val requestedHandoff = render.handoffFraction.toFloat()
-        val handoff = when (render.style) {
-            TransitionStyle.DJ_BLEND,
-            TransitionStyle.EQ_SWAP ->
-                requestedHandoff.coerceIn(0.50f, 0.80f)
-            TransitionStyle.DJ_FILTER ->
-                requestedHandoff.coerceIn(0.40f, 0.78f)
-            TransitionStyle.PHRASE_CUT ->
-                requestedHandoff.coerceIn(0.55f, 0.90f)
-            TransitionStyle.CUT ->
-                requestedHandoff.coerceIn(0.75f, 0.94f)
-            else -> 0.5f
-        }
+        // style-specific safety bounds; tempo, gains and bass use the same point.
+        val handoff = musicalHandoffFraction()
         val entryAngle = when (render.style) {
             // B is audible and rhythmically established, but A still owns the
             // foreground until the bass/phrase handoff.
@@ -1487,11 +1496,11 @@ class CrossfadeController(
          */
         const val DEFAULT_SMART_FALLBACK_SECONDS = 6.0
 
-        /** First third: A moves toward the meeting tempo. */
-        const val TEMPO_APPROACH_END = 0.34f
+        /** Latest point by which A should have reached the pair's meeting tempo. */
+        const val TEMPO_APPROACH_MAX = 0.34f
 
-        /** Final third: B returns from the meeting tempo to its native tempo. */
-        const val TEMPO_RELEASE_START = 0.66f
+        /** Never release B back to native tempo before this point of the overlap. */
+        const val TEMPO_RELEASE_MIN = 0.66f
 
         /**
          * Angles on the constant-power circle at the pre-handoff plateau.
