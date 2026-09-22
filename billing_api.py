@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field, field_validator
 
 router = APIRouter(prefix="/api/billing", tags=["billing"])
 
@@ -30,9 +30,17 @@ DB_PATH = os.getenv("ORB_BILLING_DB_PATH", "orb_billing.sqlite3").strip()
 
 class CheckoutRequest(BaseModel):
     customer_ref: str = Field(min_length=8, max_length=200)
-    email: EmailStr
+    email: str = Field(min_length=5, max_length=254)
     name: str | None = Field(default=None, max_length=200)
     plan: Literal["monthly", "yearly"]
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        email = value.strip()
+        if "@" not in email or email.startswith("@") or email.endswith("@"):
+            raise ValueError("invalid email")
+        return email
 
 
 def _price(plan: str) -> float:
