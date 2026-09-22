@@ -917,8 +917,8 @@ class CrossfadeController(
         val elapsed = (player.currentPosition - incomingCueTimeMs).coerceAtLeast(0L)
         val progress = (elapsed.toFloat() / span).coerceIn(0f, 1f)
 
-        player.volume = riseGain(progress)
-        out.volume = fallGain(progress)
+        player.volume = incomingGain(progress)
+        out.volume = outgoingGain(progress)
         if (smartFadeActive) rideTempoBridge(progress, out, player)
         // Only from here, never during ARMING: the standby is silent until the
         // handoff, and [filters] describes the split between the track arriving
@@ -1346,19 +1346,65 @@ class CrossfadeController(
         return x * x * (3f - 2f * x)
     }
 
-    /** Equal-power pair: [riseGain]² + [fallGain]² = 1, so the blend never dips. */
+    /**
+     * Manual Crossfade and Automix deliberately do not share a choreography.
+     *
+     * Crossfade spends the whole window moving along the equal-power arc.
+     * Automix holds A as the foreground through most of the musical window,
+     * lets B establish itself quietly on the shared beat grid, then performs
+     * the actual authority swap around the planner's structural handoff.
+     *
+     * Both paths stay on the same constant-power circle, so the distinction is
+     * timing rather than a loudness bump: Automix is not allowed to become a
+     * louder two-song pile-up just to avoid sounding like Crossfade.
+     */
+    private fun incomingGain(progress: Float): Float =
+        sin(gainAngle(progress))
+
+    private fun outgoingGain(progress: Float): Float =
+        cos(gainAngle(progress))
+
+    private fun gainAngle(progress: Float): Float {
+        val p = progress.coerceIn(0f, 1f)
+        if (!smartFadeActive || render.style == TransitionStyle.EQUAL_POWER ||
+            render.style == TransitionStyle.GAPLESS
+        ) {
+            return p * PI.toFloat() / 2f
+        }
+
+        val handoff = when (render.style) {
+            TransitionStyle.DJ_BLEND ->
+                render.bassSwapFraction.toFloat().coerceIn(AUTOMIX_HANDOFF_MIN, AUTOMIX_HANDOFF_MAX)
+            TransitionStyle.DJ_FILTER -> AUTOMIX_FILTER_HANDOFF
+            else -> 0.5f
+        }
+        val entryAngle = when (render.style) {
+            // B is audible and rhythmically established, but A still owns the
+            // foreground until the bass/phrase handoff.
+            TransitionStyle.DJ_BLEND -> AUTOMIX_BLEND_ENTRY_ANGLE
+            // A filtered bridge wants an even quieter pre-handoff B; the filter
+            // itself creates the lane, then the gain takeover follows.
+            TransitionStyle.DJ_FILTER -> AUTOMIX_FILTER_ENTRY_ANGLE
+            else -> 0f
+        }
+
+        return if (p <= handoff) {
+            val early = smoothStep((p / handoff).coerceIn(0f, 1f))
+            entryAngle * early
+        } else {
+            val takeover = smoothStep(
+                ((p - handoff) / (1f - handoff)).coerceIn(0f, 1f),
+            )
+            entryAngle + (PI.toFloat() / 2f - entryAngle) * takeover
+        }
+    }
+
+    /** Equal-power helpers are kept for bail/legacy manual-fade paths. */
     private fun riseGain(progress: Float): Float =
         sin(progress.coerceIn(0f, 1f) * PI.toFloat() / 2f)
 
     private fun fallGain(progress: Float): Float =
         cos(progress.coerceIn(0f, 1f) * PI.toFloat() / 2f)
-
-    // There is deliberately no second, equal-gain pair here any more. It existed
-    // for the handoff of a track from one player to the other, where the two
-    // signals were the same signal and so summed in amplitude rather than in
-    // power. Nothing in this class renders the same audio twice now, so every
-    // gain it applies is a gain against a genuinely different track, and
-    // equal-power is right everywhere.
 
     private companion object {
         const val TAG = "BitChordCrossfade"
@@ -1374,6 +1420,20 @@ class CrossfadeController(
 
         /** Final third: B returns from the meeting tempo to its native tempo. */
         const val TEMPO_RELEASE_START = 0.66f
+
+        /** Bounds for the musical authority handoff inside a DJ blend. */
+        const val AUTOMIX_HANDOFF_MIN = 0.52f
+        const val AUTOMIX_HANDOFF_MAX = 0.76f
+
+        /** Filtered bridges hand over a little earlier than beat/key blends. */
+        const val AUTOMIX_FILTER_HANDOFF = 0.52f
+
+        /**
+         * Angles on the constant-power circle at the pre-handoff plateau.
+         * sin(0.245) ~= 0.24 (-12.3 dB); sin(0.18) ~= 0.18 (-14.9 dB).
+         */
+        const val AUTOMIX_BLEND_ENTRY_ANGLE = 0.245f
+        const val AUTOMIX_FILTER_ENTRY_ANGLE = 0.18f
 
         /** Ramp used when a fade is interrupted. */
         const val BAIL_MS = 120L
