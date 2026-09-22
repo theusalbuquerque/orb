@@ -2385,6 +2385,17 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
             pair_fit = float(pair["pairScore"])
             actual_beats = int(round(float(pair["actualBeats"])))
             release_fraction = float(pair["releaseFraction"])
+            rhythmic_curve_fit = float(pair.get("curveCompatibility", 0.5))
+            rhythmic_curve_evidence = bool(pair.get("curveEvidence", False))
+            rhythmic_onset_fit = float(pair.get("onsetCurveFit", 0.5))
+            rhythmic_harmonic_fit = float(pair.get("harmonicCurveFit", 0.5))
+            rhythmic_spectral_fit = float(pair.get("spectralCurveFit", 0.5))
+            rhythmic_phase_fit = float(pair.get("beatPhaseFit", 0.5))
+            rhythmic_phase_error_ms = float(pair.get("beatPhaseErrorMs", 0.0))
+            rhythmic_local_tempo = float(pair.get("localTempoFit", tempo))
+            rhythmic_out_rate = float(pair.get("outgoingRate", bridge_out_rate))
+            rhythmic_in_rate = float(pair.get("incomingRate", bridge_in_rate))
+            rhythmic_low_collision = float(pair.get("lowBandCollision", 0.0))
 
             has_outgoing_structure = bool(a.get("downbeats") or a.get("phraseBoundaries"))
             has_incoming_structure = bool(b.get("downbeats") or b.get("phraseBoundaries"))
@@ -2399,15 +2410,18 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                 and span_fit >= 0.24
                 and phrase_fit >= structure_floor
                 and overlap_vocal_clash < vocal_limit
+                and (not rhythmic_curve_evidence or rhythmic_onset_fit >= 0.24 or rhythmic_phase_fit >= 0.50)
             ):
                 rhythmic_score = (
-                    0.20
-                    + 0.22 * tempo
-                    + 0.14 * conf
-                    + 0.16 * (1.0 - overlap_vocal_clash)
-                    + 0.10 * energy_fit
-                    + 0.08 * phrase_fit
+                    0.16
+                    + 0.16 * rhythmic_local_tempo
+                    + 0.10 * conf
+                    + 0.13 * (1.0 - overlap_vocal_clash)
+                    + 0.08 * energy_fit
+                    + 0.07 * phrase_fit
                     + 0.10 * pair_fit
+                    + 0.08 * rhythmic_phase_fit
+                    + (0.12 * rhythmic_curve_fit if rhythmic_curve_evidence else 0.0)
                 )
                 if key_evidence:
                     rhythmic_score += 0.05 * key_fit
@@ -2419,8 +2433,8 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                     transitionEnd=round(a_end, 4),
                     incomingCueTime=round(cue, 4),
                     incomingHandoffTime=round(cue, 4),
-                    outgoingPlaybackRate=round(bridge_out_rate, 5),
-                    incomingPlaybackRate=round(bridge_in_rate, 5),
+                    outgoingPlaybackRate=round(rhythmic_out_rate, 5),
+                    incomingPlaybackRate=round(rhythmic_in_rate, 5),
                     transitionBeats=actual_beats,
                     requestedTransitionBeats=target_beats,
                     handoffFraction=round(
@@ -2438,7 +2452,14 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                         and _low_curve(b)
                     ),
                     bassSwapFraction=round(_clamp(release_fraction, 0.50, 0.82), 4),
-                    filterSweep=0.82,
+                    filterSweep=round(_clamp(
+                        0.68
+                        + 0.18 * (1.0 - rhythmic_spectral_fit)
+                        + 0.14 * rhythmic_low_collision
+                        + 0.08 * (1.0 - rhythmic_harmonic_fit),
+                        0.68,
+                        0.98,
+                    ), 4),
                     keyCompatibility=round(key_fit, 4),
                     tempoCompatibility=round(tempo, 4),
                     phraseAlignment=round(phrase_fit, 4),
@@ -2448,6 +2469,15 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                     spanCompatibility=round(span_fit, 4),
                     outgoingAnchor=str(pair["outgoingAnchor"]),
                     incomingAnchor=str(pair["incomingAnchor"]),
+                    curveCompatibility=round(rhythmic_curve_fit, 4),
+                    onsetCurveFit=round(rhythmic_onset_fit, 4),
+                    harmonicCurveFit=round(rhythmic_harmonic_fit, 4),
+                    spectralCurveFit=round(rhythmic_spectral_fit, 4),
+                    beatPhaseFit=round(rhythmic_phase_fit, 4),
+                    beatPhaseErrorMs=round(rhythmic_phase_error_ms, 2),
+                    localTempoCompatibility=round(rhythmic_local_tempo, 4),
+                    outgoingLocalBpm=round(float(pair.get("outgoingBpm", a_bpm)), 4),
+                    incomingLocalBpm=round(float(pair.get("incomingBpm", b_bpm)), 4),
                     gainEnvelope=[],
                 ))
 
