@@ -98,17 +98,26 @@ private val BLOCKED_TEXT = Regex(
 
 /** How the renderer should execute a planned transition. */
 enum class TransitionStyle {
-    /** A constant-power fade, unfiltered. The only style the bottom tier permits. */
+    /** Manual Crossfade's constant-power renderer. Automix never selects this as a fallback. */
     EQUAL_POWER,
 
     /** Album siblings played through: a near-instant handoff, not a mix. */
     GAPLESS,
 
-    /** Beat-aligned blend with a bass swap, for matching or near-matching tempi. */
+    /** Beat/key-aligned blend; may exchange the low end at the structural handoff. */
     DJ_BLEND,
 
-    /** Filtered handoff for tempi too far apart to blend flat. */
+    /** Beat-aware filtered bridge when the pair should not stay spectrally open. */
     DJ_FILTER,
+
+    /** Explicit low-end handoff on a compatible beat/key grid. */
+    EQ_SWAP,
+
+    /** Very short phrase/downbeat transfer into a ranked entry point of B. */
+    PHRASE_CUT,
+
+    /** Clean, click-safe end-of-A to start-of-B transfer; deliberately not a crossfade. */
+    CUT,
 }
 
 /**
