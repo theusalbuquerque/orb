@@ -26,9 +26,17 @@ package com.music.orb.playback.smart
 import android.content.Context
 import android.media.MediaDataSource
 import android.net.Uri
+import android.os.Process
+import android.os.SystemClock
 import android.util.Log
 import androidx.media3.common.util.UnstableApi
+import com.music.orb.data.NerdStats
+import com.music.orb.data.settings.AppSettings
+import com.music.orb.data.settings.AutomixVersion
 import com.music.orb.playback.AudioCache
+import com.music.orb.playback.SmallLruMap
+import com.music.orb.playback.SmallLruSet
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import kotlin.math.abs
@@ -44,16 +52,56 @@ import kotlin.math.max
  * plain fade.
  */
 @UnstableApi
-class TrackAnalyzer(context: Context, private val cache: AudioCache) {
+class TrackAnalyzer(private val context: Context, private val cache: AudioCache) {
 
     private val tracker = BeatTracker(context)
     private val vocals = VocalTracker(context)
+    private val stemSeparator = VocalTracker(context)
 
-    private val results = ConcurrentHashMap<String, TrackAnalysis>()
+    /**
+     * Last-resort, immutable Opus copy for the immediate A -> B pair. Playback cache spans are the
+     * fast path, but a partial WebM is not guaranteed to be seekable by MediaExtractor. This store
+     * gives the analyzer one ordinary file without tying the mix to whichever Lossless rendition
+     * eventually wins playback source selection.
+     */
+    private val reliableAudio = AnalysisAudioStore(context)
+
+    /** Real vocal/accompaniment windows prepared only for the immediate incoming Automix deck. */
+    private val stemResults = ConcurrentHashMap<String, PreparedTransitionStems>()
+    private val stemRunning = ConcurrentHashMap.newKeySet<String>()
+    private val stemDirectory by lazy {
+        File(context.cacheDir, "automix-stems-v1").apply { mkdirs() }
+    }
+
+    /**
+     * The full curves are the expensive part of an analysis, so only the recent working set stays
+     * resident. Older results remain in [AnalysisStore] and are restored on demand.
+     */
+    private val results = SmallLruMap<String, TrackAnalysis>(RESULTS_RAM_ENTRIES) { trackId, _ ->
+        onResultEvicted(trackId)
+    }
+
+    @Volatile
+    private var onAnalysisUpdated: ((String) -> Unit)? = null
+
+    /** Called whenever stored or freshly decoded evidence for a track changes. */
+    fun setOnAnalysisUpdated(listener: ((String) -> Unit)?) {
+        onAnalysisUpdated = listener
+    }
+
+    private fun notifyAnalysisUpdated(trackId: String) {
+        runCatching { onAnalysisUpdated?.invoke(trackId) }
+    }
     private val running = ConcurrentHashMap.newKeySet<String>()
 
+    /** Physical downloads already joined, so the one-second planner heartbeat adds one callback. */
+    private val reliablePending = ConcurrentHashMap.newKeySet<String>()
+    private val reliableEligibleAt = SmallLruMap<String, Long>(TRACK_AUX_ENTRIES)
+    private val reliableRetryAt = SmallLruMap<String, Long>(TRACK_AUX_ENTRIES)
+    private val reliableFailures = SmallLruMap<String, Int>(TRACK_AUX_ENTRIES)
+
     /** Tracks whose result came from [analyzeHead] and is waiting to be superseded. */
-    private val provisional = ConcurrentHashMap.newKeySet<String>()
+    private val provisional = SmallLruSet<String>(TRACK_AUX_ENTRIES)
 
     /**
      * Cached prefix size, in bytes, at the last head attempt on each
@@ -66,7 +114,7 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
      * afterwards — the one that would actually have produced a result — was then
      * refused for being smaller than a number belonging to a different file.
      */
-    private val headAttempts = ConcurrentHashMap<String, Long>()
+    private val headAttempts = SmallLruMap<String, Long>(RENDITION_AUX_ENTRIES)
 
     /**
      * Track-and-rendition pairs that have already reported waiting for a head,
@@ -74,7 +122,7 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
      * second copy of itself is in a genuinely new situation, and the first
      * version of this hid exactly that.
      */
-    private val headSkipLogged = ConcurrentHashMap.newKeySet<String>()
+    private val headSkipLogged = SmallLruSet<String>(RENDITION_AUX_ENTRIES)
 
     /**
      * How many times each track's whole-track pass has been refused for
@@ -82,10 +130,10 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
      * in its holes gets a few more chances, while one that is genuinely
      * truncated stops being re-decoded on every tick.
      */
-    private val shortDecodes = ConcurrentHashMap<String, Int>()
+    private val shortDecodes = SmallLruMap<String, Int>(TRACK_AUX_ENTRIES)
 
     /** Tracks already looked for on disk this session; see [restoreOnce]. */
-    private val restoreAttempted = ConcurrentHashMap.newKeySet<String>()
+    private val restoreAttempted = SmallLruSet<String>(TRACK_AUX_ENTRIES)
 
     /** Results that survive the process, so a track is measured once and stays measured. */
     private val store = AnalysisStore(context)
@@ -95,7 +143,7 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
      * complete. Keyed by rendition rather than by track, because the point is to
      * send the next attempt at the *same* track to a different copy of it.
      */
-    private val badRenditions = ConcurrentHashMap.newKeySet<String>()
+    private val badRenditions = SmallLruSet<String>(RENDITION_AUX_ENTRIES)
 
     /**
      * Cache keys already put through the whole-track pass, whatever came of it.
@@ -107,7 +155,7 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
      * given up on at 22:09:24 and its `#hifi` copy finished downloading at
      * 22:09:41.
      */
-    private val triedRenditions = ConcurrentHashMap.newKeySet<String>()
+    private val triedRenditions = SmallLruSet<String>(RENDITION_AUX_ENTRIES)
 
     /**
      * How many times each rendition has been thrown off disk for being
@@ -121,14 +169,40 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
      * different encodings and unrecoverable only because nothing would ever
      * overwrite it.
      */
-    private val discarded = ConcurrentHashMap<String, Int>()
+    private val discarded = SmallLruMap<String, Int>(RENDITION_AUX_ENTRIES)
+
+    /** Disk lookups that have actually completed, whether or not they found a result. */
+    private val restoreCompleted = SmallLruSet<String>(TRACK_AUX_ENTRIES)
 
     private fun discardsOf(key: String): Int = discarded[key] ?: 0
 
+    /**
+     * An evicted analysis can always be restored from disk, so discard only the per-track guards
+     * that would otherwise falsely say the result is still resident. Active downloads/jobs keep
+     * their own membership in [running]/[reliablePending] and are deliberately not disturbed.
+     */
+    private fun onResultEvicted(trackId: String) {
+        // Eviction callbacks run after the LRU lock is released. If another worker restored the
+        // same track in that tiny window, its fresh state wins and must not be cleared here.
+        if (results.containsKey(trackId)) return
+        provisional.remove(trackId)
+        shortDecodes.remove(trackId)
+        restoreAttempted.remove(trackId)
+        restoreCompleted.remove(trackId)
+        reliableEligibleAt.remove(trackId)
+        reliableRetryAt.remove(trackId)
+        reliableFailures.remove(trackId)
+    }
+
     private val executor = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "orb-smart-analysis").apply {
+        Thread({
+            // DSP is background work. UI animation and the playback/audio threads always win
+            // scheduler time when the device is busy.
+            runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND) }
+            runnable.run()
+        }, "orb-smart-analysis").apply {
             isDaemon = true
-            priority = Thread.NORM_PRIORITY
+            priority = Thread.MIN_PRIORITY
         }
     }
 
@@ -138,6 +212,21 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
      * [assessTransitionTier] reads as no evidence rather than as a failure.
      */
     fun analysisFor(trackId: String): TrackAnalysis = results[trackId] ?: TrackAnalysis(trackId = trackId)
+
+    /**
+     * Seeds a previously computed/cached analysis without decoding this future queue item.
+     * AutoPlay uses this to rank candidate order by tempo/key/beat while preserving the
+     * A -> B -> C rule: no new DSP pass for C is started before B becomes current.
+     */
+    fun acceptCachedAnalysis(analysis: TrackAnalysis) {
+        val trackId = analysis.trackId
+        if (trackId.isBlank() || !analysis.isUsable) return
+        val current = results[trackId]
+        if (current?.isUsable == true && current.beatConfidence >= analysis.beatConfidence) return
+        results[trackId] = analysis
+        store.save(trackId, analysis)
+        notifyAnalysisUpdated(trackId)
+    }
 
     /**
      * Looks [trackId] up on disk, once, off the playback thread.
@@ -155,14 +244,64 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
         // rather than on every tick.
         if (!restoreAttempted.add(trackId)) return
         executor.execute {
-            val stored = store.load(trackId) ?: return@execute
-            Log.d(TAG, "Restored analysis for $trackId: bpm=${stored.bpm} conf=${stored.beatConfidence}")
-            results.putIfAbsent(trackId, stored)
+            try {
+                val stored = store.load(trackId) ?: return@execute
+                Log.d(TAG, "Restored analysis for $trackId: bpm=${stored.bpm} conf=${stored.beatConfidence}")
+                NerdStats.onAutomixAnalysisSource(trackId, NerdStats.AutomixAnalysisSource.STORED)
+                if (results.putIfAbsent(trackId, stored) == null) {
+                    notifyAnalysisUpdated(trackId)
+                }
+            } finally {
+                restoreCompleted.add(trackId)
+                // Even a cache miss is new information: the session planner can
+                // now stop waiting for disk and start warming/analyzing audio.
+                notifyAnalysisUpdated(trackId)
+            }
         }
     }
 
+    /**
+     * Primes a queue candidate from persisted analysis without asking the audio
+     * cache to fetch any bytes. Automix can therefore inspect upcoming
+     * tracks ahead cheaply and only warm audio for the first few unknown ones.
+     */
+    fun restoreStored(trackId: String) {
+        if (trackId.isBlank()) return
+        restoreOnce(trackId)
+    }
+
+    /**
+     * Whether the persisted lookup has finished. Used to avoid fetching an
+     * analysis head while a perfectly good stored result may still be seconds
+     * away in the analyzer's single-threaded restore queue.
+     */
+    fun storedLookupFinished(trackId: String): Boolean =
+        results.containsKey(trackId) || trackId in restoreCompleted
+
     /** True once [trackId] has a result, including a failure. Nothing more will arrive. */
     fun isAnalysed(trackId: String): Boolean = results.containsKey(trackId)
+
+    /**
+     * True only when the current track has finished its full analysis pass.
+     *
+     * Wi-Fi keeps this as the gate for A -> B because the outgoing side benefits from tail/vocal
+     * evidence. On metered mobile data PlaybackService may deliberately unlock B from a usable
+     * provisional head so B can learn its intro in time; the full A result still supersedes that
+     * provisional evidence as soon as it arrives. A ready-but-empty terminal failure counts as
+     * finished so one bad A cannot block every successor forever.
+     */
+    fun isFullyAnalysed(trackId: String): Boolean {
+        val analysis = results[trackId] ?: return false
+        return analysis.status == TrackAnalysis.STATUS_READY && trackId !in provisional
+    }
+
+    /**
+     * Whether the currently published result already contains usable musical
+     * evidence. On cellular this may be the provisional head pass: it is enough
+     * to let B start learning its own intro while A's full tail analysis keeps
+     * running in the background.
+     */
+    fun hasUsableAnalysis(trackId: String): Boolean = results[trackId]?.isUsable == true
 
     /**
      * True while a decode and inference for [trackId] is actually in flight.
@@ -172,7 +311,7 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
      * is the difference between something being wrong and something simply
      * taking the several seconds it takes.
      */
-    fun isAnalysing(trackId: String): Boolean = trackId in running
+    fun isAnalysing(trackId: String): Boolean = trackId in running || trackId in reliablePending
 
     /**
      * Queues [trackId] (playing at [uri]) for analysis if it is not already
@@ -233,7 +372,10 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
             // rest, and a queued track reaches its own transition carrying an
             // entry-only estimate: no content end, no mix-out anchor, no vocal
             // mask, which is most of what the outgoing half of a blend reads.
-            if (trackId in provisional && !usableComplete) cache.requestAnalysisHead(uri)
+            if (trackId in provisional && !usableComplete) {
+                NerdStats.onAutomixAnalysisSource(trackId, NerdStats.AutomixAnalysisSource.CACHE_WARMING)
+                cache.requestAnalysisHead(uri)
+            }
             return
         }
         // The strike count belongs to the attempt that was given up on, not to
@@ -250,6 +392,7 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
             // never fetches it at all — see [AudioCache.requestAnalysisHead],
             // which is a no-op after the first call and for anything that isn't
             // a YouTube-backed track.
+            NerdStats.onAutomixAnalysisSource(trackId, NerdStats.AutomixAnalysisSource.CACHE_WARMING)
             cache.requestAnalysisHead(uri)
             return
         }
@@ -267,10 +410,12 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
                 val landed = results[trackId]
                 if (landed != null && landed.isUsable && trackId !in provisional) return@execute
                 if (usableComplete) {
+                    NerdStats.onAutomixAnalysisSource(trackId, NerdStats.AutomixAnalysisSource.CACHE_FULL)
                     val outcome = analyze(trackId, uri, durationSeconds)
                     val whole = outcome.analysis
                     if (whole != null) {
                         results[trackId] = whole
+                        notifyAnalysisUpdated(trackId)
                         provisional.remove(trackId)
                         shortDecodes.remove(trackId)
                         // Only the whole-track pass is persisted. A head result
@@ -281,7 +426,7 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
                         store.save(trackId, whole)
                         restoreAttempted.add(trackId)
                     } else if (outcome.decodedShort &&
-                        shortDecodes.merge(trackId, 1, Int::plus)!! >= MAX_SHORT_DECODE_ATTEMPTS
+                        shortDecodes.update(trackId) { (it ?: 0) + 1 } >= MAX_SHORT_DECODE_ATTEMPTS
                     ) {
                         // Bounded, so a container that is genuinely truncated
                         // isn't re-decoded on every tick for the rest of the
@@ -294,15 +439,18 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
                                 trackId = trackId,
                                 duration = durationSeconds,
                             )
+                            notifyAnalysisUpdated(trackId)
                         }
                     }
                 } else {
                     // Marked before it is published, so a reader on the playback
                     // thread can never see a provisional result that is not
                     // flagged as one.
+                    NerdStats.onAutomixAnalysisSource(trackId, NerdStats.AutomixAnalysisSource.CACHE_HEAD)
                     analyzeHead(trackId, uri, durationSeconds, headRendition!!)?.let { head ->
                         provisional.add(trackId)
                         results[trackId] = head
+                        notifyAnalysisUpdated(trackId)
                     }
                 }
             } catch (error: Throwable) {
@@ -317,6 +465,7 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
                 // [headWorthTrying] has already made sure the head is not tried
                 // twice, so this cannot spin.
                 if (usableComplete) {
+                    NerdStats.onAutomixAnalysisSource(trackId, NerdStats.AutomixAnalysisSource.FAILED)
                     // Recorded as ready-but-empty so a track that cannot be
                     // analysed is not retried on every tick for the rest of the
                     // session.
@@ -325,6 +474,7 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
                         trackId = trackId,
                         duration = durationSeconds,
                     )
+                    notifyAnalysisUpdated(trackId)
                     provisional.remove(trackId)
                 }
             } finally {
@@ -339,6 +489,577 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
                 }
             }
         }
+    }
+
+    /**
+     * Guarantees a seekable analysis source for the immediate transition pair.
+     *
+     * [request] remains the zero-duplication fast path and may finish from persisted analysis or
+     * playback's cache. If that has only produced a head result (or no result), this method joins a
+     * single bounded download of YouTube's Opus fallback and runs the complete structural pass from
+     * one immutable file. The resulting timeline is later mapped onto the Lossless/Hi-Res playback
+     * rendition when safe, so source-quality discovery and musical analysis can run
+     * independently without forcing the mix to play Opus.
+     */
+    fun requestReliable(trackId: String, uri: Uri, durationSeconds: Double) {
+        if (trackId.isBlank()) return
+
+        // Always let persisted evidence win without touching the network or decoding again.
+        restoreOnce(trackId)
+
+        // Remote analysis needs the immutable YouTube/Opus analysis rendition. Local files and
+        // source-only items keep the existing local analyzer because there is no separate
+        // analysis carrier to upload. Before the backend health probe succeeds, local behaviour
+        // is also preserved exactly — this makes deployment of the server half non-breaking.
+        val hasAnalysisCarrier = !uri.getQueryParameter("v").isNullOrBlank()
+        if (!hasAnalysisCarrier ||
+            !RemoteAutomixClient.isAvailable() ||
+            AppSettings.meteredConnection.value == true
+        ) {
+            // Cellular gets a small local/cache-head pass immediately. Waiting
+            // exclusively for the immutable whole-file upload meant A had to
+            // download completely before B was even allowed to start, which is
+            // precisely the wrong shape on a variable mobile link. The reliable
+            // whole-track pass below still supersedes this provisional result.
+            request(trackId, uri, durationSeconds)
+        }
+        if (!hasAnalysisCarrier) return
+
+        val recorded = results[trackId]
+        val curveAware25 =
+            AppSettings.automixVersion.value == AutomixVersion.V2_5 &&
+                AppSettings.automix25Available.value &&
+                RemoteAutomixClient.isAvailable()
+        if (recorded?.isUsable == true && trackId !in provisional &&
+            (!curveAware25 || recorded.analysisSchema >= REMOTE_CURVE_SCHEMA)
+        ) return
+        if (trackId in running) return
+        val now = SystemClock.elapsedRealtime()
+        val eligibleAt = reliableEligibleAt.putIfAbsent(trackId, now + RELIABLE_CACHE_GRACE_MS)
+            ?: (now + RELIABLE_CACHE_GRACE_MS)
+        if (now < eligibleAt) return
+        if ((reliableRetryAt[trackId] ?: 0L) > now) return
+        if (!reliablePending.add(trackId)) return
+
+        NerdStats.onAutomixAnalysisSource(trackId, NerdStats.AutomixAnalysisSource.RELIABLE_DOWNLOAD)
+        reliableAudio.request(uri) { file ->
+            reliablePending.remove(trackId)
+            if (file == null) {
+                NerdStats.onAutomixAnalysisSource(trackId, NerdStats.AutomixAnalysisSource.FAILED)
+                deferReliableRetry(trackId)
+                return@request
+            }
+            reliableFailures.remove(trackId)
+            reliableRetryAt.remove(trackId)
+            scheduleReliableAnalysis(trackId, uri, durationSeconds, file)
+        }
+    }
+
+    /**
+     * Starts a best-effort real stem separation for B's transition window.
+     *
+     * It reuses the same immutable analysis carrier already used by Automix. The expensive work
+     * runs on the analyzer's single worker after structural analysis, so stem preparation cannot
+     * race the beat/vocal pass or create a second concurrent ONNX burst on memory-constrained
+     * devices. Callers poll [transitionStemsFor]; no playback thread ever blocks here.
+     */
+    fun requestTransitionStems(
+        trackId: String,
+        uri: Uri,
+        startSeconds: Double,
+        endSeconds: Double,
+    ) {
+        if (trackId.isBlank() || uri.getQueryParameter("v").isNullOrBlank()) return
+        if (!startSeconds.isFinite() || !endSeconds.isFinite() || endSeconds <= startSeconds) return
+
+        val startMs = (startSeconds.coerceAtLeast(0.0) * 1000.0).toLong()
+        val maxEnd = startSeconds + STEM_TOTAL_MAX_SECONDS
+        val endMs = (minOf(endSeconds, maxEnd) * 1000.0).toLong()
+        if (endMs - startMs < STEM_MIN_MS) return
+        val key = stemKey(trackId, startMs, endMs)
+        stemResults[key]?.let { ready ->
+            if (ready.vocalsFile.isFile && ready.accompanimentFile.isFile) return
+            stemResults.remove(key)
+        }
+        if (!stemRunning.add(key)) return
+
+        reliableAudio.request(uri) { file ->
+            if (file == null) {
+                stemRunning.remove(key)
+                return@request
+            }
+            executor.execute {
+                try {
+                    prepareTransitionStems(trackId, file, startMs, endMs)?.let { ready ->
+                        // One current window per track is enough; planner refinements should replace rather
+                        // than accumulate multi-megabyte WAV pairs.
+                        stemResults.entries
+                            .filter { it.value.trackId == trackId && it.key != key }
+                            .forEach { entry ->
+                                stemResults.remove(entry.key)?.deleteFiles()
+                            }
+                        stemResults[key] = ready
+                        pruneStemCache(keepKey = key)
+                        Log.d(
+                            TAG,
+                            "Real stems ready for $trackId ${ready.startMs}..${ready.endMs}ms " +
+                                "(${ready.accompanimentFile.length() / 1024}kB accompaniment)",
+                        )
+                    }
+                } catch (error: Throwable) {
+                    Log.w(TAG, "Stem preparation failed for $trackId", error)
+                } finally {
+                    stemRunning.remove(key)
+                    // Stem inference owns a separate session from the analysis mask. Release it between
+                    // transitions instead of retaining another ORT arena for the life of the service.
+                    stemSeparator.release()
+                }
+            }
+        }
+    }
+
+    /** Returns a prepared window covering [positionMs], preferring the widest match. */
+    fun transitionStemsFor(trackId: String, positionMs: Long): PreparedTransitionStems? =
+        stemResults.values
+            .asSequence()
+            .filter { it.trackId == trackId && it.covers(positionMs) }
+            .maxByOrNull { it.endMs - it.startMs }
+            ?.takeIf { it.vocalsFile.isFile && it.accompanimentFile.isFile }
+
+    private data class StemChunk(
+        val vocalsLeft: FloatArray,
+        val vocalsRight: FloatArray,
+        val accompanimentLeft: FloatArray,
+        val accompanimentRight: FloatArray,
+        val sampleRate: Int,
+    ) {
+        val frames: Int get() = minOf(
+            vocalsLeft.size,
+            vocalsRight.size,
+            accompanimentLeft.size,
+            accompanimentRight.size,
+        )
+    }
+
+    private fun prepareTransitionStems(
+        trackId: String,
+        file: File,
+        requestedStartMs: Long,
+        requestedEndMs: Long,
+    ): PreparedTransitionStems? {
+        if (requestedEndMs - requestedStartMs < STEM_MIN_MS) return null
+        stemDirectory.mkdirs()
+        val base = safeStemName(trackId) + "_${requestedStartMs}_${requestedEndMs}"
+        val vocalsFile = File(stemDirectory, "${base}_vocals.wav")
+        val accompanimentFile = File(stemDirectory, "${base}_instrumental.wav")
+
+        var vocalSink: StereoPcm16WavSink? = null
+        var accompanimentSink: StereoPcm16WavSink? = null
+        var pending: StemChunk? = null
+        var cursorMs = requestedStartMs
+        var totalFrames = 0L
+        var outputRate = 0
+        var completed = false
+
+        try {
+            while (cursorMs < requestedEndMs) {
+                val chunkEndMs = minOf(
+                    requestedEndMs,
+                    cursorMs + (STEM_CHUNK_USEFUL_SECONDS * 1000.0).toLong(),
+                )
+                val chunk = separateStemChunk(file, cursorMs, chunkEndMs) ?: return null
+                if (chunk.frames <= 0) return null
+                if (outputRate == 0) {
+                    outputRate = chunk.sampleRate
+                    vocalSink = StereoPcm16WavSink(vocalsFile, outputRate)
+                    accompanimentSink = StereoPcm16WavSink(accompanimentFile, outputRate)
+                } else if (chunk.sampleRate != outputRate) {
+                    return null
+                }
+                // Local non-null references make the invariant explicit to Kotlin: after the first
+                // successfully separated chunk, both WAV sinks must exist for every append below.
+                val vocalOut = vocalSink ?: return null
+                val accompanimentOut = accompanimentSink ?: return null
+
+                val overlapFramesTarget = (STEM_CHUNK_OVERLAP_SECONDS * outputRate).toInt()
+                val isLast = chunkEndMs >= requestedEndMs
+                val previous = pending
+                if (previous == null) {
+                    if (isLast) {
+                        vocalOut.append(chunk.vocalsLeft, chunk.vocalsRight, 0, chunk.frames)
+                        accompanimentOut.append(
+                            chunk.accompanimentLeft, chunk.accompanimentRight, 0, chunk.frames,
+                        )
+                        totalFrames += chunk.frames
+                    } else {
+                        val tailFrames = overlapFramesTarget.coerceAtMost(chunk.frames / 3).coerceAtLeast(1)
+                        val bodyEnd = chunk.frames - tailFrames
+                        vocalOut.append(chunk.vocalsLeft, chunk.vocalsRight, 0, bodyEnd)
+                        accompanimentOut.append(
+                            chunk.accompanimentLeft, chunk.accompanimentRight, 0, bodyEnd,
+                        )
+                        totalFrames += bodyEnd
+                        pending = chunk.tail(tailFrames)
+                    }
+                } else {
+                    val overlapFrames = minOf(previous.frames, chunk.frames, overlapFramesTarget)
+                    if (overlapFrames <= 0) return null
+                    val mixed = crossfadeStemChunks(previous, chunk, overlapFrames)
+                    vocalOut.append(mixed.vocalsLeft, mixed.vocalsRight, 0, mixed.frames)
+                    accompanimentOut.append(
+                        mixed.accompanimentLeft, mixed.accompanimentRight, 0, mixed.frames,
+                    )
+                    totalFrames += mixed.frames
+
+                    if (isLast) {
+                        vocalOut.append(chunk.vocalsLeft, chunk.vocalsRight, overlapFrames, chunk.frames)
+                        accompanimentOut.append(
+                            chunk.accompanimentLeft, chunk.accompanimentRight, overlapFrames, chunk.frames,
+                        )
+                        totalFrames += chunk.frames - overlapFrames
+                        pending = null
+                    } else {
+                        val tailFrames = overlapFramesTarget
+                            .coerceAtMost((chunk.frames - overlapFrames).coerceAtLeast(1) / 2)
+                            .coerceAtLeast(1)
+                        val bodyEnd = chunk.frames - tailFrames
+                        if (bodyEnd > overlapFrames) {
+                            vocalOut.append(chunk.vocalsLeft, chunk.vocalsRight, overlapFrames, bodyEnd)
+                            accompanimentOut.append(
+                                chunk.accompanimentLeft, chunk.accompanimentRight, overlapFrames, bodyEnd,
+                            )
+                            totalFrames += bodyEnd - overlapFrames
+                        }
+                        pending = chunk.tail(tailFrames)
+                    }
+                }
+
+                if (isLast) break
+                cursorMs = (chunkEndMs - (STEM_CHUNK_OVERLAP_SECONDS * 1000.0).toLong())
+                    .coerceAtLeast(cursorMs + 1L)
+            }
+
+            pending?.let { tail ->
+                vocalSink?.append(tail.vocalsLeft, tail.vocalsRight, 0, tail.frames)
+                accompanimentSink?.append(
+                    tail.accompanimentLeft, tail.accompanimentRight, 0, tail.frames,
+                )
+                totalFrames += tail.frames
+            }
+            completed = outputRate > 0 && totalFrames > 0L
+        } catch (error: Throwable) {
+            Log.w(TAG, "Could not stitch stem window for $trackId", error)
+            return null
+        } finally {
+            runCatching { vocalSink?.close() }
+            runCatching { accompanimentSink?.close() }
+            if (!completed) {
+                // A failed inference/stitch must never leave a partial RIFF that a later lookup can
+                // mistake for a usable stem or let abandoned transition windows fill the cache.
+                runCatching { vocalsFile.delete() }
+                runCatching { accompanimentFile.delete() }
+            }
+        }
+
+        if (!completed || !vocalsFile.isFile || !accompanimentFile.isFile) {
+            runCatching { vocalsFile.delete() }
+            runCatching { accompanimentFile.delete() }
+            return null
+        }
+        val realEndMs = requestedStartMs + (totalFrames * 1000.0 / outputRate).toLong()
+        return PreparedTransitionStems(
+            trackId = trackId,
+            startMs = requestedStartMs,
+            endMs = realEndMs,
+            vocalsFile = vocalsFile,
+            accompanimentFile = accompanimentFile,
+            sampleRate = outputRate,
+        )
+    }
+
+    /** Separates one Open-Unmix-sized useful region, with extra context removed after iSTFT. */
+    private fun separateStemChunk(file: File, requestedStartMs: Long, requestedEndMs: Long): StemChunk? {
+        val requestedStartSeconds = requestedStartMs / 1000.0
+        val requestedEndSeconds = requestedEndMs / 1000.0
+        val paddedStartSeconds = (requestedStartSeconds - STEM_EDGE_PAD_SECONDS).coerceAtLeast(0.0)
+        val paddedEndSeconds = requestedEndSeconds + STEM_EDGE_PAD_SECONDS
+        val decoded = reliableAudio.dataSource(file)?.use { source ->
+            AudioDecoder.decodeRegionStereo(source, paddedStartSeconds, paddedEndSeconds)
+        } ?: return null
+        val pcm = decoded.first
+        val actualStart = decoded.second
+        if (pcm.sampleRate <= 0.0 || pcm.left.isEmpty() || pcm.left.size != pcm.right.size) return null
+
+        val padTrimFrames = ((paddedStartSeconds - actualStart) * pcm.sampleRate)
+            .toInt().coerceAtLeast(0).coerceAtMost(pcm.left.size)
+        // MediaExtractor may land a little after the requested decode point. Track the actual first
+        // retained sample instead of assuming the requested padded start was reached exactly; this
+        // keeps the generated stem on B's musical timeline even across codec/keyframe differences.
+        val retainedStartSeconds = actualStart + padTrimFrames / pcm.sampleRate
+        val paddedWantedFrames = ((paddedEndSeconds - retainedStartSeconds) * pcm.sampleRate)
+            .toInt().coerceAtLeast(1)
+        val paddedEndFrame = (padTrimFrames + paddedWantedFrames).coerceAtMost(pcm.left.size)
+        if (paddedEndFrame <= padTrimFrames) return null
+
+        val paddedLeft = pcm.left.copyOfRange(padTrimFrames, paddedEndFrame)
+        val paddedRight = pcm.right.copyOfRange(padTrimFrames, paddedEndFrame)
+        val separated = stemSeparator.separate(paddedLeft, paddedRight, pcm.sampleRate) ?: return null
+
+        val outputRate = separated.sampleRate
+        val usefulStartFrame = ((requestedStartSeconds - retainedStartSeconds) * outputRate)
+            .toInt().coerceAtLeast(0)
+        val usefulWantedFrames = ((requestedEndSeconds - requestedStartSeconds) * outputRate)
+            .toInt().coerceAtLeast(1)
+        val separatedFrames = minOf(
+            separated.vocalsLeft.size,
+            separated.vocalsRight.size,
+            separated.accompanimentLeft.size,
+            separated.accompanimentRight.size,
+        )
+        val usefulEndFrame = (usefulStartFrame + usefulWantedFrames).coerceAtMost(separatedFrames)
+        if (usefulEndFrame <= usefulStartFrame) return null
+
+        return StemChunk(
+            vocalsLeft = separated.vocalsLeft.copyOfRange(usefulStartFrame, usefulEndFrame),
+            vocalsRight = separated.vocalsRight.copyOfRange(usefulStartFrame, usefulEndFrame),
+            accompanimentLeft = separated.accompanimentLeft.copyOfRange(usefulStartFrame, usefulEndFrame),
+            accompanimentRight = separated.accompanimentRight.copyOfRange(usefulStartFrame, usefulEndFrame),
+            sampleRate = outputRate.toInt(),
+        )
+    }
+
+    private fun StemChunk.tail(frames: Int): StemChunk {
+        val count = frames.coerceIn(1, this.frames)
+        val start = this.frames - count
+        return StemChunk(
+            vocalsLeft.copyOfRange(start, this.frames),
+            vocalsRight.copyOfRange(start, this.frames),
+            accompanimentLeft.copyOfRange(start, this.frames),
+            accompanimentRight.copyOfRange(start, this.frames),
+            sampleRate,
+        )
+    }
+
+    /** Complementary-power-shaped stitch for two estimates of the *same* musical samples. */
+    private fun crossfadeStemChunks(previousTail: StemChunk, current: StemChunk, frames: Int): StemChunk {
+        val count = minOf(frames, previousTail.frames, current.frames)
+        fun mix(previous: FloatArray, next: FloatArray): FloatArray = FloatArray(count) { index ->
+            val progress = (index + 1).toDouble() / (count + 1).toDouble()
+            val theta = progress * kotlin.math.PI / 2.0
+            // cos² + sin² = 1. These windows describe the same source material, so the gains must
+            // sum to one; a conventional equal-power cos/sin fade would add ~3 dB at the midpoint.
+            val a = (kotlin.math.cos(theta) * kotlin.math.cos(theta)).toFloat()
+            val b = (kotlin.math.sin(theta) * kotlin.math.sin(theta)).toFloat()
+            (previous[previous.size - count + index] * a + next[index] * b).coerceIn(-1f, 1f)
+        }
+        return StemChunk(
+            vocalsLeft = mix(previousTail.vocalsLeft, current.vocalsLeft),
+            vocalsRight = mix(previousTail.vocalsRight, current.vocalsRight),
+            accompanimentLeft = mix(previousTail.accompanimentLeft, current.accompanimentLeft),
+            accompanimentRight = mix(previousTail.accompanimentRight, current.accompanimentRight),
+            sampleRate = current.sampleRate,
+        )
+    }
+
+    private class StereoPcm16WavSink(file: File, private val sampleRate: Int) : AutoCloseable {
+        private val output = java.io.RandomAccessFile(file, "rw")
+        private var framesWritten = 0L
+        private var closed = false
+
+        init {
+            output.setLength(0L)
+            writeHeader(dataBytes = 0L)
+        }
+
+        fun append(left: FloatArray, right: FloatArray, start: Int, endExclusive: Int) {
+            check(!closed)
+            val from = start.coerceAtLeast(0)
+            val until = minOf(endExclusive, left.size, right.size).coerceAtLeast(from)
+            val count = until - from
+            if (count <= 0) return
+            val bytes = ByteArray(count * 4)
+            var offset = 0
+            for (index in from until until) {
+                val l = (left[index].coerceIn(-1f, 1f) * 32767f).toInt()
+                val r = (right[index].coerceIn(-1f, 1f) * 32767f).toInt()
+                bytes[offset++] = (l and 0xff).toByte()
+                bytes[offset++] = ((l ushr 8) and 0xff).toByte()
+                bytes[offset++] = (r and 0xff).toByte()
+                bytes[offset++] = ((r ushr 8) and 0xff).toByte()
+            }
+            output.seek(output.length())
+            output.write(bytes)
+            framesWritten += count
+        }
+
+        private fun writeHeader(dataBytes: Long) {
+            output.seek(0L)
+            fun ascii(value: String) = output.write(value.toByteArray(Charsets.US_ASCII))
+            fun le16(value: Int) {
+                output.write(value and 0xff)
+                output.write((value ushr 8) and 0xff)
+            }
+            fun le32(value: Long) {
+                output.write((value and 0xff).toInt())
+                output.write(((value ushr 8) and 0xff).toInt())
+                output.write(((value ushr 16) and 0xff).toInt())
+                output.write(((value ushr 24) and 0xff).toInt())
+            }
+            ascii("RIFF")
+            le32(36L + dataBytes)
+            ascii("WAVEfmt ")
+            le32(16L)
+            le16(1)
+            le16(2)
+            le32(sampleRate.toLong())
+            le32((sampleRate * 4L))
+            le16(4)
+            le16(16)
+            ascii("data")
+            le32(dataBytes)
+        }
+
+        override fun close() {
+            if (closed) return
+            closed = true
+            val dataBytes = framesWritten * 4L
+            writeHeader(dataBytes)
+            output.fd.sync()
+            output.close()
+        }
+    }
+
+    private fun pruneStemCache(keepKey: String) {
+        val entries = stemResults.entries
+            .sortedByDescending { entry ->
+                maxOf(entry.value.vocalsFile.lastModified(), entry.value.accompanimentFile.lastModified())
+            }
+        var bytes = 0L
+        var kept = 0
+        for (entry in entries) {
+            val size = entry.value.vocalsFile.length() + entry.value.accompanimentFile.length()
+            val mustKeep = entry.key == keepKey
+            val canKeep = mustKeep || (kept < MAX_STEM_WINDOWS && bytes + size <= MAX_STEM_BYTES)
+            if (canKeep) {
+                kept += 1
+                bytes += size
+            } else {
+                stemResults.remove(entry.key)?.deleteFiles()
+            }
+        }
+    }
+
+    private fun PreparedTransitionStems.deleteFiles() {
+        runCatching { vocalsFile.delete() }
+        runCatching { accompanimentFile.delete() }
+    }
+
+    private fun stemKey(trackId: String, startMs: Long, endMs: Long): String =
+        "$trackId:${startMs / STEM_KEY_QUANTUM_MS}:${endMs / STEM_KEY_QUANTUM_MS}"
+
+    private fun safeStemName(trackId: String): String =
+        trackId.replace(Regex("[^A-Za-z0-9_-]"), "_")
+
+    private fun scheduleReliableAnalysis(
+        trackId: String,
+        uri: Uri,
+        durationSeconds: Double,
+        file: File,
+    ) {
+        val recorded = results[trackId]
+        val curveAware25 =
+            AppSettings.automixVersion.value == AutomixVersion.V2_5 &&
+                AppSettings.automix25Available.value &&
+                RemoteAutomixClient.isAvailable()
+        if (recorded?.isUsable == true && trackId !in provisional &&
+            (!curveAware25 || recorded.analysisSchema >= REMOTE_CURVE_SCHEMA)
+        ) return
+        // A cache pass already in flight wins. The physical file remains on disk and the next
+        // planning heartbeat will schedule it immediately if that pass did not finish the job.
+        if (!running.add(trackId)) return
+
+        executor.execute {
+            try {
+                val landed = results[trackId]
+                val needsCurveRemote =
+                    AppSettings.automixVersion.value == AutomixVersion.V2_5 &&
+                        AppSettings.automix25Available.value &&
+                        RemoteAutomixClient.isAvailable()
+                if (landed?.isUsable == true && trackId !in provisional &&
+                    (!needsCurveRemote || landed.analysisSchema >= REMOTE_CURVE_SCHEMA)
+                ) return@execute
+
+                // When the backend is live, heavy feature extraction happens there. The phone
+                // uploads only the standalone lightweight analysis rendition — never the FLAC
+                // selected for playback. A timeout/contract failure returns null and immediately
+                // falls through to the same proven local analyzer using this very same file.
+                if (RemoteAutomixClient.isAvailable()) {
+                    val remote = RemoteAutomixClient.analyze(trackId, durationSeconds, file)
+                    if (remote?.isUsable == true) {
+                        results[trackId] = remote
+                        provisional.remove(trackId)                        shortDecodes.remove(trackId)
+                        store.save(trackId, remote)
+                        restoreAttempted.add(trackId)
+                        NerdStats.onAutomixAnalysisSource(trackId, NerdStats.AutomixAnalysisSource.REMOTE)
+                        notifyAnalysisUpdated(trackId)
+                        Log.d(
+                            TAG,
+                            "Remote analysis ready for $trackId: bpm=${remote.bpm} " +
+                                "conf=${remote.beatConfidence}",
+                        )
+                        return@execute
+                    }
+                }
+
+                NerdStats.onAutomixAnalysisSource(trackId, NerdStats.AutomixAnalysisSource.RELIABLE_FILE)
+                val outcome = analyzeFile(trackId, file, durationSeconds)
+                val complete = outcome.analysis
+                if (complete != null && complete.isUsable) {
+                    results[trackId] = complete
+                    provisional.remove(trackId)
+                    shortDecodes.remove(trackId)
+                    store.save(trackId, complete)
+                    restoreAttempted.add(trackId)
+                    notifyAnalysisUpdated(trackId)
+                    Log.d(
+                        TAG,
+                        "Reliable analysis ready for $trackId: bpm=${complete.bpm} " +
+                            "conf=${complete.beatConfidence}",
+                    )
+                } else {
+                    // A committed file that still decodes short/carries no tempo is not useful on
+                    // the next heartbeat. Remove it once, then retry with exponential backoff. Keep
+                    // any provisional head evidence already published instead of replacing it with
+                    // an empty failure.
+                    NerdStats.onAutomixAnalysisSource(trackId, NerdStats.AutomixAnalysisSource.FAILED)
+                    reliableAudio.discard(uri)
+                    deferReliableRetry(trackId)
+                    if (trackId !in provisional && results[trackId]?.isUsable != true) {
+                        results.remove(trackId)
+                        notifyAnalysisUpdated(trackId)
+                    }
+                }
+            } catch (error: Throwable) {
+                Log.w(TAG, "Reliable analysis of $trackId failed", error)
+                NerdStats.onAutomixAnalysisSource(trackId, NerdStats.AutomixAnalysisSource.FAILED)
+                reliableAudio.discard(uri)
+                deferReliableRetry(trackId)
+            } finally {
+                running.remove(trackId)
+                if (running.isEmpty()) {
+                    tracker.release()
+                    vocals.release()
+                }
+            }
+        }
+    }
+
+    private fun deferReliableRetry(trackId: String) {
+        val failures = reliableFailures.update(trackId) { (it ?: 0) + 1 }
+        val delayMs = (RELIABLE_RETRY_BASE_MS shl (failures - 1).coerceIn(0, 5))
+            .coerceAtMost(RELIABLE_RETRY_MAX_MS)
+        reliableRetryAt[trackId] = SystemClock.elapsedRealtime() + delayMs
+        Log.d(TAG, "Reliable analysis for $trackId will retry in ${delayMs / 1000}s")
     }
 
     /**
@@ -674,10 +1395,10 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
      */
     private fun structure(
         trackId: String,
-        uri: Uri,
-        rendition: AudioCache.Rendition,
+        sourceLabel: String,
         openSource: () -> MediaDataSource?,
         effectiveDuration: Double,
+        onDecodedShort: () -> Unit,
     ): Structural {
         val structRate = TrackFeatures.sampleRate
         val decoded = openSource()?.use { AudioDecoder.decodeRegion(it, 0.0, effectiveDuration) }
@@ -697,7 +1418,7 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
         if (decodedSeconds < effectiveDuration * MIN_DECODED_FRACTION) {
             Log.w(
                 TAG,
-                "Analysis of $trackId refused: rendition ${rendition.key} decoded " +
+                "Analysis of $trackId refused: $sourceLabel decoded " +
                     "${"%.1f".format(decodedSeconds)}s of a ${"%.1f".format(effectiveDuration)}s " +
                     "container — cached with holes?",
             )
@@ -707,31 +1428,7 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
             // it was written badly, and without this the retries would pick the
             // same broken copy three times over and give up on a track whose
             // heavier rendition would have analysed perfectly well.
-            badRenditions.add(rendition.key)
-            // And thrown off disk, not merely remembered. A file the cache calls
-            // complete and the decoder gives up on partway is not going to
-            // improve: nothing else will ever write to it, because as far as the
-            // cache is concerned it is finished. Remembering it only helps for as
-            // long as this process lives — a restart clears the set, the same
-            // bytes are read again, and the same seconds are spent reaching the
-            // same conclusion. Deleting it is what lets a clean copy be fetched.
-            // Skipped for whatever the player is reading from; see
-            // [AudioCache.discardBadRendition].
-            if (rendition.isComplete && discardsOf(rendition.key) < MAX_RENDITION_DISCARDS &&
-                cache.discardBadRendition(uri, rendition.key)
-            ) {
-                // Every memory of that copy goes with the bytes. Deleting the
-                // file and then still refusing its key is the worst of both: the
-                // clean copy [AudioCache.requestAnalysisHead] fetches in its place
-                // is filtered straight back out by [badRenditions], the track is
-                // written off for the session anyway, and the download was spent
-                // on nothing. The strike count goes too — the next attempt reads
-                // genuinely different bytes, so it starts level.
-                discarded.merge(rendition.key, 1, Int::plus)
-                badRenditions.remove(rendition.key)
-                triedRenditions.remove(rendition.key)
-                shortDecodes.remove(trackId)
-            }
+            onDecodedShort()
             return Structural(null, decodedShort = true)
         }
 
@@ -760,6 +1457,52 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
         triedRenditions.add(rendition.key)
         fun openSource(): MediaDataSource? = cache.renditionDataSource(uri, rendition)
 
+        return analyzeSource(
+            trackId = trackId,
+            durationSeconds = durationSeconds,
+            sourceLabel = "rendition ${rendition.key}",
+            openSource = ::openSource,
+            onDecodedShort = {
+                badRenditions.add(rendition.key)
+                // A complete cache entry that decodes short will never improve. Remove the sibling
+                // rendition once so the clean fallback can refill it; never delete the live stream.
+                if (rendition.isComplete && discardsOf(rendition.key) < MAX_RENDITION_DISCARDS &&
+                    cache.discardBadRendition(uri, rendition.key)
+                ) {
+                    discarded.update(rendition.key) { (it ?: 0) + 1 }
+                    badRenditions.remove(rendition.key)
+                    triedRenditions.remove(rendition.key)
+                    shortDecodes.remove(trackId)
+                }
+            },
+        )
+    }
+
+    private fun analyzeFile(trackId: String, file: File, durationSeconds: Double): WholeTrack {
+        fun openSource(): MediaDataSource? = reliableAudio.dataSource(file)
+        // The proxy may be a radio/album cut a few seconds away from queue metadata. Analyse its
+        // real timeline and only map it onto the
+        // playback rendition; pretending the metadata duration is exact creates false anchors.
+        val containerDuration = openSource()?.use(AudioDecoder::containerDurationSeconds)
+            ?.takeIf { it.isFinite() && it > 0.0 }
+            ?: durationSeconds
+        return analyzeSource(
+            trackId = trackId,
+            durationSeconds = containerDuration,
+            sourceLabel = "analysis file ${file.name}",
+            openSource = ::openSource,
+            onDecodedShort = {},
+        )
+    }
+
+    private fun analyzeSource(
+        trackId: String,
+        durationSeconds: Double,
+        sourceLabel: String,
+        openSource: () -> MediaDataSource?,
+        onDecodedShort: () -> Unit,
+    ): WholeTrack {
+
         var effectiveDuration = durationSeconds
         if (!effectiveDuration.isFinite() || effectiveDuration <= 0) {
             effectiveDuration = openSource()?.use(AudioDecoder::containerDurationSeconds) ?: 0.0
@@ -782,7 +1525,13 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
         // held while the models ran, in a process that was reaching a 256 MB heap limit and had
         // died on it. Returning is what releases them — a `val` cannot be nulled, and a narrower
         // scope alone does not make ART treat one as dead.
-        val structural = structure(trackId, uri, rendition, ::openSource, effectiveDuration)
+        val structural = structure(
+            trackId,
+            sourceLabel,
+            openSource,
+            effectiveDuration,
+            onDecodedShort,
+        )
         if (structural.decodedShort) return WholeTrack(null, decodedShort = true)
         val features = structural.features ?: return WholeTrack(empty(trackId, effectiveDuration))
 
@@ -793,8 +1542,8 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
         // stereo buffer is paid for once.
         val window = BeatTracker.WINDOW_SECONDS
         val tailStart = max(0.0, effectiveDuration - window)
-        val head = region(::openSource, 0.0, minOf(window, effectiveDuration), features)
-        val tail = if (tailStart > window / 2) region(::openSource, tailStart, effectiveDuration, features) else null
+        val head = region(openSource, 0.0, minOf(window, effectiveDuration), features)
+        val tail = if (tailStart > window / 2) region(openSource, tailStart, effectiveDuration, features) else null
 
         val headGrid = head?.grid
         val tailGrid = tail?.grid
@@ -1023,10 +1772,21 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
 
     fun release() {
         executor.shutdownNow()
+        results.clear()
+        reliableAudio.release()
+        stemResults.values.forEach { it.deleteFiles() }
+        stemResults.clear()
+        stemRunning.clear()
+        stemSeparator.release()
+        reliablePending.clear()
+        reliableEligibleAt.clear()
+        reliableRetryAt.clear()
+        reliableFailures.clear()
         headAttempts.clear()
         headSkipLogged.clear()
         provisional.clear()
         restoreAttempted.clear()
+        restoreCompleted.clear()
         shortDecodes.clear()
         badRenditions.clear()
         triedRenditions.clear()
@@ -1036,6 +1796,8 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
     }
 
     private companion object {
+        /** Server analysis schema required by curve-aware Automix 2.5 mix-v6. */
+        const val REMOTE_CURVE_SCHEMA = 2
         const val TAG = "BitChordTrackAnalyzer"
 
         /**
@@ -1044,6 +1806,20 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
          * presence of one.
          */
         const val NEUTRAL_VOCAL = 0.5
+
+        /** Full curve-heavy analyses kept in Java RAM; older entries live in AnalysisStore. */
+        const val RESULTS_RAM_ENTRIES = 12
+
+        /** Lightweight per-track guards get more room than the full analyses but stay bounded. */
+        const val TRACK_AUX_ENTRIES = 48
+
+        /** Rendition keys can outnumber tracks (AAC/Opus/Lossless), so give them a wider cap. */
+        const val RENDITION_AUX_ENTRIES = 96
+
+        /** Network/source errors are retried, but never from the one-second planning heartbeat. */
+        const val RELIABLE_RETRY_BASE_MS = 15_000L
+        const val RELIABLE_RETRY_MAX_MS = 5L * 60L * 1000L
+        const val RELIABLE_CACHE_GRACE_MS = 8_000L
 
         /**
          * How much more than the average-bitrate estimate of the opening window
@@ -1110,5 +1886,15 @@ class TrackAnalyzer(context: Context, private val cache: AudioCache) {
          * whose first attempt covered only a few seconds.
          */
         const val HEAD_RETRY_GROWTH = 2
+
+        /** Open-Unmix is fixed-width; long overlays are stitched from bounded windows. */
+        const val STEM_CHUNK_USEFUL_SECONDS = 18.0
+        const val STEM_CHUNK_OVERLAP_SECONDS = 0.25
+        const val STEM_EDGE_PAD_SECONDS = 0.40
+        const val STEM_TOTAL_MAX_SECONDS = 90.0
+        const val STEM_MIN_MS = 2_000L
+        const val STEM_KEY_QUANTUM_MS = 250L
+        const val MAX_STEM_WINDOWS = 3
+        const val MAX_STEM_BYTES = 32L * 1024L * 1024L
     }
 }
