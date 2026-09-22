@@ -30,6 +30,16 @@ MAX_DURATION_SECONDS = float(os.getenv("AUTOMIX_MAX_DURATION_SECONDS", "900"))
 MAX_CACHE_ENTRIES = int(os.getenv("AUTOMIX_CACHE_ENTRIES", "512"))
 MAX_CONCURRENT_ANALYSES = max(1, int(os.getenv("AUTOMIX_MAX_CONCURRENT", "2")))
 
+# Temporary 2.5 beta entitlement. Only hashes are stored in source/config; the
+# app never sends the account email to Automix. Future Premium subscriptions
+# should extend this check from the billing entitlement store.
+_AUTOMIX25_OWNER_HASH = "2c8c3e1d1bcef1415230705c38bafb7403905850a7f37c5206bd5cfc055c6aeb"
+AUTOMIX25_BETA_HASHES = {
+    value.strip().lower()
+    for value in os.getenv("AUTOMIX25_BETA_HASHES", _AUTOMIX25_OWNER_HASH).split(",")
+    if value.strip()
+}
+
 _analysis_slots = asyncio.Semaphore(MAX_CONCURRENT_ANALYSES)
 _cache_lock = threading.Lock()
 _analysis_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
@@ -38,6 +48,7 @@ _analysis_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
 class PlanRequest(BaseModel):
     version: int = API_VERSION
     preview: bool = False
+    accountHash: str = ""
     outgoing: dict[str, Any]
     incoming: dict[str, Any]
 
@@ -581,7 +592,12 @@ def _analyze(path: str, track_id: str, declared_duration: float) -> dict[str, An
 
 @router.get("/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "version": API_VERSION, "analyzer": "orb-remote-dsp-v6"}
+    return {
+        "ok": True,
+        "version": API_VERSION,
+        "automixVersion": "2.5",
+        "analyzer": "orb-remote-dsp-v6",
+    }
 
 
 @router.get("/analysis/{track_id}")
@@ -1780,7 +1796,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     best["outgoingTransitionBpm"] = round(a_bpm, 4)
     best["incomingTransitionBpm"] = round(b_bpm, 4)
     best["tempoCompatibility"] = round(tempo, 4)
-    best["planner"] = "orb-server-authoritative-v6"
+    best["planner"] = "orb-automix-2.5"
     best["serverAuthoritative"] = True
     return best, candidates[:5]
 
@@ -1789,8 +1805,8 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
 async def plan(request: PlanRequest) -> dict[str, Any]:
     if request.version > API_VERSION:
         raise HTTPException(status_code=409, detail="unsupported Automix protocol version")
-    if not request.preview:
-        raise HTTPException(status_code=403, detail="Automix v6 preview is not enabled for this client")
+    if not request.preview or request.accountHash.strip().lower() not in AUTOMIX25_BETA_HASHES:
+        raise HTTPException(status_code=403, detail="Automix 2.5 entitlement required")
     outgoing = _plan_track(request.outgoing)
     incoming = _plan_track(request.incoming)
     plan_result, candidates = _remote_plan(outgoing, incoming)
@@ -1798,9 +1814,10 @@ async def plan(request: PlanRequest) -> dict[str, Any]:
     # minimal fallback is selected here on the server; Android may only reject impossible bounds.
     plan_result = dict(plan_result)
     plan_result["serverAuthoritative"] = True
-    plan_result["planner"] = "orb-server-authoritative-v6"
+    plan_result["planner"] = "orb-automix-2.5"
     return {
         "version": API_VERSION,
+        "automixVersion": "2.5",
         "authority": "server",
         "style": plan_result.get("style", "NO_TRANSITION"),
         "reason": plan_result.get("reason", "server-plan"),
