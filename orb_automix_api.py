@@ -1646,7 +1646,10 @@ def _timing_candidates(
 
     for name, quality, kind in (
         ("phraseBoundaries", 1.0, "phrase"),
-        ("downbeats", 0.80, "downbeat"),
+        ("downbeats", 0.82, "downbeat"),
+        # Full beat grid is lower-confidence than a phrase/downbeat, but gives the
+        # planner sub-bar phase precision so kick/snare transients do not flam.
+        ("beats", 0.66, "beat"),
     ):
         raw = track.get(name)
         if not isinstance(raw, list):
