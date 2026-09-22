@@ -45,8 +45,6 @@ data class TrackAnalysis(
     val status: String = "",
     /** Guards against a stale analysis being paired with the wrong track. */
     val trackId: String = "",
-    /** Remote analyzer schema. 0 means local/legacy evidence without mix-v6 curves. */
-    val analysisSchema: Int = 0,
     val duration: Double = 0.0,
 
     val bpm: Double = 0.0,
@@ -62,10 +60,6 @@ data class TrackAnalysis(
      * beat-matching.
      */
     val beatConfidence: Double = 0.0,
-    /** Full beat grid used for sub-bar phase locking in Automix 2.5. */
-    val beats: List<Double> = emptyList(),
-    /** Sliding local-tempo evidence; global BPM alone cannot describe tempo drift. */
-    val tempoCurve: List<TempoSample> = emptyList(),
     val downbeats: List<Double> = emptyList(),
     val phraseBoundaries: List<Double> = emptyList(),
     val firstBeat: Double = 0.0,
@@ -89,14 +83,6 @@ data class TrackAnalysis(
     val energyCurve: List<EnergySample> = emptyList(),
     /** Low-band energy, present only when the analyzer ran a band split. Drives the bass swap. */
     val lowEnergyCurve: List<EnergySample> = emptyList(),
-    /** Mid/high and timbral contours used by the curve-aware 2.5 planner. */
-    val midEnergyCurve: List<EnergySample> = emptyList(),
-    val highEnergyCurve: List<EnergySample> = emptyList(),
-    val brightnessCurve: List<EnergySample> = emptyList(),
-    /** Coarse transient/onset envelope on the shared analysis timeline. */
-    val onsetCurve: List<EnergySample> = emptyList(),
-    /** Time-varying 12-bin pitch-class profile; used to compare actual chords at the join. */
-    val chromaCurve: List<ChromaSample> = emptyList(),
     /**
      * Per-sample vocal activity, indexed against [energyCurve] sample times.
      * Empty, or any length other than the energy curve's, means "no
@@ -114,8 +100,9 @@ data class TrackAnalysis(
      * track nothing has looked at yet has a blank [status], while one whose
      * decode failed is recorded [STATUS_READY] with every field at its default
      * so it is not retried forever. A zero [bpm] is what separates the second
-     * from a real result — and it is also the threshold the policy uses, since
-     * a tempo outside 40–220 drops a pairing to a plain crossfade anyway.
+     * from a real result — and it is also the threshold the policy uses. A
+     * tempo outside 40–220 cannot authorize an Automix operation; it does not
+     * silently turn into Crossfade.
      */
     val isUsable: Boolean get() = status == STATUS_READY && bpm > 0
 
@@ -126,12 +113,6 @@ data class TrackAnalysis(
 
 /** One point on an energy curve. [energy] is in whatever scale the analyzer chose. */
 data class EnergySample(val time: Double, val energy: Double)
-
-/** Local tempo estimate around [time], with analyzer confidence 0..1. */
-data class TempoSample(val time: Double, val bpm: Double, val confidence: Double)
-
-/** 12-bin pitch-class distribution around [time]. */
-data class ChromaSample(val time: Double, val chroma: List<Double>)
 
 /**
  * A candidate point for a transition to enter or leave on. [score] is the
@@ -181,6 +162,12 @@ enum class TransitionTier {
     /** Beat-quantized anchors and EQ handoffs are allowed; time-stretching is not. */
     DJ_ASSISTED,
 
-    /** The evidence supports nothing beyond an equal-power fade at the analyzed anchor. */
+    /**
+     * Automix 2.0 legacy floor: evidence supports only its historical equal-power
+     * transition at the analyzed anchor. Kept so 2.0 remains behaviorally stable.
+     */
     PLAIN_CROSSFADE,
+
+    /** Automix 2.5 floor: insufficient evidence means natural playback. */
+    NO_TRANSITION,
 }
