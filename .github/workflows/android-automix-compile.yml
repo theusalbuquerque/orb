@@ -1,0 +1,42 @@
+name: Android Automix compile
+
+on:
+  push:
+    paths:
+      - "app/src/main/java/com/music/orb/playback/**"
+      - "app/src/main/java/com/music/orb/playback/smart/**"
+      - "app/build.gradle.kts"
+      - "build.gradle.kts"
+      - "settings.gradle.kts"
+      - "gradle/**"
+      - ".github/workflows/android-automix-compile.yml"
+  pull_request:
+    paths:
+      - "app/src/main/java/com/music/orb/playback/**"
+      - "app/src/main/java/com/music/orb/playback/smart/**"
+      - "app/build.gradle.kts"
+      - "build.gradle.kts"
+      - "settings.gradle.kts"
+      - "gradle/**"
+      - ".github/workflows/android-automix-compile.yml"
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Compile Dev Kotlin
+        run: ./gradlew :app:compileDevDebugKotlin --stacktrace
