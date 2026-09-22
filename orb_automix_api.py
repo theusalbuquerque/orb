@@ -915,36 +915,66 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
 
     # 2) EQ swap is a separate candidate, not a synonym for blend. It earns a place only when
     # both low-band curves exist and the shared grid is trustworthy enough to exchange the bass.
-    if a_end > 0.0 and key_evidence and tempo_bridge_ok and tempo >= 0.68 and conf >= 0.38 and key_fit >= 0.58 and _low_curve(a) and _low_curve(b):
+    if (
+        a_end > 0.0
+        and key_evidence
+        and tempo_bridge_ok
+        and tempo >= 0.68
+        and conf >= 0.38
+        and key_fit >= 0.58
+        and _low_curve(a)
+        and _low_curve(b)
+    ):
         beat = 60.0 / a_bpm if a_bpm > 0 else 0.5
         span = _clamp(16.0 * beat, 5.0, 14.0)
         desired_start = max(0.0, max(a_release, a_end - span))
         start, outgoing_phrase_fit = _structural_snap(
-            a, desired_start, max(0.0, a_release), max(max(0.0, a_release), a_end - 0.25), beat,
+            a,
+            desired_start,
+            max(0.0, a_release),
+            max(max(0.0, a_release), a_end - 0.25),
+            beat,
         )
         desired_cue = max(b_start, _finite(b.get("mixInTime"), b_start))
         cue, incoming_phrase_fit = _structural_snap(
-            b, desired_cue, b_start, max(b_start, b_end - 0.25),
+            b,
+            desired_cue,
+            b_start,
+            max(b_start, b_end - 0.25),
             60.0 / b_bpm if b_bpm > 0.0 else beat,
         )
         phrase_fit = min(outgoing_phrase_fit, incoming_phrase_fit)
         overlap_vocal_clash, energy_fit = _overlap_pair_metrics(
-            a, b, start, a_end, cue, bridge_in_rate,
+            a,
+            b,
+            start,
+            a_end,
+            cue,
+            bridge_in_rate,
         )
         eq_score = (
-            0.20 + 0.20 * tempo + 0.12 * conf + 0.18 * key_fit +
-            0.12 * (1.0 - overlap_vocal_clash) + 0.09 * phrase_fit +
-            0.07 * energy_fit
+            0.20 + 0.20 * tempo + 0.12 * conf + 0.18 * key_fit
+            + 0.12 * (1.0 - overlap_vocal_clash)
+            + 0.09 * phrase_fit
+            + 0.07 * energy_fit
         )
         if protected:
             eq_score -= 0.16
+
         if overlap_vocal_clash < 0.62:
             candidates.append(_candidate_plan(
-            "EQ_SWAP", eq_score, "server-eq-swap",
-            transitionStart=round(start, 4), transitionEnd=round(a_end, 4),
-            incomingCueTime=round(cue, 4), incomingHandoffTime=round(cue, 4),
-            outgoingPlaybackRate=round(bridge_out_rate, 5), incomingPlaybackRate=round(bridge_in_rate, 5),
-            handoffFraction=0.56, bassSwap=True, bassSwapFraction=0.56,
+                "EQ_SWAP",
+                eq_score,
+                "server-eq-swap",
+                transitionStart=round(start, 4),
+                transitionEnd=round(a_end, 4),
+                incomingCueTime=round(cue, 4),
+                incomingHandoffTime=round(cue, 4),
+                outgoingPlaybackRate=round(bridge_out_rate, 5),
+                incomingPlaybackRate=round(bridge_in_rate, 5),
+                handoffFraction=0.56,
+                bassSwap=True,
+                bassSwapFraction=0.56,
                 filterSweep=0.0,
                 phraseAlignment=round(phrase_fit, 4),
                 overlapVocalClash=round(overlap_vocal_clash, 4),
