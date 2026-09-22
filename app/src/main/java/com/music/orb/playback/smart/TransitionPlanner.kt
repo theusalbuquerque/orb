@@ -178,6 +178,19 @@ data class TransitionPlan(
      */
     val outgoingBpm: Double = 0.0,
     val incomingBpm: Double = 0.0,
+
+    /** Remote planner diagnostics. They do not alter rendering on the device. */
+    val keyCompatibility: Double = 0.0,
+    val tempoCompatibility: Double = 0.0,
+    val phraseAlignment: Double = 0.0,
+    val pairCompatibility: Double = 0.0,
+    val energyCompatibility: Double = 0.0,
+    val overlapVocalClash: Double = 0.0,
+    val spanCompatibility: Double = 0.0,
+    val requestedTransitionBeats: Int = 0,
+    val outgoingAnchor: String = "",
+    val incomingAnchor: String = "",
+
     /** Why the policy landed where it did, when it declined to be more ambitious. */
     val policyReasons: List<String> = emptyList(),
 ) {
