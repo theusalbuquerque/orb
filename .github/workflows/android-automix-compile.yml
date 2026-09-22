@@ -41,8 +41,21 @@ jobs:
       - name: Make Gradle wrapper executable
         run: chmod +x gradlew
 
-      - name: Make Gradle wrapper executable
-        run: chmod +x gradlew
-
       - name: Compile Dev Kotlin
         run: ./gradlew :app:compileDevDebugKotlin --stacktrace
+
+      - name: Package updated Orb
+        run: |
+          zip -qr Orb-Automix-atualizado.zip . \
+            -x ".git/*" \
+            -x ".gradle/*" \
+            -x "**/build/*" \
+            -x "Orb-Automix-atualizado.zip"
+
+      - name: Upload updated Orb ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Orb-Automix-atualizado
+          path: Orb-Automix-atualizado.zip
+          if-no-files-found: error
+          retention-days: 7
