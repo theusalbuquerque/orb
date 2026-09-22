@@ -254,6 +254,7 @@ class CrossfadeController(
     private data class Render(
         val style: TransitionStyle = TransitionStyle.EQUAL_POWER,
         val bassSwap: Boolean = false,
+        val handoffFraction: Double = 0.66,
         val bassSwapFraction: Double = 0.7,
         val filterSweep: Double = 0.0,
         val vocalOverlap: Double = 0.0,
@@ -657,6 +658,7 @@ class CrossfadeController(
             renderStyle = Render(
                 style = plan.transitionStyle,
                 bassSwap = plan.bassSwap,
+                handoffFraction = plan.handoffFraction,
                 bassSwapFraction = plan.bassSwapFraction,
                 filterSweep = plan.filterSweep,
                 vocalOverlap = plan.vocalOverlap,
@@ -813,7 +815,8 @@ class CrossfadeController(
             "arm ${if (smart) "smart" else "standard"} fade=${fade}ms end=${endMs}ms " +
                 "cue=${incomingCueTimeMs}ms rates=$outgoingPlaybackRate/$incomingPlaybackRate " +
                 "at=${out.currentPosition}ms " +
-                "style=${render.style} bassSwap=${render.bassSwap}@${render.bassSwapFraction} " +
+                "style=${render.style} handoff=${render.handoffFraction} " +
+                "bassSwap=${render.bassSwap}@${render.bassSwapFraction} " +
                 "sweep=${render.filterSweep}",
         )
 
@@ -1426,13 +1429,20 @@ class CrossfadeController(
             return p * PI.toFloat() / 2f
         }
 
+        // The server chooses the musical authority handoff. The phone only applies
+        // style-specific safety bounds so a malformed plan cannot make the takeover
+        // happen at the very first or very last sample of the overlap.
+        val requestedHandoff = render.handoffFraction.toFloat()
         val handoff = when (render.style) {
             TransitionStyle.DJ_BLEND,
             TransitionStyle.EQ_SWAP ->
-                render.bassSwapFraction.toFloat().coerceIn(AUTOMIX_HANDOFF_MIN, AUTOMIX_HANDOFF_MAX)
-            TransitionStyle.DJ_FILTER -> AUTOMIX_FILTER_HANDOFF
-            TransitionStyle.PHRASE_CUT -> AUTOMIX_PHRASE_CUT_HANDOFF
-            TransitionStyle.CUT -> AUTOMIX_CUT_HANDOFF
+                requestedHandoff.coerceIn(0.50f, 0.80f)
+            TransitionStyle.DJ_FILTER ->
+                requestedHandoff.coerceIn(0.40f, 0.78f)
+            TransitionStyle.PHRASE_CUT ->
+                requestedHandoff.coerceIn(0.55f, 0.90f)
+            TransitionStyle.CUT ->
+                requestedHandoff.coerceIn(0.75f, 0.94f)
             else -> 0.5f
         }
         val entryAngle = when (render.style) {
