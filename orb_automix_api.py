@@ -21,6 +21,8 @@ import numpy as np
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from billing_api import premium_entitled_for_account_hash
+
 router = APIRouter(prefix="/api/automix", tags=["automix"])
 
 API_VERSION = 5
@@ -1805,7 +1807,12 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
 async def plan(request: PlanRequest) -> dict[str, Any]:
     if request.version > API_VERSION:
         raise HTTPException(status_code=409, detail="unsupported Automix protocol version")
-    if not request.preview or request.accountHash.strip().lower() not in AUTOMIX25_BETA_HASHES:
+    account_hash = request.accountHash.strip().lower()
+    entitled = (
+        account_hash in AUTOMIX25_BETA_HASHES
+        or premium_entitled_for_account_hash(account_hash)
+    )
+    if not request.preview or not entitled:
         raise HTTPException(status_code=403, detail="Automix 2.5 entitlement required")
     outgoing = _plan_track(request.outgoing)
     incoming = _plan_track(request.incoming)
