@@ -370,7 +370,7 @@ class CrossfadeController(
                 delay(
                     when (phase) {
                         Phase.IDLE -> IDLE_STEP_MS
-                        Phase.ARMING -> ARM_STEP_MS
+                        Phase.ARMING -> armingStepMs()
                         Phase.FADING -> FADE_STEP_MS
                         Phase.BAILING -> BAIL_STEP_MS
                     },
@@ -408,6 +408,29 @@ class CrossfadeController(
     }
 
     // ---- Ticker -------------------------------------------------------------
+
+    /**
+     * Keep the controller cheap while B is merely buffering, then tighten the
+     * clock as the planned musical entry approaches. A fixed 40 ms arming step
+     * can make a perfectly analysed downbeat sound flammed by almost a tenth of
+     * a 16th note at dance tempi; the final half-second gets an 8 ms cadence.
+     *
+     * Manual crossfade keeps the old cadence because it has no beat-phase
+     * promise to honour.
+     */
+    private fun armingStepMs(): Long {
+        if (!smartFadeActive) return ARM_STEP_MS
+        val out = outgoing ?: return ARM_STEP_MS
+        if (fadeEndMs <= 0L || fadeMs <= 0L) return ARM_STEP_MS
+
+        val transitionStartMs = (fadeEndMs - fadeMs).coerceAtLeast(0L)
+        val remainingMs = (transitionStartMs - out.currentPosition).coerceAtLeast(0L)
+        return when {
+            remainingMs <= ARM_TIGHT_WINDOW_MS -> ARM_TIGHT_STEP_MS
+            remainingMs <= ARM_NEAR_WINDOW_MS -> ARM_NEAR_STEP_MS
+            else -> ARM_STEP_MS
+        }
+    }
 
     private fun tick() {
         // A pause has to take the other player with it, or one half of the blend
@@ -1842,12 +1865,18 @@ class CrossfadeController(
         const val IDLE_STEP_MS = 250L
 
         /**
-         * Arming only waits on a buffer now — nothing is being converged — so
-         * this is about how promptly the fade can start once the incoming track
-         * is ready, not about a control loop's step size.
+         * Most of ARMING stays cheap. Only a Smart transition approaches audio
+         * rate as its downbeat gets close, which bounds start-phase error
+         * without polling at 8 ms for the whole buffering window.
          */
         const val ARM_STEP_MS = 40L
-        const val FADE_STEP_MS = 30L
+        const val ARM_NEAR_WINDOW_MS = 3_000L
+        const val ARM_NEAR_STEP_MS = 16L
+        const val ARM_TIGHT_WINDOW_MS = 500L
+        const val ARM_TIGHT_STEP_MS = 8L
+
+        /** ~60 Hz choreography for gain, filter and post-handoff tempo release. */
+        const val FADE_STEP_MS = 16L
         const val BAIL_STEP_MS = 15L
     }
 }
