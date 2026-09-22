@@ -580,7 +580,15 @@ class CrossfadeController(
         // log says what the planner decided for this pair without burying it.
         val verdict = "$planSource|${plan.reason}|${plan.transitionStyle}|fade=${plan.fadeMs}" +
             "|cue=${plan.incomingCueTime}|rates=${plan.outgoingPlaybackRate}/${plan.incomingPlaybackRate}" +
-            "|vocalOverlap=${"%.2f".format(plan.vocalOverlap)}" +
+            "|handoff=${"%.2f".format(plan.handoffFraction)}" +
+            "|beats=${plan.transitionBeats}/${plan.requestedTransitionBeats}" +
+            "|pair=${"%.2f".format(plan.pairCompatibility)}" +
+            "|phrase=${"%.2f".format(plan.phraseAlignment)}" +
+            "|tempo=${"%.2f".format(plan.tempoCompatibility)}" +
+            "|key=${"%.2f".format(plan.keyCompatibility)}" +
+            "|energy=${"%.2f".format(plan.energyCompatibility)}" +
+            "|vocalClash=${"%.2f".format(plan.overlapVocalClash)}" +
+            "|anchors=${plan.outgoingAnchor}->${plan.incomingAnchor}" +
             "|blocked=${plan.blocked}|policy=${plan.policyReasons.joinToString(",")}"
         if (verdict != lastPlanVerdict) {
             lastPlanVerdict = verdict
