@@ -680,31 +680,6 @@ def _tempo_pair(a: dict[str, Any], b: dict[str, Any]) -> tuple[float, float, flo
     return a_bpm, aligned, compatibility
 
 
-def _gain_envelope(style: str, handoff_fraction: float, protected: bool) -> list[dict[str, float]]:
-    h = _clamp(handoff_fraction, 0.10, 0.97)
-    if style in {"INTRO_BED", "INTRO_BRIDGE_FILTER"}:
-        bed = 0.10 if protected else 0.14
-        return [
-            {"progress": 0.0, "incomingGain": 0.0, "outgoingGain": 1.0},
-            {"progress": min(0.10, h * 0.22), "incomingGain": bed * 0.55, "outgoingGain": 1.0},
-            {"progress": max(0.12, h * 0.55), "incomingGain": bed, "outgoingGain": 1.0},
-            {"progress": max(0.15, h - 0.08), "incomingGain": min(0.22, bed + 0.05), "outgoingGain": 1.0},
-            {"progress": h, "incomingGain": 0.34, "outgoingGain": 0.92},
-            {"progress": min(0.985, h + (1.0 - h) * 0.55), "incomingGain": 0.76, "outgoingGain": 0.46},
-            {"progress": 1.0, "incomingGain": 1.0, "outgoingGain": 0.0},
-        ]
-    if style == "FOREGROUND_TAKEOVER":
-        return [
-            {"progress": 0.0, "incomingGain": 0.0, "outgoingGain": 1.0},
-            {"progress": 0.12, "incomingGain": 0.48, "outgoingGain": 1.0},
-            {"progress": 0.24, "incomingGain": 0.84, "outgoingGain": 0.92},
-            {"progress": 0.38, "incomingGain": 1.0, "outgoingGain": 0.74},
-            {"progress": 0.70, "incomingGain": 1.0, "outgoingGain": 0.32},
-            {"progress": 1.0, "incomingGain": 1.0, "outgoingGain": 0.0},
-        ]
-    return []
-
-
 def _candidate_plan(style: str, score: float, reason: str, **kwargs: Any) -> dict[str, Any]:
     plan: dict[str, Any] = {
         "style": style,
@@ -718,31 +693,17 @@ def _candidate_plan(style: str, score: float, reason: str, **kwargs: Any) -> dic
 def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     a_release, a_end, protected = _release_landmarks(a)
     b_audible_start = _audible_start(b)
-    b_bed_start = _bed_cue_start(b)
     b_start = b_audible_start
     b_end = _content_end(b)
     b_impact = _impact_time(b)
-    b_first_vocal = _first_sustained_vocal(b)
-    # The safe underlay runway ends at B's first *major arrangement impact*, not automatically at
-    # its first sustained vocal. An instrumental intro can open up before the lyric arrives. The
-    # concrete regression is HEATED -> DANCE: impact is around 0:56 while first vocal is later.
-    # v3 wrongly used first vocal whenever present, stretching the bed back to ~3:12 of HEATED.
-    handoff_candidates = [
-        value for value in (b_impact, b_first_vocal)
-        if value is not None and value >= b_bed_start + 6.0
-    ]
-    b_underlay_handoff = min(handoff_candidates) if handoff_candidates else max(b_bed_start, b_impact)
-    # Underlay runway is measured from the safe musical head, not from a thresholded audible
-    # detector. Other strategies keep using b_start/audible-start so they do not lead with silence.
-    b_runway = max(0.0, b_underlay_handoff - b_bed_start)
     b_vocal = _vocal_curve(b)
     b_energy = _curve(b, "energyCurve")
     a_vocal_curve = _vocal_curve(a)
     a_energy = _curve(a, "energyCurve")
 
-    b_open_end = min(b_end if b_end > 0 else b_bed_start + 8.0, b_bed_start + 8.0)
-    b_open_vocal = _mean_window(b_vocal, b_bed_start, b_open_end, _finite(b.get("vocalProbability"), 0.5))
-    b_open_activity = _mean_window(b_energy, b_bed_start, b_open_end, 0.0)
+    b_open_end = min(b_end if b_end > 0 else b_start + 8.0, b_start + 8.0)
+    b_open_vocal = _mean_window(b_vocal, b_start, b_open_end, _finite(b.get("vocalProbability"), 0.5))
+    b_open_activity = _mean_window(b_energy, b_start, b_open_end, 0.0)
     a_tail_start = max(0.0, a_end - 10.0)
     a_tail_vocal = _mean_window(a_vocal_curve, a_tail_start, a_end, _finite(a.get("vocalProbability"), 0.5))
     a_tail_activity = _mean_window(a_energy, a_tail_start, a_end, 0.5)
@@ -751,69 +712,8 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     vocal_clash = min(a_tail_vocal, b_open_vocal)
     candidates: list[dict[str, Any]] = []
 
-    # 1) Long/medium intro underlay. Preserve B's arrangement and align its structural impact to
-    # A's release/end rather than shortening A to satisfy B.
-    bed_safe = b_runway >= 6.0 and b_open_vocal <= 0.46
-    if bed_safe and a_end > 0.0:
-        desired_wall = b_runway
-        available = max(0.1, a_end)
-        rate = 1.0
-        if desired_wall > available:
-            rate = _clamp(desired_wall / available, 1.0, 1.07)
-        wall = desired_wall / rate if rate > 0 else desired_wall
-        start = max(0.0, a_end - wall)
-        if start <= a_end - 0.35:
-            release_fraction = _clamp((a_release - start) / max(0.1, a_end - start), 0.55, 0.985)
-            long_intro = _clamp((b_runway - 6.0) / 42.0, 0.0, 1.0)
-            score = (
-                0.46 + 0.22 * long_intro + 0.13 * (1.0 - b_open_vocal) +
-                0.08 * a_tail_activity + 0.06 * tempo + (0.06 if protected else 0.0)
-            )
-            # Filter only when the *overlap itself* is dense on both sides. A loud/important A
-            # paired with a genuinely light B bed should keep A spectrally intact.
-            style = "INTRO_BRIDGE_FILTER" if (a_tail_activity >= 0.78 and b_open_activity >= 0.62) else "INTRO_BED"
-            candidates.append(_candidate_plan(
-                style, score, "server-intro-underlay",
-                transitionStart=round(start, 4), transitionEnd=round(a_end, 4),
-                incomingCueTime=round(b_bed_start, 4), incomingHandoffTime=round(b_underlay_handoff, 4),
-                outgoingPlaybackRate=1.0, incomingPlaybackRate=round(rate, 5),
-                handoffFraction=round(release_fraction, 5),
-                bassSwap=bool(_low_curve(a) and _low_curve(b)),
-                bassSwapFraction=round(_clamp(release_fraction + 0.04, 0.58, 0.94), 5),
-                filterSweep=0.58 if style == "INTRO_BRIDGE_FILTER" else 0.0,
-                gainEnvelope=_gain_envelope(style, release_fraction, protected),
-            ))
-
-    # 2) Foreground takeover. B can arrive decisively while A remains as a tail if A has already
-    # opened enough room. Strongly penalized when A is still protected to the end.
-    outgoing_release = _clamp(1.0 - (0.62 * a_tail_activity + 0.38 * a_tail_vocal), 0.0, 1.0)
-    incoming_assert = _clamp(0.68 * b_open_activity + 0.32 * b_open_vocal, 0.0, 1.0)
-    short_intro = _clamp(1.0 - b_runway / 18.0, 0.0, 1.0)
-    takeover_score = 0.32 + 0.24 * outgoing_release + 0.22 * incoming_assert + 0.15 * short_intro + 0.05 * tempo
-    # When B arrives assertively and A has genuinely opened a lane, letting B take authority while
-    # A becomes the tail is often more natural than a symmetric blend (the second reference-video
-    # behaviour). This bonus is conditional, not a global preference.
-    if outgoing_release >= 0.60 and incoming_assert >= 0.65 and short_intro >= 0.55:
-        takeover_score += 0.15
-    if protected:
-        takeover_score -= 0.38
-    if a_end > 0.0 and takeover_score >= 0.42:
-        span = _clamp((12.0 - 5.0 * outgoing_release), 6.0, 18.0)
-        start = max(0.0, a_end - span)
-        handoff_fraction = _clamp(0.20 + 0.16 * (1.0 - outgoing_release), 0.18, 0.42)
-        candidates.append(_candidate_plan(
-            "FOREGROUND_TAKEOVER", takeover_score, "server-foreground-takeover",
-            transitionStart=round(start, 4), transitionEnd=round(a_end, 4),
-            incomingCueTime=round(b_start, 4), incomingHandoffTime=round(max(b_start, _finite(b.get("mixInTime"), b_start)), 4),
-            outgoingPlaybackRate=1.0, incomingPlaybackRate=1.0,
-            handoffFraction=round(handoff_fraction, 5),
-            bassSwap=bool(_low_curve(a) and _low_curve(b)), bassSwapFraction=0.46,
-            filterSweep=0.0,
-            gainEnvelope=_gain_envelope("FOREGROUND_TAKEOVER", handoff_fraction, protected),
-        ))
-
-    # 3) Conventional DJ mix. It competes with the special plans rather than being a mandatory
-    # fallback. A good shared grid with limited vocal collision should beat an unnecessary overlay.
+    # 1) Conventional DJ mix. It competes with the remaining plans rather than being a mandatory
+    # fallback. A good shared grid with limited vocal collision should earn the overlap.
     if a_end > 0.0 and 40.0 <= a_bpm <= 220.0 and 40.0 <= b_bpm <= 220.0:
         beat = 60.0 / a_bpm
         span = _clamp((16.0 if tempo >= 0.78 else 8.0) * beat, 4.0, 18.0)
@@ -837,7 +737,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
             gainEnvelope=[],
         ))
 
-    # 4) EQ swap is a separate candidate, not a synonym for blend. It earns a place only when
+    # 2) EQ swap is a separate candidate, not a synonym for blend. It earns a place only when
     # both low-band curves exist and the shared grid is trustworthy enough to exchange the bass.
     if a_end > 0.0 and tempo >= 0.68 and conf >= 0.38 and _low_curve(a) and _low_curve(b):
         beat = 60.0 / a_bpm if a_bpm > 0 else 0.5
@@ -856,7 +756,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
             filterSweep=0.0, gainEnvelope=[],
         ))
 
-    # 5) Phrase cut: useful for a strong, immediate B entrance when a long overlap would create a
+    # 3) Phrase cut: useful for a strong, immediate B entrance when a long overlap would create a
     # vocal/tempo collision. A valuable long B intro is a strong negative so this cannot become
     # the old "jump to the chorus" behaviour again.
     strong_entry = max(b_start, _finite(b.get("mixInTime"), b_impact))
@@ -876,12 +776,10 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                 filterSweep=0.0, gainEnvelope=[],
             ))
 
-    # 6) Preserve a protected A when B cannot sit underneath it. This is not a failure: a DJ-like
+    # 4) Preserve a protected A when overlap is not a good fit. This is not a failure: a DJ-like
     # clean downbeat handoff is preferable to chewing off the final chorus.
     if a_end > 0.0:
         cut_score = 0.28 + (0.38 if protected else 0.10) + 0.16 * b_open_vocal + 0.08 * b_open_activity
-        if bed_safe:
-            cut_score -= 0.16
         span = _clamp(60.0 / a_bpm if a_bpm > 0 else 0.55, 0.35, 0.90)
         candidates.append(_candidate_plan(
             "CUT", cut_score, "server-protected-handoff" if protected else "server-clean-handoff",
@@ -892,7 +790,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
             filterSweep=0.0, gainEnvelope=[],
         ))
 
-    # 7) Plain equal-power remains in the competition at low confidence. It is deliberately a low
+    # 5) Plain equal-power remains in the competition at low confidence. It is deliberately a low
     # score when richer evidence exists, but it wins cleanly on weak grids/missing structure.
     if a_end > 0.0:
         weak_evidence = 1.0 - _clamp(0.55 * conf + 0.45 * tempo, 0.0, 1.0)
@@ -928,7 +826,6 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     best["outgoingReleaseTime"] = round(a_release, 4)
     best["incomingImpactTime"] = round(b_impact, 4)
     best["incomingAudibleStartTime"] = round(b_audible_start, 4)
-    best["incomingBedCueTime"] = round(b_bed_start, 4)
     best["planner"] = "orb-server-authoritative-v5"
     best["serverAuthoritative"] = True
     return best, candidates[:5]
