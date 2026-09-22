@@ -1493,7 +1493,13 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     # safe audible point, stays subordinate, and its first major structural arrival is aimed at
     # A's measured foreground release. The same prepared B deck then keeps running through the
     # handoff; there is no restart at release.
-    runway = max(0.0, b_impact - b_start)
+    runway_markers = [b_impact]
+    for raw_marker in (b.get("mixInTime"), b.get("introEndTime")):
+        marker = _finite(raw_marker, -1.0)
+        if b_start + 8.0 <= marker <= min(b_end, b_start + 72.0):
+            runway_markers.append(marker)
+    runway_impact = max(runway_markers)
+    runway = max(0.0, runway_impact - b_start)
     if 8.0 <= runway <= 72.0 and a_release > 0.0 and a_end > a_release:
         desired_start = a_release - runway
         if desired_start >= 0.0 and desired_start < a_release - 3.0:
@@ -1514,14 +1520,14 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
 
             pre_impact_energy = _mean_window(
                 b_energy,
-                max(b_start, b_impact - 6.0),
-                b_impact,
+                max(b_start, runway_impact - 6.0),
+                runway_impact,
                 0.0,
             )
             post_impact_energy = _mean_window(
                 b_energy,
-                b_impact,
-                min(b_end, b_impact + 4.0),
+                runway_impact,
+                min(b_end, runway_impact + 4.0),
                 pre_impact_energy,
             )
             impact_rise = _clamp(
@@ -1562,7 +1568,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                     transitionStart=round(desired_start, 4),
                     transitionEnd=round(a_end, 4),
                     incomingCueTime=round(b_start, 4),
-                    incomingHandoffTime=round(b_impact, 4),
+                    incomingHandoffTime=round(runway_impact, 4),
                     outgoingPlaybackRate=1.0,
                     incomingPlaybackRate=1.0,
                     transitionBeats=0,
@@ -1917,8 +1923,37 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     release_tail = max(0.0, a_end - a_release)
     immediate_entry = max(b_start, min(b_impact, _finite(b.get("mixInTime"), b_impact)))
     entry_delay = max(0.0, immediate_entry - b_start)
+    release_energy_before = _mean_window(
+        _curve(a, "energyCurve"),
+        max(0.0, a_release - 6.0),
+        a_release,
+        0.5,
+    )
+    release_energy_after = _mean_window(
+        _curve(a, "energyCurve"),
+        a_release,
+        min(a_end, a_release + 4.0),
+        release_energy_before,
+    )
+    release_vocal_before = _mean_window(
+        a_vocal_curve,
+        max(0.0, a_release - 6.0),
+        a_release,
+        _finite(a.get("vocalProbability"), 0.5),
+    )
+    release_vocal_after = _mean_window(
+        a_vocal_curve,
+        a_release,
+        min(a_end, a_release + 4.0),
+        release_vocal_before,
+    )
+    real_release_drop = (
+        release_energy_before - release_energy_after >= 0.12
+        or release_vocal_before - release_vocal_after >= 0.15
+    )
     if (
-        5.0 <= release_tail <= 24.0
+        real_release_drop
+        and 5.0 <= release_tail <= 24.0
         and entry_delay <= 4.5
         and a_end > 0.0
         and b_end > b_start + 2.0
