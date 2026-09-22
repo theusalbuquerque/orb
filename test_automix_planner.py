@@ -300,9 +300,12 @@ class AutomixPlannerTest(unittest.TestCase):
         b["mixInCandidates"] = [{"time": 20.0, "score": 0.95, "type": "phrase"}]
         b["vocalProbability"] = 0.12
 
+        release, end, _ = automix._release_landmarks(a)
+        self.assertAlmostEqual(release, 107.0, delta=2.0)
+
         best, candidates = automix._remote_plan(a, b)
 
-        self.assertEqual(best["style"], "RUNWAY_BLEND")
+        self.assertEqual(best["style"], "RUNWAY_BLEND", best)
         self.assertAlmostEqual(float(best["incomingCueTime"]), 0.0, delta=0.2)
         self.assertAlmostEqual(float(best["incomingHandoffTime"]), 20.0, delta=2.5)
         self.assertLess(float(best["transitionStart"]), 95.0)
@@ -330,9 +333,12 @@ class AutomixPlannerTest(unittest.TestCase):
             b["lowEnergyCurve"][index]["energy"] = 0.60
             b["vocalActivityMask"][index] = 0.45
 
+        release, end, _ = automix._release_landmarks(a)
+        self.assertAlmostEqual(release, 108.0, delta=2.0)
+
         best, candidates = automix._remote_plan(a, b)
 
-        self.assertEqual(best["style"], "PHRASE_TAKEOVER")
+        self.assertEqual(best["style"], "PHRASE_TAKEOVER", best)
         self.assertLess(float(best["transitionEnd"]), 120.0)
         self.assertLessEqual(float(best["incomingCueTime"]), 2.0)
         self.assertTrue(any(c["style"] == "PHRASE_TAKEOVER" for c in candidates))
