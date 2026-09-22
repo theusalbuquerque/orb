@@ -1683,6 +1683,43 @@ def _timing_candidates(
     return unique[:limit]
 
 
+def _beat_phase_metrics(
+    a: dict[str, Any],
+    b: dict[str, Any],
+    a_time: float,
+    b_time: float,
+    a_bpm: float,
+    b_bpm: float,
+    a_rate: float,
+    b_rate: float,
+) -> tuple[float, float]:
+    """Return beat-phase compatibility and absolute wall-clock phase error in ms."""
+    def grid(track: dict[str, Any]) -> list[float]:
+        raw = track.get("beats")
+        if isinstance(raw, list) and raw:
+            return [max(0.0, _finite(value)) for value in raw]
+        raw = track.get("downbeats")
+        return [max(0.0, _finite(value)) for value in raw] if isinstance(raw, list) else []
+
+    left = grid(a)
+    right = grid(b)
+    if not left or not right or a_bpm <= 0.0 or b_bpm <= 0.0:
+        return 0.5, 0.0
+
+    a_anchor = min(left, key=lambda value: abs(value - a_time))
+    b_anchor = min(right, key=lambda value: abs(value - b_time))
+    a_error = (a_time - a_anchor) / max(a_rate, 1e-6)
+    b_error = (b_time - b_anchor) / max(b_rate, 1e-6)
+    error_seconds = abs(a_error - b_error)
+    beat_seconds = min(
+        60.0 / max(a_bpm * a_rate, 1e-6),
+        60.0 / max(b_bpm * b_rate, 1e-6),
+    )
+    tolerance = max(0.025, 0.22 * beat_seconds)
+    fit = _clamp(1.0 - error_seconds / tolerance, 0.0, 1.0)
+    return fit, error_seconds * 1000.0
+
+
 def _best_structural_pair(
     a: dict[str, Any],
     b: dict[str, Any],
