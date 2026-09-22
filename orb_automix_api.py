@@ -680,6 +680,66 @@ def _tempo_pair(a: dict[str, Any], b: dict[str, Any]) -> tuple[float, float, flo
     return a_bpm, aligned, compatibility
 
 
+_KEY_INDEX = {
+    "C": 0, "C#": 1, "DB": 1, "D": 2, "D#": 3, "EB": 3,
+    "E": 4, "F": 5, "F#": 6, "GB": 6, "G": 7, "G#": 8,
+    "AB": 8, "A": 9, "A#": 10, "BB": 10, "B": 11,
+}
+
+
+def _trusted_key(track: dict[str, Any]) -> tuple[int, str] | None:
+    if _clamp(_finite(track.get("keyConfidence")), 0.0, 1.0) < 0.25:
+        return None
+    raw = str(track.get("key") or "").strip().replace("♯", "#").replace("♭", "b")
+    if not raw:
+        return None
+    parts = raw.split()
+    tonic = parts[0].upper()
+    index = _KEY_INDEX.get(tonic)
+    if index is None:
+        return None
+    mode = parts[1].lower() if len(parts) > 1 else ""
+    return index, mode
+
+
+def _key_compatibility(a: dict[str, Any], b: dict[str, Any]) -> float:
+    """0..1 harmonic compatibility; unknown keys are deliberately neutral."""
+    left = _trusted_key(a)
+    right = _trusted_key(b)
+    if left is None or right is None:
+        return 0.55
+    li, lm = left
+    ri, rm = right
+    distance = min((li - ri) % 12, (ri - li) % 12)
+    if lm and rm and lm != rm:
+        if distance <= 1:
+            return 0.78
+        if distance == 3:
+            return 0.72
+        return 0.18
+    if distance == 0:
+        return 1.0
+    if distance <= 2:
+        return 0.86
+    if distance == 5:
+        return 0.82
+    return 0.20
+
+
+def _tempo_bridge_rates(a_bpm: float, b_bpm: float) -> tuple[float, float]:
+    """Meet halfway in tempo so neither deck carries the whole correction."""
+    if not (40.0 <= a_bpm <= 220.0 and 40.0 <= b_bpm <= 220.0):
+        return 1.0, 1.0
+    distance = abs(b_bpm / a_bpm - 1.0)
+    if distance > 0.08:
+        return 1.0, 1.0
+    meeting = math.sqrt(a_bpm * b_bpm)
+    return (
+        _clamp(meeting / a_bpm, 0.96, 1.04),
+        _clamp(meeting / b_bpm, 0.96, 1.04),
+    )
+
+
 def _candidate_plan(style: str, score: float, reason: str, **kwargs: Any) -> dict[str, Any]:
     plan: dict[str, Any] = {
         "style": style,
@@ -709,50 +769,62 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     a_tail_activity = _mean_window(a_energy, a_tail_start, a_end, 0.5)
     a_bpm, b_bpm, tempo = _tempo_pair(a, b)
     conf = min(_clamp(_finite(a.get("beatConfidence")), 0.0, 1.0), _clamp(_finite(b.get("beatConfidence")), 0.0, 1.0))
+    key_fit = _key_compatibility(a, b)
+    bridge_out_rate, bridge_in_rate = _tempo_bridge_rates(a_bpm, b_bpm)
     vocal_clash = min(a_tail_vocal, b_open_vocal)
     candidates: list[dict[str, Any]] = []
 
-    # 1) Conventional DJ mix. It competes with the remaining plans rather than being a mandatory
-    # fallback. A good shared grid with limited vocal collision should earn the overlap.
+    # 1) Beat/key bridge. Bars, tempo and harmonic fit decide whether the pair can stay open.
+    # Volume is rendering detail; it is not the reason this transition exists.
     if a_end > 0.0 and 40.0 <= a_bpm <= 220.0 and 40.0 <= b_bpm <= 220.0:
+        harmonic_open = key_fit >= 0.58
+        style = (
+            "DJ_BLEND"
+            if tempo >= 0.62 and conf >= 0.35 and harmonic_open and vocal_clash < 0.58
+            else "DJ_FILTER"
+        )
         beat = 60.0 / a_bpm
-        span = _clamp((16.0 if tempo >= 0.78 else 8.0) * beat, 4.0, 18.0)
-        # Preserve A's remaining arrangement: a release point authorizes the overlap to begin, it
-        # does not authorize throwing away everything after it. The deck reaches zero at content end.
+        beats = 16.0 if style == "DJ_BLEND" and key_fit >= 0.72 else 8.0
+        span = _clamp(beats * beat, 4.0, 12.0)
         start = max(0.0, max(a_release, a_end - span))
-        style = "DJ_BLEND" if tempo >= 0.70 and conf >= 0.35 and vocal_clash < 0.58 else "DJ_FILTER"
-        score = 0.34 + 0.27 * tempo + 0.13 * conf + 0.15 * (1.0 - vocal_clash)
-        if protected and style != "DJ_FILTER":
-            score -= 0.18
-        rate = 1.0
-        if style == "DJ_BLEND" and b_bpm > 0:
-            rate = _clamp(a_bpm / b_bpm, 0.90, 1.10)
+        score = (
+            0.24 + 0.24 * tempo + 0.15 * conf + 0.20 * key_fit +
+            0.12 * (1.0 - vocal_clash)
+        )
+        if protected and style == "DJ_BLEND":
+            score -= 0.16
         candidates.append(_candidate_plan(
-            style, score, "server-grid-mix",
+            style, score, "server-beat-key-bridge" if style == "DJ_BLEND" else "server-filtered-bridge",
             transitionStart=round(start, 4), transitionEnd=round(a_end, 4),
-            incomingCueTime=round(b_start, 4), incomingHandoffTime=round(max(b_start, _finite(b.get("mixInTime"), b_start)), 4),
-            outgoingPlaybackRate=1.0, incomingPlaybackRate=round(rate, 5),
-            handoffFraction=0.50, bassSwap=bool(_low_curve(a) and _low_curve(b)), bassSwapFraction=0.70,
+            incomingCueTime=round(max(b_start, _finite(b.get("mixInTime"), b_start)), 4),
+            incomingHandoffTime=round(max(b_start, _finite(b.get("mixInTime"), b_start)), 4),
+            outgoingPlaybackRate=round(bridge_out_rate, 5),
+            incomingPlaybackRate=round(bridge_in_rate, 5),
+            transitionBeats=int(beats),
+            handoffFraction=0.66 if style == "DJ_BLEND" else 0.52,
+            bassSwap=bool(_low_curve(a) and _low_curve(b)),
+            bassSwapFraction=0.66,
             filterSweep=0.0 if style == "DJ_BLEND" else 0.72,
+            keyCompatibility=round(key_fit, 4),
+            tempoCompatibility=round(tempo, 4),
             gainEnvelope=[],
         ))
 
     # 2) EQ swap is a separate candidate, not a synonym for blend. It earns a place only when
     # both low-band curves exist and the shared grid is trustworthy enough to exchange the bass.
-    if a_end > 0.0 and tempo >= 0.68 and conf >= 0.38 and _low_curve(a) and _low_curve(b):
+    if a_end > 0.0 and tempo >= 0.68 and conf >= 0.38 and key_fit >= 0.58 and _low_curve(a) and _low_curve(b):
         beat = 60.0 / a_bpm if a_bpm > 0 else 0.5
         span = _clamp(16.0 * beat, 5.0, 14.0)
         start = max(0.0, max(a_release, a_end - span))
-        eq_score = 0.35 + 0.24 * tempo + 0.14 * conf + 0.13 * (1.0 - vocal_clash)
+        eq_score = 0.27 + 0.22 * tempo + 0.14 * conf + 0.18 * key_fit + 0.12 * (1.0 - vocal_clash)
         if protected:
             eq_score -= 0.16
-        rate = _clamp(a_bpm / b_bpm, 0.90, 1.10) if b_bpm > 0 else 1.0
         candidates.append(_candidate_plan(
             "EQ_SWAP", eq_score, "server-eq-swap",
             transitionStart=round(start, 4), transitionEnd=round(a_end, 4),
             incomingCueTime=round(b_start, 4), incomingHandoffTime=round(max(b_start, _finite(b.get("mixInTime"), b_start)), 4),
-            outgoingPlaybackRate=1.0, incomingPlaybackRate=round(rate, 5),
-            handoffFraction=0.50, bassSwap=True, bassSwapFraction=0.56,
+            outgoingPlaybackRate=round(bridge_out_rate, 5), incomingPlaybackRate=round(bridge_in_rate, 5),
+            handoffFraction=0.56, bassSwap=True, bassSwapFraction=0.56,
             filterSweep=0.0, gainEnvelope=[],
         ))
 
@@ -790,25 +862,28 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
             filterSweep=0.0, gainEnvelope=[],
         ))
 
-    # 5) Plain equal-power remains in the competition at low confidence. It is deliberately a low
-    # score when richer evidence exists, but it wins cleanly on weak grids/missing structure.
+    # 5) Doing nothing is a first-class Automix decision. Weak beat evidence, harmonic
+    # conflict or a vocal collision can make natural playback better than an artificial blend.
     if a_end > 0.0:
         weak_evidence = 1.0 - _clamp(0.55 * conf + 0.45 * tempo, 0.0, 1.0)
-        eqp_score = 0.22 + 0.28 * weak_evidence + 0.10 * (1.0 - vocal_clash)
-        span = _clamp(6.0, 3.0, 8.0)
+        no_mix_score = 0.30 + 0.25 * weak_evidence + 0.18 * (1.0 - key_fit) + 0.12 * vocal_clash
         candidates.append(_candidate_plan(
-            "EQUAL_POWER", eqp_score, "server-plain-fallback",
-            transitionStart=round(max(0.0, a_end - span), 4), transitionEnd=round(a_end, 4),
+            "NO_TRANSITION", no_mix_score, "server-no-transition",
+            transitionStart=round(a_end, 4), transitionEnd=round(a_end, 4),
             incomingCueTime=round(b_start, 4), incomingHandoffTime=round(b_start, 4),
             outgoingPlaybackRate=1.0, incomingPlaybackRate=1.0,
-            handoffFraction=0.50, bassSwap=False, bassSwapFraction=0.70,
-            filterSweep=0.0, gainEnvelope=[],
+            transitionBeats=0,
+            handoffFraction=1.0, bassSwap=False, bassSwapFraction=0.70,
+            filterSweep=0.0,
+            keyCompatibility=round(key_fit, 4),
+            tempoCompatibility=round(tempo, 4),
+            gainEnvelope=[],
         ))
 
     if not candidates:
         return _candidate_plan(
-            "EQUAL_POWER", 0.35, "server-minimal-fallback",
-            transitionStart=max(0.0, a_end - 6.0), transitionEnd=a_end,
+            "NO_TRANSITION", 0.50, "server-minimal-no-transition",
+            transitionStart=a_end, transitionEnd=a_end,
             incomingCueTime=b_start, incomingHandoffTime=b_start,
             outgoingPlaybackRate=1.0, incomingPlaybackRate=1.0,
             handoffFraction=0.50, bassSwap=False, bassSwapFraction=0.70,
@@ -826,6 +901,8 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     best["outgoingReleaseTime"] = round(a_release, 4)
     best["incomingImpactTime"] = round(b_impact, 4)
     best["incomingAudibleStartTime"] = round(b_audible_start, 4)
+    best["keyCompatibility"] = round(key_fit, 4)
+    best["tempoCompatibility"] = round(tempo, 4)
     best["planner"] = "orb-server-authoritative-v5"
     best["serverAuthoritative"] = True
     return best, candidates[:5]
@@ -846,7 +923,7 @@ async def plan(request: PlanRequest) -> dict[str, Any]:
     return {
         "version": API_VERSION,
         "authority": "server",
-        "style": plan_result.get("style", "EQUAL_POWER"),
+        "style": plan_result.get("style", "NO_TRANSITION"),
         "reason": plan_result.get("reason", "server-plan"),
         "plan": plan_result,
         "candidates": [
