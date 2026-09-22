@@ -1990,8 +1990,25 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
             runway_markers.append(marker)
     runway_impact = max(runway_markers)
     runway = max(0.0, runway_impact - b_start)
+
+    runway_a_bpm, runway_a_conf = _tempo_near(a, a_release, a_bpm)
+    runway_b_bpm, runway_b_conf = _tempo_near(b, runway_impact, b_bpm)
+    if runway_a_bpm > 0.0 and runway_b_bpm > 0.0:
+        while runway_b_bpm / runway_a_bpm > 1.5:
+            runway_b_bpm /= 2.0
+        while runway_b_bpm / runway_a_bpm < 0.67:
+            runway_b_bpm *= 2.0
+    runway_tempo_fit = (
+        _clamp(1.0 - abs(runway_b_bpm / runway_a_bpm - 1.0) / 0.14, 0.0, 1.0)
+        if runway_a_bpm > 0.0 and runway_b_bpm > 0.0
+        else 0.0
+    )
+    runway_out_rate, runway_in_rate = _tempo_bridge_rates(runway_a_bpm, runway_b_bpm)
+
     if 8.0 <= runway <= 72.0 and a_release > 0.0 and a_end > a_release:
-        desired_start = a_release - runway
+        # Align B's structural impact to A's measured release in wall time. When both
+        # decks are time-stretched toward a meeting tempo, media seconds are not wall seconds.
+        desired_start = a_release - runway * runway_out_rate / max(runway_in_rate, 1e-6)
         if desired_start >= 0.0 and desired_start < a_release - 3.0:
             intro_vocal = _mean_window(
                 b_vocal,
@@ -2026,6 +2043,31 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                 1.0,
             )
             span = a_end - desired_start
+            runway_curve = _transition_curve_metrics(
+                a,
+                b,
+                desired_start,
+                a_end,
+                b_start,
+                runway_out_rate,
+                runway_in_rate,
+            )
+            runway_curve_fit = float(runway_curve.get("compatibility", 0.5))
+            runway_curve_evidence = bool(runway_curve.get("evidence", False))
+            runway_harmonic_fit = float(runway_curve.get("harmonicFit", 0.5))
+            runway_spectral_fit = float(runway_curve.get("spectralFit", 0.5))
+            runway_onset_fit = float(runway_curve.get("onsetFit", 0.5))
+            runway_low_collision = float(runway_curve.get("lowCollision", 0.0))
+            runway_phase_fit, runway_phase_error_ms = _beat_phase_metrics(
+                a,
+                b,
+                a_release,
+                runway_impact,
+                runway_a_bpm,
+                runway_b_bpm,
+                runway_out_rate,
+                runway_in_rate,
+            )
             handoff_fraction = _clamp(
                 (a_release - desired_start) / max(span, 1e-6),
                 0.38,
@@ -2039,15 +2081,19 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                 and runway_vocal_clash < 0.42
                 and impact_rise >= 0.30
                 and span <= 82.0
+                and (min(runway_a_conf, runway_b_conf) < 0.18 or runway_tempo_fit >= 0.42)
+                and (not runway_curve_evidence or runway_harmonic_fit >= 0.20)
             ):
                 runway_score = (
-                    0.28
-                    + 0.16 * _clamp(runway / 32.0, 0.0, 1.0)
-                    + 0.16 * (1.0 - intro_vocal)
-                    + 0.12 * impact_rise
-                    + 0.10 * key_fit
-                    + 0.08 * tempo
-                    + 0.10 * _clamp((a_end - a_release) / 16.0, 0.0, 1.0)
+                    0.22
+                    + 0.14 * _clamp(runway / 32.0, 0.0, 1.0)
+                    + 0.14 * (1.0 - intro_vocal)
+                    + 0.11 * impact_rise
+                    + 0.08 * key_fit
+                    + 0.09 * runway_tempo_fit
+                    + 0.07 * runway_phase_fit
+                    + 0.07 * _clamp((a_end - a_release) / 16.0, 0.0, 1.0)
+                    + (0.08 * runway_curve_fit if runway_curve_evidence else 0.0)
                 )
                 pre_handoff = max(0.08, handoff_fraction - 0.16)
                 post_handoff = min(0.98, handoff_fraction + 0.12)
@@ -2059,14 +2105,20 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                     transitionEnd=round(a_end, 4),
                     incomingCueTime=round(b_start, 4),
                     incomingHandoffTime=round(runway_impact, 4),
-                    outgoingPlaybackRate=1.0,
-                    incomingPlaybackRate=1.0,
+                    outgoingPlaybackRate=round(runway_out_rate, 5),
+                    incomingPlaybackRate=round(runway_in_rate, 5),
                     transitionBeats=0,
                     requestedTransitionBeats=0,
                     handoffFraction=round(handoff_fraction, 4),
                     bassSwap=bool(key_fit >= 0.58 and _low_curve(a) and _low_curve(b)),
                     bassSwapFraction=round(handoff_fraction, 4),
-                    filterSweep=0.30 if key_fit >= 0.58 else 0.62,
+                    filterSweep=round(_clamp(
+                        (0.24 if key_fit >= 0.58 else 0.54)
+                        + 0.20 * (1.0 - runway_spectral_fit)
+                        + 0.16 * runway_low_collision,
+                        0.20,
+                        0.92,
+                    ), 4),
                     keyCompatibility=round(key_fit, 4),
                     tempoCompatibility=round(tempo, 4),
                     phraseAlignment=0.0,
@@ -2085,6 +2137,15 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                     spanCompatibility=1.0,
                     outgoingAnchor="release",
                     incomingAnchor="impact",
+                    curveCompatibility=round(runway_curve_fit, 4),
+                    onsetCurveFit=round(runway_onset_fit, 4),
+                    harmonicCurveFit=round(runway_harmonic_fit, 4),
+                    spectralCurveFit=round(runway_spectral_fit, 4),
+                    beatPhaseFit=round(runway_phase_fit, 4),
+                    beatPhaseErrorMs=round(runway_phase_error_ms, 2),
+                    localTempoCompatibility=round(runway_tempo_fit, 4),
+                    outgoingLocalBpm=round(runway_a_bpm, 4),
+                    incomingLocalBpm=round(runway_b_bpm, 4),
                     gainEnvelope=[
                         {"progress": 0.0, "incomingGain": 0.0, "outgoingGain": 1.0},
                         {
