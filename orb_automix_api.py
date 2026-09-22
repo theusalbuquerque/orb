@@ -179,40 +179,141 @@ def _beat_grid(onset: np.ndarray, hop_seconds: float) -> tuple[float, float, lis
     return bpm, confidence, beats
 
 
+def _chroma_window(audio: np.ndarray) -> np.ndarray | None:
+    """Pitch-class energy for one contiguous window.
+
+    Keeping the window contiguous matters: selecting evenly spaced samples from a long track and
+    treating them as adjacent audio changes the effective sample rate and therefore the pitches.
+    """
+    if audio.size < 2048:
+        return None
+
+    max_fft = 1 << 17  # ~5.9 s at 22.05 kHz: enough resolution without one giant FFT.
+    usable = min(audio.size, max_fft)
+    n = 1 << int(math.floor(math.log2(max(2048, usable))))
+    if n > audio.size:
+        return None
+
+    offset = max(0, (audio.size - n) // 2)
+    sample = np.asarray(audio[offset:offset + n], dtype=np.float64)
+    sample = sample - float(np.mean(sample))
+    rms = float(np.sqrt(np.mean(sample * sample) + 1e-12))
+    if rms <= 1e-5:
+        return None
+
+    spectrum = np.abs(np.fft.rfft(sample * np.hanning(n)))
+    freqs = np.fft.rfftfreq(n, 1.0 / SAMPLE_RATE)
+    valid = (freqs >= 55.0) & (freqs <= 5000.0)
+    if not np.any(valid):
+        return None
+
+    valid_freqs = freqs[valid]
+    valid_mag = np.sqrt(np.maximum(spectrum[valid], 0.0))
+    midi = 69.0 + 12.0 * np.log2(valid_freqs / 440.0)
+    pitch_classes = np.mod(np.rint(midi).astype(np.int32), 12)
+
+    chroma = np.zeros(12, dtype=np.float64)
+    np.add.at(chroma, pitch_classes, valid_mag)
+    total = float(np.sum(chroma))
+    if total <= 1e-9:
+        return None
+    return chroma / total
+
+
 def _key_from_audio(audio: np.ndarray) -> tuple[str, float]:
     if audio.size < SAMPLE_RATE:
         return "", 0.0
-    # Analyze up to ~90 s spread across the track to keep the backend bounded.
-    max_samples = 90 * SAMPLE_RATE
-    if audio.size > max_samples:
-        idx = np.linspace(0, audio.size - 1, max_samples, dtype=np.int64)
-        sample = audio[idx]
+
+    # Analyze several *contiguous* windows across the arrangement. This sees key changes and
+    # repeated harmonic material without frequency-warping the source or only trusting the intro.
+    window_samples = min(audio.size, 6 * SAMPLE_RATE)
+    if audio.size <= window_samples:
+        starts = [0]
     else:
-        sample = audio
-    n = 1 << int(math.floor(math.log2(max(2048, min(sample.size, 1 << 20)))))
-    sample = sample[:n] * np.hanning(n)
-    spectrum = np.abs(np.fft.rfft(sample))
-    freqs = np.fft.rfftfreq(n, 1.0 / SAMPLE_RATE)
-    chroma = np.zeros(12, dtype=np.float64)
-    valid = (freqs >= 55.0) & (freqs <= 5000.0)
-    for freq, mag in zip(freqs[valid], spectrum[valid], strict=False):
-        midi = 69.0 + 12.0 * math.log2(float(freq) / 440.0)
-        chroma[int(round(midi)) % 12] += float(mag)
-    total = float(np.sum(chroma))
+        window_count = min(8, max(3, int(math.ceil(audio.size / (30.0 * SAMPLE_RATE)))))
+        max_start = audio.size - window_samples
+        starts = [
+            int(round(x))
+            for x in np.linspace(0, max_start, num=window_count)
+        ]
+
+    observations: list[tuple[np.ndarray, float]] = []
+    for start in starts:
+        segment = np.asarray(audio[start:start + window_samples], dtype=np.float32)
+        if segment.size < SAMPLE_RATE:
+            continue
+        rms = float(np.sqrt(np.mean(segment.astype(np.float64) ** 2) + 1e-12))
+        chroma = _chroma_window(segment)
+        if chroma is not None:
+            observations.append((chroma, rms))
+
+    if not observations:
+        return "", 0.0
+
+    max_rms = max(rms for _, rms in observations)
+    active = [
+        (chroma, rms)
+        for chroma, rms in observations
+        if rms >= max(1e-5, max_rms * 0.12)
+    ]
+    if not active:
+        active = observations
+
+    aggregate = np.zeros(12, dtype=np.float64)
+    for chroma, rms in active:
+        # Loud windows matter somewhat more, but do not let one mastered chorus erase the rest
+        # of the track's harmony.
+        weight = math.sqrt(max(rms, 1e-9) / max(max_rms, 1e-9))
+        aggregate += chroma * weight
+    total = float(np.sum(aggregate))
     if total <= 1e-9:
         return "", 0.0
-    chroma /= total
-    major_profile = np.array([6.35,2.23,3.48,2.33,4.38,4.09,2.52,5.19,2.39,3.66,2.29,2.88])
-    minor_profile = np.array([6.33,2.68,3.52,5.38,2.60,3.53,2.54,4.75,3.98,2.69,3.34,3.17])
-    scores: list[tuple[float, int, str]] = []
-    for tonic in range(12):
-        scores.append((float(np.dot(chroma, np.roll(major_profile, tonic))), tonic, "major"))
-        scores.append((float(np.dot(chroma, np.roll(minor_profile, tonic))), tonic, "minor"))
-    scores.sort(reverse=True)
+    aggregate /= total
+
+    major_profile = np.array(
+        [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88],
+        dtype=np.float64,
+    )
+    minor_profile = np.array(
+        [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17],
+        dtype=np.float64,
+    )
+    major_profile /= np.linalg.norm(major_profile)
+    minor_profile /= np.linalg.norm(minor_profile)
+
+    def profile_scores(chroma: np.ndarray) -> list[tuple[float, int, str]]:
+        norm = float(np.linalg.norm(chroma))
+        if norm <= 1e-9:
+            return []
+        unit = chroma / norm
+        values: list[tuple[float, int, str]] = []
+        for tonic in range(12):
+            values.append((float(np.dot(unit, np.roll(major_profile, tonic))), tonic, "major"))
+            values.append((float(np.dot(unit, np.roll(minor_profile, tonic))), tonic, "minor"))
+        return sorted(values, reverse=True)
+
+    scores = profile_scores(aggregate)
+    if len(scores) < 2:
+        return "", 0.0
     best, tonic, mode = scores[0]
     second = scores[1][0]
-    confidence = _clamp((best - second) / (abs(best) + 1e-9) * 8.0, 0.0, 1.0)
-    names = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
+    margin = _clamp((best - second) / max(abs(best), 1e-9), 0.0, 1.0)
+
+    # A stable key should recur across the track. Exact agreement is intentionally strict:
+    # modulation lowers confidence, which is safer than authorizing a long harmonic overlap.
+    window_winners = []
+    for chroma, _ in active:
+        local = profile_scores(chroma)
+        if local:
+            window_winners.append((local[0][1], local[0][2]))
+    consistency = (
+        sum(1 for local_tonic, local_mode in window_winners if local_tonic == tonic and local_mode == mode)
+        / len(window_winners)
+        if window_winners else 0.0
+    )
+
+    confidence = _clamp(0.70 * min(1.0, margin * 10.0) + 0.30 * consistency, 0.0, 1.0)
+    names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
     return f"{names[tonic]} {mode}", confidence
 
 
