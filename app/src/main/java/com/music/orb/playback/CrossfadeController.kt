@@ -1493,17 +1493,6 @@ class CrossfadeController(
         /** Final third: B returns from the meeting tempo to its native tempo. */
         const val TEMPO_RELEASE_START = 0.66f
 
-        /** Bounds for the musical authority handoff inside a DJ blend. */
-        const val AUTOMIX_HANDOFF_MIN = 0.52f
-        const val AUTOMIX_HANDOFF_MAX = 0.76f
-
-        /** Filtered bridges hand over a little earlier than beat/key blends. */
-        const val AUTOMIX_FILTER_HANDOFF = 0.52f
-
-        /** Short structural transfers: decisive, not mini-crossfades. */
-        const val AUTOMIX_PHRASE_CUT_HANDOFF = 0.38f
-        const val AUTOMIX_CUT_HANDOFF = 0.46f
-
         /**
          * Angles on the constant-power circle at the pre-handoff plateau.
          * sin(0.245) ~= 0.24 (-12.3 dB); sin(0.18) ~= 0.18 (-14.9 dB).
