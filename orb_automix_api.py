@@ -906,13 +906,20 @@ def _max_window_mean(
     """Maximum local mean in [start, end], used to reject false release pockets."""
     if not points or end <= start:
         return default
-    times = [t for t, _ in points if start <= t <= end]
+    # Exclude the exact right edge. A sample at t=end has a zero-width
+    # look-ahead window; feeding [default] back from that window can falsely
+    # resurrect foreground vocals/energy after a genuine sustained release.
+    # That bug made _release_landmarks() collapse to end-1.5 s on tracks whose
+    # global vocalProbability was >= 0.48.
+    times = [t for t, _ in points if start <= t < end]
     if not times:
         return default
-    return max(
+    means = [
         _mean_window(points, t, min(end, t + window), default)
         for t in times
-    )
+        if min(end, t + window) > t
+    ]
+    return max(means) if means else default
 
 
 def _content_end(track: dict[str, Any]) -> float:
