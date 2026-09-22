@@ -24,14 +24,33 @@ import java.util.concurrent.ConcurrentHashMap
 object NerdStats {
 
     class Snapshot(
+        /** Queue/media id this decoder snapshot belongs to. */
+        val mediaId: String? = null,
         val mimeType: String?,
         val bitrateKbps: Int?,
+        /** Bitrate proven by the decoder/container or by the exact URL resolver. */
+        val verifiedBitrateKbps: Int? = null,
         val sampleRateHz: Int?,
         val channels: Int?,
         /** From the decoder's PCM encoding, where it states one. */
         val bitDepth: Int? = null,
         /** What the source said it would serve, when it came from one that says. */
         val claimed: StreamFormat? = null,
+        /**
+         * Native media/container format when Orb can inspect it directly. For a
+         * local file this comes from FLAC STREAMINFO/WAV fmt metadata; for a
+         * resolved lossless source it is the source-declared stream format.
+         * Crucially, this is not the decoder's working PCM precision.
+         */
+        val nativeFormat: StreamFormat? = claimed,
+        /**
+         * True only when [nativeFormat] was independently verified (local file
+         * header/container or a source playback manifest/header), rather than
+         * copied from a catalogue claim.
+         */
+        val nativeLosslessVerified: Boolean = false,
+        /** Playback source that supplied the current rendition, when known. */
+        val sourceName: String? = null,
     ) {
         /**
          * Whether what arrived is measurably worse than what was promised.
@@ -43,8 +62,9 @@ object NerdStats {
          */
         val downgraded: Boolean
             get() {
-                val wantedRate = claimed?.sampleRateHz
-                val wantedDepth = claimed?.bitDepth
+                val reference = nativeFormat ?: claimed
+                val wantedRate = reference?.sampleRateHz
+                val wantedDepth = reference?.bitDepth
                 return (wantedRate != null && sampleRateHz != null && sampleRateHz < wantedRate) ||
                     (wantedDepth != null && bitDepth != null && bitDepth < wantedDepth)
             }
@@ -63,16 +83,17 @@ object NerdStats {
          * onto YouTube's Opus and the badge went on reading "Lossless" over
          * it, because the claim outlived the stream that made it.
          *
-         * So the decoder gets the last word whenever it has said anything.
-         * The claim is only consulted before the renderer has been
-         * configured — the gap between a source answering and the first audio
-         * frame — where it is the only evidence there is, and where a wrong
-         * answer lasts a second rather than a song.
+         * The decoder still gets the final vote whenever it has named a codec.
+         * If it has not, Orb may use independently verified native evidence —
+         * never a bare catalogue claim. This keeps real FLAC 16/44.1 files
+         * Lossless even when their compressed bitrate is unusually low (for
+         * example ~160 kbps) or Media3 leaves sampleMimeType temporarily blank.
          */
         val isLossless: Boolean
             get() = when {
-                mimeType != null -> isLosslessMime(mimeType)
-                else -> claimed?.isLossless == true
+                !mimeType.isNullOrBlank() -> isLosslessMime(mimeType)
+                nativeLosslessVerified -> nativeFormat?.isLossless == true
+                else -> false
             }
 
         /**
@@ -84,7 +105,18 @@ object NerdStats {
          * listener can plausibly hear.
          */
         val isHiRes: Boolean
-            get() = isLossless && ((bitDepth ?: 0) > 16 || (sampleRateHz ?: 0) > 48_000)
+            get() {
+                if (!isLossless) return false
+
+                // Hi-Res is a property of the native media, not of Android's
+                // output pipeline. The mixer/decoder may legitimately expose a
+                // 16/44.1 file as Float32 or resample it to the device output
+                // rate; neither operation turns that file into a Hi-Res master.
+                // Therefore unknown native resolution stays plain Lossless.
+                val native = nativeFormat ?: return false
+                if (native.bitDepth == null && native.sampleRateHz == null) return false
+                return native.losslessTier.isHiRes
+            }
 
         /**
          * Whether this is lossy, but at the top of what lossy gets — a 320kbps
@@ -101,7 +133,8 @@ object NerdStats {
          * 256kbps stream is a 256kbps stream wherever it came from.
          */
         val isHiQuality: Boolean
-            get() = !isLossless && (bitrateKbps ?: claimed?.kbps ?: 0) >= HI_QUALITY_KBPS
+            get() = !isLossless && isAacMime(mimeType) && (verifiedBitrateKbps ?: 0) >= HI_QUALITY_KBPS
+
     }
 
     /**
@@ -112,6 +145,12 @@ object NerdStats {
      * reaches the renderer as raw samples, not as `audio/wav`.
      */
     private val LOSSLESS_CODEC_SUFFIXES = listOf("flac", "alac", "raw")
+    private val AAC_CODECS = setOf("aac", "m4a", "mp4a", "mp4a-latm")
+
+    private fun isAacMime(mimeType: String?): Boolean {
+        val mime = mimeType?.lowercase() ?: return false
+        return mime == "audio/aac" || mime.contains("mp4a") || mime.endsWith("/aac")
+    }
 
     /**
      * Whether [mimeType] names a bit-exact codec.
@@ -138,6 +177,229 @@ object NerdStats {
     val current = MutableStateFlow<Snapshot?>(null)
 
     /**
+     * Read-only Automix telemetry for Stats for Nerds. This deliberately lives
+     * outside the Phase 6 planner: observing the engine must never change its
+     * musical decisions or queue behaviour.
+     */
+    enum class AutomixStage {
+        ANALYZING_A,
+        A_ANALYZED,
+        ANALYZING_B,
+        B_ANALYZED,
+        PLANNING,
+        READY,
+        PREPARING_B,
+        B_READY,
+        MIXING,
+        COMPLETED,
+    }
+
+
+    /** Quality preparation state for the immediate A -> B pair. */
+    enum class AutomixQuality {
+        WAITING,
+        SEARCHING,
+        LOSSLESS_READY,
+        HI_QUALITY_READY,
+        OPUS_FALLBACK,
+        LOCAL,
+    }
+
+    /** Physical evidence used by the BitChord-style analyzer. */
+    enum class AutomixAnalysisSource {
+        NONE,
+        STORED,
+        CACHE_WARMING,
+        CACHE_HEAD,
+        CACHE_FULL,
+        RELIABLE_DOWNLOAD,
+        REMOTE,
+        RELIABLE_FILE,
+        FAILED,
+    }
+
+    data class AutomixSnapshot(
+        val stage: AutomixStage,
+        val outgoingAnalyzed: Boolean = false,
+        val incomingAnalyzed: Boolean = false,
+        val style: String? = null,
+        val outgoingBpm: Float? = null,
+        val incomingBpm: Float? = null,
+        val outgoingKey: String? = null,
+        val incomingKey: String? = null,
+        val musicalScore: Float? = null,
+        val tempoScore: Float? = null,
+        val harmonicScore: Float? = null,
+        val structureScore: Float? = null,
+        val energyScore: Float? = null,
+        val vocalRisk: Float? = null,
+        val candidateCount: Int = 0,
+        val incomingRate: Float? = null,
+        val outgoingStartMs: Long? = null,
+        val incomingCueMs: Long? = null,
+        val durationMs: Long? = null,
+        val progress: Float? = null,
+        val outgoingId: String? = null,
+        val incomingId: String? = null,
+        val outgoingTitle: String? = null,
+        val incomingTitle: String? = null,
+        val quality: AutomixQuality = AutomixQuality.WAITING,
+        val outgoingAnalysisSource: AutomixAnalysisSource = AutomixAnalysisSource.NONE,
+        val incomingAnalysisSource: AutomixAnalysisSource = AutomixAnalysisSource.NONE,
+        val outgoingBeatConfidence: Float? = null,
+        val incomingBeatConfidence: Float? = null,
+        val transitionBeats: Int = 0,
+        val vocalOverlap: Float? = null,
+        val planReason: String? = null,
+        val policyReasons: List<String> = emptyList(),
+    )
+
+    val automix = MutableStateFlow<AutomixSnapshot?>(null)
+
+    /** Last physical analyzer provenance per track, retained across pair creation. */
+    private val analysisSources = ConcurrentHashMap<String, AutomixAnalysisSource>()
+
+
+    /**
+     * Compatibility telemetry around the BitChord v1.5 engine. These methods
+     * observe preparation only; they never participate in source selection,
+     * analysis, planning, or rendering.
+     */
+    fun beginAutomixPair(
+        outgoingId: String,
+        incomingId: String,
+        outgoingTitle: String = outgoingId,
+        incomingTitle: String = incomingId,
+    ) {
+        if (outgoingId.isBlank() || incomingId.isBlank()) return
+        val previous = automix.value
+        val base = if (previous == null || previous.stage == AutomixStage.COMPLETED ||
+            previous.outgoingId != outgoingId || previous.incomingId != incomingId
+        ) {
+            AutomixSnapshot(stage = AutomixStage.ANALYZING_A)
+        } else {
+            previous
+        }
+        automix.value = base.copy(
+            outgoingId = outgoingId,
+            incomingId = incomingId,
+            outgoingTitle = outgoingTitle,
+            incomingTitle = incomingTitle,
+            outgoingAnalysisSource = analysisSources[outgoingId] ?: base.outgoingAnalysisSource,
+            incomingAnalysisSource = analysisSources[incomingId] ?: base.incomingAnalysisSource,
+        )
+    }
+
+    fun onAutomixQuality(
+        outgoingId: String,
+        incomingId: String,
+        quality: AutomixQuality,
+        outgoingTitle: String = outgoingId,
+        incomingTitle: String = incomingId,
+    ) {
+        if (outgoingId.isBlank() || incomingId.isBlank()) return
+        val current = automix.value ?: AutomixSnapshot(stage = AutomixStage.ANALYZING_A)
+        val stage = when (quality) {
+            AutomixQuality.SEARCHING -> current.stage
+            AutomixQuality.LOSSLESS_READY,
+            AutomixQuality.HI_QUALITY_READY,
+            AutomixQuality.OPUS_FALLBACK,
+            AutomixQuality.LOCAL -> if (current.stage == AutomixStage.PREPARING_B) AutomixStage.B_READY else current.stage
+            AutomixQuality.WAITING -> current.stage
+        }
+        automix.value = current.copy(
+            stage = stage,
+            quality = quality,
+            outgoingId = outgoingId,
+            incomingId = incomingId,
+            outgoingTitle = outgoingTitle,
+            incomingTitle = incomingTitle,
+        )
+    }
+
+    fun onAutomixAnalysisSource(trackId: String, source: AutomixAnalysisSource) {
+        if (trackId.isBlank()) return
+        if (analysisSources.size >= MAX_REMEMBERED) analysisSources.clear()
+        analysisSources[trackId] = source
+        val current = automix.value ?: return
+        automix.value = when (trackId) {
+            current.outgoingId -> current.copy(outgoingAnalysisSource = source)
+            current.incomingId -> current.copy(incomingAnalysisSource = source)
+            else -> current
+        }
+    }
+
+    /** Detailed, observation-only snapshot of the v1.5 planner decision. */
+    fun onAutomixPlan(
+        outgoingId: String,
+        incomingId: String,
+        style: String,
+        outgoingBpm: Float?,
+        incomingBpm: Float?,
+        outgoingKey: String?,
+        incomingKey: String?,
+        outgoingBeatConfidence: Float?,
+        incomingBeatConfidence: Float?,
+        candidateCount: Int,
+        incomingRate: Float,
+        outgoingStartMs: Long,
+        incomingCueMs: Long,
+        durationMs: Long,
+        transitionBeats: Int,
+        vocalOverlap: Float,
+        blocked: Boolean,
+        planReason: String?,
+        policyReasons: List<String>,
+    ) {
+        val previous = automix.value ?: AutomixSnapshot(stage = AutomixStage.PLANNING)
+        automix.value = previous.copy(
+            stage = if (blocked) AutomixStage.PLANNING else AutomixStage.READY,
+            outgoingId = outgoingId,
+            incomingId = incomingId,
+            outgoingAnalysisSource = analysisSources[outgoingId] ?: previous.outgoingAnalysisSource,
+            incomingAnalysisSource = analysisSources[incomingId] ?: previous.incomingAnalysisSource,
+            outgoingAnalyzed = outgoingBpm != null,
+            incomingAnalyzed = incomingBpm != null,
+            style = style,
+            outgoingBpm = outgoingBpm,
+            incomingBpm = incomingBpm,
+            outgoingKey = outgoingKey,
+            incomingKey = incomingKey,
+            outgoingBeatConfidence = outgoingBeatConfidence,
+            incomingBeatConfidence = incomingBeatConfidence,
+            candidateCount = candidateCount,
+            incomingRate = incomingRate,
+            outgoingStartMs = outgoingStartMs,
+            incomingCueMs = incomingCueMs,
+            durationMs = durationMs,
+            transitionBeats = transitionBeats,
+            vocalOverlap = vocalOverlap,
+            planReason = planReason,
+            policyReasons = policyReasons,
+        )
+    }
+
+    fun onAutomixMixProgress(progress: Float) {
+        val current = automix.value ?: return
+        automix.value = current.copy(
+            stage = AutomixStage.MIXING,
+            progress = progress.coerceIn(0f, 1f),
+        )
+    }
+
+    fun onAutomixCompleted() {
+        val current = automix.value ?: return
+        automix.value = current.copy(stage = AutomixStage.COMPLETED, progress = 1f)
+    }
+
+    fun clearAutomix(outgoingId: String? = null, incomingId: String? = null) {
+        val current = automix.value ?: return
+        if (outgoingId != null && current.outgoingId != null && current.outgoingId != outgoingId) return
+        if (incomingId != null && current.incomingId != null && current.incomingId != incomingId) return
+        automix.value = null
+    }
+
+    /**
      * YouTube video ids with a module lookup racing YouTube's own resolve
      * for the stream to actually play — see
      * [PlaybackService][com.music.orb.playback.PlaybackService]'s
@@ -148,6 +410,43 @@ object NerdStats {
      * the set the moment its own lookup settles either way, never on a timer.
      */
     val racingLossless = MutableStateFlow<Set<String>>(emptySet())
+
+    /**
+     * The one current track for which the compact player status is allowed to
+     * say that Orb is looking for a better copy. PlaybackService owns the
+     * conditions and lifetime; the UI only renders this explicit signal.
+     */
+    val qualitySearchHintFor = MutableStateFlow<String?>(null)
+
+    /**
+     * Result of the quality gate run before a directly requested opening track
+     * is handed to Media3. It is one-shot: PlaybackService consumes it when
+     * that track becomes current, preventing an old result for the same video
+     * id from leaking into a later queue visit.
+     */
+    private val openingQualityPreflight = ConcurrentHashMap<String, Boolean>()
+
+    fun onOpeningQualityPreflight(videoId: String, betterFound: Boolean) {
+        if (videoId.isBlank()) return
+        openingQualityPreflight[videoId] = betterFound
+    }
+
+    fun clearOpeningQualityPreflight(videoId: String) {
+        openingQualityPreflight.remove(videoId)
+    }
+
+    fun consumeOpeningQualityPreflight(videoId: String): Boolean? =
+        openingQualityPreflight.remove(videoId)
+
+    fun showQualitySearchHint(videoId: String) {
+        qualitySearchHintFor.value = videoId
+    }
+
+    fun hideQualitySearchHint(videoId: String? = null) {
+        if (videoId == null || qualitySearchHintFor.value == videoId) {
+            qualitySearchHintFor.value = null
+        }
+    }
 
     fun onLosslessRaceStart(videoId: String) {
         racingLossless.value += videoId
@@ -169,6 +468,9 @@ object NerdStats {
     /** As [picked], for the richer format a non-YouTube source can state. */
     private val declared = ConcurrentHashMap<String, StreamFormat>()
 
+    /** Tracks whose lossless nature Orb verified independently of a quality label. */
+    private val verifiedLossless = ConcurrentHashMap.newKeySet<String>()
+
     fun onStreamPicked(videoId: String, kbps: Int) {
         if (kbps <= 0) return
         // Enough for the queue in hand; this is a lookup, not a store.
@@ -177,10 +479,22 @@ object NerdStats {
     }
 
     /** Recorded as a source hands over a stream, keyed by that source's own track id. */
-    fun onSourceStream(trackId: String?, format: StreamFormat) {
+    fun onSourceStream(
+        trackId: String?,
+        format: StreamFormat,
+        losslessVerified: Boolean = false,
+    ) {
         if (trackId.isNullOrBlank()) return
-        if (declared.size >= MAX_REMEMBERED) declared.clear()
+        if (declared.size >= MAX_REMEMBERED) {
+            declared.clear()
+            verifiedLossless.clear()
+        }
         declared[trackId] = format
+        if (losslessVerified && format.isLossless == true) {
+            verifiedLossless += trackId
+        } else {
+            verifiedLossless -= trackId
+        }
     }
 
     fun pickedBitrateKbps(videoId: String?): Int? = videoId?.let { picked[it] }
@@ -196,7 +510,15 @@ object NerdStats {
      * FLAC swap leaves the "Lossless" badge lit over plain Opus.
      */
     fun clearDeclared(trackId: String?) {
-        if (trackId != null) declared.remove(trackId)
+        val key = trackId ?: return
+        declared.remove(key)
+        verifiedLossless.remove(key)
+        // Source-backed queue ids wrap the source's native id. Clear both so a
+        // dead FLAC claim/verification can never leak onto the fallback stream.
+        com.music.orb.data.sources.SourceRegistry.parseTrackKey(key)?.second?.let { nativeId ->
+            declared.remove(nativeId)
+            verifiedLossless.remove(nativeId)
+        }
     }
 
     /**
@@ -209,6 +531,13 @@ object NerdStats {
         return declared[key]
             ?: com.music.orb.data.sources.SourceRegistry.parseTrackKey(key)
                 ?.second?.let { declared[it] }
+    }
+
+    fun isNativeLosslessVerified(mediaId: String?): Boolean {
+        val key = mediaId ?: return false
+        if (key in verifiedLossless) return true
+        val nativeId = com.music.orb.data.sources.SourceRegistry.parseTrackKey(key)?.second
+        return nativeId != null && nativeId in verifiedLossless
     }
 
     /**
@@ -244,9 +573,13 @@ object NerdStats {
      */
     fun forgetLastSession() {
         current.value = null
+        automix.value = null
         racingLossless.value = emptySet()
+        qualitySearchHintFor.value = null
+        openingQualityPreflight.clear()
         picked.clear()
         declared.clear()
+        verifiedLossless.clear()
     }
 
     private const val MAX_REMEMBERED = 64
