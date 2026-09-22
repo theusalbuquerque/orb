@@ -1512,7 +1512,13 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                     style = None
 
                 minimum_beats = 8 if style == "DJ_BLEND" else 4
-                if style is not None and actual_beats >= minimum_beats and span_fit >= 0.45:
+                minimum_structure = 0.72 if style == "DJ_BLEND" else 0.66
+                if (
+                    style is not None
+                    and actual_beats >= minimum_beats
+                    and span_fit >= 0.45
+                    and phrase_fit >= minimum_structure
+                ):
                     score = (
                         0.15 + 0.20 * tempo + 0.12 * conf + 0.18 * key_fit
                         + 0.11 * (1.0 - overlap_vocal_clash)
@@ -1610,7 +1616,12 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
             if protected:
                 eq_score -= 0.16
 
-            if overlap_vocal_clash < 0.62 and actual_beats >= 8 and span_fit >= 0.45:
+            if (
+                overlap_vocal_clash < 0.62
+                and actual_beats >= 8
+                and span_fit >= 0.45
+                and phrase_fit >= 0.72
+            ):
                 candidates.append(_candidate_plan(
                     "EQ_SWAP",
                     eq_score,
