@@ -17,6 +17,7 @@ import com.music.orb.data.settings.TransitionWindow
 import com.music.orb.playback.smart.CrossfadeMode
 import com.music.orb.playback.smart.RemoteAutomixClient
 import com.music.orb.playback.smart.TrackAnalysis
+import com.music.orb.playback.smart.TransitionGainPoint
 import com.music.orb.playback.smart.TransitionStyle
 import com.music.orb.playback.smart.TransitionTrackInfo
 import com.music.orb.playback.smart.planTransition
