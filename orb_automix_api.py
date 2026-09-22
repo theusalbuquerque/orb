@@ -179,6 +179,105 @@ def _beat_grid(onset: np.ndarray, hop_seconds: float) -> tuple[float, float, lis
     return bpm, confidence, beats
 
 
+def _downbeats_from_beats(
+    beats: list[float],
+    onset: np.ndarray,
+    hop_seconds: float,
+) -> list[float]:
+    """Choose the strongest of the four possible 4/4 bar phases.
+
+    Tempo detection gives us a beat grid, but its first beat is not necessarily beat 1 of a bar.
+    Treating beats[0] as a downbeat shifts every phrase decision when the detector locked to beat
+    2, 3 or 4. Accent strength across the whole track is a better phase cue.
+    """
+    if len(beats) < 4 or onset.size == 0 or hop_seconds <= 0.0:
+        return beats[::4]
+
+    strengths: list[float] = []
+    for beat in beats:
+        center = int(round(beat / hop_seconds))
+        lo = max(0, center - 1)
+        hi = min(onset.size, center + 2)
+        strengths.append(float(np.max(onset[lo:hi])) if hi > lo else 0.0)
+
+    phase_scores: list[float] = []
+    for phase in range(4):
+        values = np.asarray(strengths[phase::4], dtype=np.float64)
+        if values.size == 0:
+            phase_scores.append(float("-inf"))
+            continue
+        # Median resists one oversized fill/crash deciding the bar phase by itself; the upper
+        # quartile still rewards a phase that repeatedly carries strong first-beat accents.
+        phase_scores.append(
+            0.65 * float(np.median(values))
+            + 0.35 * float(np.percentile(values, 75))
+        )
+
+    best_phase = int(np.argmax(np.asarray(phase_scores)))
+    return beats[best_phase::4]
+
+
+def _phrase_boundaries_from_structure(
+    downbeats: list[float],
+    times: np.ndarray,
+    energy: np.ndarray,
+    low: np.ndarray,
+    vocal: np.ndarray,
+) -> list[float]:
+    """Choose a four-bar phrase phase from arrangement changes on real downbeats."""
+    if len(downbeats) < 4:
+        return downbeats
+    if times.size == 0:
+        return downbeats[::4]
+
+    gaps = [
+        right - left
+        for left, right in zip(downbeats, downbeats[1:], strict=False)
+        if right > left
+    ]
+    bar_seconds = float(np.median(gaps)) if gaps else 2.0
+    if bar_seconds <= 0.0:
+        return downbeats[::4]
+
+    def window_mean(values: np.ndarray, start: float, end: float, default: float) -> float:
+        mask = (times >= start) & (times < end)
+        if not np.any(mask):
+            return default
+        return float(np.mean(values[mask]))
+
+    boundary_scores: list[float] = []
+    context = max(bar_seconds, 2.0 * bar_seconds)
+    for t in downbeats:
+        e_before = window_mean(energy, max(0.0, t - context), t, 0.5)
+        e_after = window_mean(energy, t, t + context, e_before)
+        l_before = window_mean(low, max(0.0, t - context), t, 0.5)
+        l_after = window_mean(low, t, t + context, l_before)
+        v_before = window_mean(vocal, max(0.0, t - context), t, 0.5)
+        v_after = window_mean(vocal, t, t + context, v_before)
+
+        change = (
+            0.45 * abs(e_after - e_before)
+            + 0.30 * abs(l_after - l_before)
+            + 0.20 * abs(v_after - v_before)
+            + 0.05 * max(0.0, e_after - e_before)
+        )
+        boundary_scores.append(change)
+
+    phase_scores: list[float] = []
+    for phase in range(4):
+        values = np.asarray(boundary_scores[phase::4], dtype=np.float64)
+        if values.size == 0:
+            phase_scores.append(float("-inf"))
+            continue
+        phase_scores.append(
+            0.70 * float(np.mean(values))
+            + 0.30 * float(np.max(values))
+        )
+
+    best_phase = int(np.argmax(np.asarray(phase_scores)))
+    return downbeats[best_phase::4]
+
+
 def _chroma_window(audio: np.ndarray) -> np.ndarray | None:
     """Pitch-class energy for one contiguous window.
 
@@ -372,10 +471,16 @@ def _analyze(path: str, track_id: str, declared_duration: float) -> dict[str, An
     bpm, beat_conf, beats = _beat_grid(onset, beat_frame / SAMPLE_RATE)
     beat_interval = 60.0 / bpm if bpm > 0 else 0.0
 
-    # We do not pretend to infer meter with confidence we do not have: four-beat bars are a safe
-    # structural grid and the server planner gates ambitious transition families by beat confidence.
-    downbeats = beats[::4] if beats else []
-    phrases = downbeats[::4] if downbeats else []
+    # Tempo gives a beat grid, not bar/phrase phase. Infer both phases from accents and
+    # arrangement changes instead of assuming the first detected beat is beat 1.
+    downbeats = _downbeats_from_beats(beats, onset, beat_frame / SAMPLE_RATE) if beats else []
+    phrases = _phrase_boundaries_from_structure(
+        downbeats,
+        times,
+        energy,
+        low,
+        vocal,
+    ) if downbeats else []
     first_beat = beats[0] if beats else 0.0
 
     active = np.flatnonzero(energy >= 0.06)
