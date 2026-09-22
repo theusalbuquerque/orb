@@ -595,23 +595,135 @@ async def analyze(
                 pass
 
 
+def _overlay_client_vocal_mask(
+    cached: dict[str, Any],
+    payload: dict[str, Any],
+) -> list[float] | None:
+    """Overlay the phone's measured vocal evidence onto the server's full-track mask.
+
+    The Android open-unmix pass measures only the head and tail — exactly the windows used by a
+    transition — and fills the unmeasured middle with 0.5. Preserve the server's full-track
+    heuristic in that middle instead of replacing it with neutral values. The two analyses can
+    have slightly different time grids, so evidence is aligned by timestamp rather than index.
+    """
+    server_energy = _curve(cached, "energyCurve")
+    client_energy = _curve(payload, "energyCurve")
+    raw_client = payload.get("vocalActivityMask")
+    if not server_energy or not client_energy or not isinstance(raw_client, list):
+        return None
+    if len(raw_client) != len(client_energy):
+        return None
+
+    server_raw = cached.get("vocalActivityMask")
+    if isinstance(server_raw, list) and len(server_raw) == len(server_energy):
+        merged = [_clamp(_finite(value, 0.5), 0.0, 1.0) for value in server_raw]
+    else:
+        merged = [0.5] * len(server_energy)
+
+    measured: list[tuple[float, float]] = []
+    for (time_s, _), raw_value in zip(client_energy, raw_client, strict=False):
+        value = _clamp(_finite(raw_value, 0.5), 0.0, 1.0)
+        # TrackAnalyzer deliberately writes exact 0.5 outside the ONNX windows. Do not let those
+        # placeholders erase server evidence. A tiny dead-band also avoids treating float noise
+        # around the sentinel as measured vocals.
+        if abs(value - 0.5) >= 0.02:
+            measured.append((time_s, value))
+    if not measured:
+        return None
+
+    client_gaps = [
+        right[0] - left[0]
+        for left, right in zip(client_energy, client_energy[1:], strict=False)
+        if right[0] > left[0]
+    ]
+    cadence = float(np.median(client_gaps)) if client_gaps else 0.5
+    tolerance = max(0.30, cadence * 0.75)
+
+    measured_index = 0
+    for index, (time_s, _) in enumerate(server_energy):
+        while (
+            measured_index + 1 < len(measured)
+            and measured[measured_index + 1][0] <= time_s
+        ):
+            measured_index += 1
+        neighbours = [measured[measured_index]]
+        if measured_index + 1 < len(measured):
+            neighbours.append(measured[measured_index + 1])
+        best_time, best_value = min(neighbours, key=lambda point: abs(point[0] - time_s))
+        if abs(best_time - time_s) <= tolerance:
+            merged[index] = best_value
+
+    return merged
+
+
+def _merge_plan_evidence(
+    cached: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Fuse full server analysis with stronger transition-window evidence from Android."""
+    merged = dict(cached)
+
+    # Client scalars describe the exact rendition/player state and can be newer than the cache.
+    structural = {
+        "energyCurve",
+        "lowEnergyCurve",
+        "vocalActivityMask",
+        "downbeats",
+        "phraseBoundaries",
+        "mixInCandidates",
+        "mixOutCandidates",
+    }
+    for key, value in payload.items():
+        if value is not None and key not in structural:
+            merged[key] = value
+
+    # Beat This! directly predicts downbeats. When its confidence is high enough, those head/tail
+    # anchors are more relevant to the transition than the server's autocorrelation bar phase.
+    client_downbeats = payload.get("downbeats")
+    client_beat_conf = _clamp(_finite(payload.get("beatConfidence")), 0.0, 1.0)
+    if (
+        isinstance(client_downbeats, list)
+        and len(client_downbeats) >= 2
+        and client_beat_conf >= 0.55
+    ):
+        trusted_downbeats = sorted({
+            round(max(0.0, _finite(value)), 6)
+            for value in client_downbeats
+            if math.isfinite(_finite(value, float("nan")))
+        })
+        if len(trusted_downbeats) >= 2:
+            merged["downbeats"] = trusted_downbeats
+            merged["beatEvidence"] = "client-model"
+
+    # The phone's full TrackFeatures curve is required only as the time axis for its open-unmix
+    # mask. Keep the server's own energy/low curves for energy scoring; overlay model vocal
+    # evidence where the phone actually measured it.
+    vocal_mask = _overlay_client_vocal_mask(cached, payload)
+    if vocal_mask is not None:
+        merged["vocalActivityMask"] = vocal_mask
+        merged["vocalEvidence"] = "client-model-window"
+
+    # If the server lacks structural data entirely, a completed client pass is still better than
+    # dropping those fields. Empty/provisional client lists never erase cached full-track data.
+    for key in ("energyCurve", "lowEnergyCurve", "phraseBoundaries", "mixInCandidates", "mixOutCandidates"):
+        client_value = payload.get(key)
+        if (
+            (key not in merged or not merged.get(key))
+            and isinstance(client_value, list)
+            and client_value
+        ):
+            merged[key] = client_value
+
+    return merged
+
+
 def _plan_track(payload: dict[str, Any]) -> dict[str, Any]:
-    """Prefer the server's full cached analysis, then overlay client evidence."""
+    """Prefer cached full-track analysis, but let stronger client model evidence override it."""
     track_id = str(payload.get("trackId") or "").strip()
     cached = _cache_get(track_id) if track_id else None
     if cached is None:
         return dict(payload)
-    merged = dict(cached)
-    # The client may have a newer duration/source-specific scalar landmark than the cache, but do
-    # not replace the server's dense structural curves with the compact transport fallback.
-    structural = {
-        "energyCurve", "lowEnergyCurve", "vocalActivityMask", "downbeats",
-        "phraseBoundaries", "mixInCandidates", "mixOutCandidates",
-    }
-    for key, value in payload.items():
-        if value is not None and (key not in structural or key not in merged):
-            merged[key] = value
-    return merged
+    return _merge_plan_evidence(cached, payload)
 
 
 def _curve(track: dict[str, Any], name: str) -> list[tuple[float, float]]:
