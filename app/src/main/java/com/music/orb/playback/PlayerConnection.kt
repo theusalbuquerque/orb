@@ -2,6 +2,8 @@ package com.music.orb.playback
 
 import android.content.ComponentName
 import android.net.Uri
+import android.os.Bundle
+import android.os.SystemClock
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -15,16 +17,71 @@ import androidx.core.net.toUri
 import androidx.core.os.bundleOf
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.music.orb.data.model.NOTIFICATION_ART_PX
 import com.music.orb.data.model.Song
 import com.music.orb.data.model.artworkAt
+import com.music.orb.data.settings.AppSettings
 import com.music.orb.data.sources.SourceRegistry
+import com.music.orb.data.sources.SourceResolver
 import com.music.orb.data.sources.TrackMatcher
 import kotlinx.coroutines.delay
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
+
+/**
+ * Future tracks whose position was explicitly chosen by a queue drag.
+ *
+ * PlaybackService and the Compose controller share the app process, so this
+ * process-local set lets a single MediaController.moveMediaItem command carry
+ * the user's intent without a second metadata-replacement command racing the
+ * session timeline. A media-id pin is deliberately conservative for duplicate
+ * copies of the same recording: it may protect one extra copy, but it can never
+ * move the copy the listener explicitly placed.
+ */
+internal object ManualQueuePins {
+    private val ids = ConcurrentHashMap.newKeySet<String>()
+
+    fun pin(mediaId: String) {
+        if (mediaId.isNotBlank()) ids.add(mediaId)
+    }
+
+    fun isPinned(mediaId: String): Boolean = mediaId in ids
+
+    /** Once the pinned item is current, its future position no longer exists. */
+    fun consume(mediaId: String) {
+        ids.remove(mediaId)
+    }
+
+    fun clear() {
+        ids.clear()
+    }
+}
+
+
+
+/**
+ * Compatibility shim for Orb call sites retained around BitChord v1.5 playback.
+ * BitChord v1.5 has no opening-set launch gate: playback begins normally and
+ * Automix plans only the current A -> B transition.
+ */
+internal object AutomixQueueLaunch {
+    fun arm() = Unit
+    fun isPendingFor(player: Player): Boolean = false
+    fun elapsedMs(player: Player): Long? = null
+    fun openingFinalized(): Boolean = true
+    fun finalizeOpening(selectedMediaId: String) = Unit
+    fun selectedMediaId(): String? = null
+    fun tryStartQualityPrime(mediaId: String): Boolean = false
+    fun qualityPrimeFinished(): Boolean = true
+    fun finishQualityPrime(mediaId: String) = Unit
+    fun consume(player: Player): Boolean = false
+    fun cancel() = Unit
+}
+
 
 /** Snapshot of playback state, driven by the MediaController. */
 data class PlayerState(
@@ -134,14 +191,32 @@ fun MediaItem.toSong() = Song(
     artist = mediaMetadata.artist?.toString().orEmpty(),
     thumbnailUrl = mediaMetadata.artworkUri?.toString(),
     durationText = mediaMetadata.extras?.getString(EXTRA_DURATION),
+    albumId = mediaMetadata.extras?.getString(EXTRA_ALBUM_ID),
+    albumName = mediaMetadata.extras?.getString(EXTRA_ALBUM_NAME),
+    isExplicit = mediaMetadata.extras?.getBoolean(EXTRA_EXPLICIT) == true,
+    releaseYear = mediaMetadata.extras?.getInt(EXTRA_RELEASE_YEAR)?.takeIf { it > 0 },
     fromAutoplay = this.fromAutoplay,
+    queuePinned = this.queuePinned,
     localUri = mediaMetadata.extras?.getString(EXTRA_LOCAL_URI),
     localPath = mediaMetadata.extras?.getString(EXTRA_LOCAL_PATH),
+    sourcePlaylistId = mediaMetadata.extras?.getString(EXTRA_SOURCE_PLAYLIST_ID),
+    sourcePlaylistTitle = mediaMetadata.extras?.getString(EXTRA_SOURCE_PLAYLIST_TITLE),
+    sourcePlaylistArtworkUrl = mediaMetadata.extras?.getString(EXTRA_SOURCE_PLAYLIST_ARTWORK),
 )
 
 /** @see Song.fromAutoplay */
 val MediaItem.fromAutoplay: Boolean
     get() = mediaMetadata.extras?.getBoolean(EXTRA_FROM_AUTOPLAY) == true
+
+/** Whether this future queue entry was placed explicitly by the listener. */
+val MediaItem.queuePinned: Boolean
+    get() = mediaMetadata.extras?.getBoolean(EXTRA_QUEUE_PINNED) == true
+
+
+/** True only for tracks launched as an album's original, non-shuffled sequence. */
+val MediaItem.albumSequential: Boolean
+    get() = mediaMetadata.extras?.getBoolean(EXTRA_ALBUM_SEQUENTIAL) == true
+
 
 /**
  * Marks a queue entry as AutoPlay's rather than the user's. Carried on the
@@ -149,6 +224,22 @@ val MediaItem.fromAutoplay: Boolean
  * the player, and the UI only ever sees it back through a MediaController.
  */
 private const val EXTRA_FROM_AUTOPLAY = "orb.fromAutoplay"
+
+/** Position chosen explicitly by the listener; see [MediaItem.queuePinned]. */
+private const val EXTRA_QUEUE_PINNED = "orb.queuePinned"
+
+
+/** Album identity carried into the player so playback can preserve album continuity. */
+private const val EXTRA_ALBUM_ID = "orb.albumId"
+private const val EXTRA_ALBUM_NAME = "orb.albumName"
+
+/** Local-only playlist source context used by Stats; never sent as audio/social data. */
+private const val EXTRA_SOURCE_PLAYLIST_ID = "orb.sourcePlaylistId"
+private const val EXTRA_SOURCE_PLAYLIST_TITLE = "orb.sourcePlaylistTitle"
+private const val EXTRA_SOURCE_PLAYLIST_ARTWORK = "orb.sourcePlaylistArtwork"
+
+/** Queue item belongs to an album launched in its original (non-shuffled) order. */
+private const val EXTRA_ALBUM_SEQUENTIAL = "orb.albumSequential"
 
 /** @see Song.localUri */
 private const val EXTRA_LOCAL_URI = "orb.localUri"
@@ -168,6 +259,12 @@ private const val EXTRA_LOCAL_PATH = "orb.localPath"
  * playback URI.
  */
 private const val EXTRA_DURATION = "orb.durationText"
+
+/** Whether this queue entry is the catalogue's explicit master. */
+private const val EXTRA_EXPLICIT = "orb.explicit"
+
+/** Release year carried through Media3 so Now Playing/credits do not lose it. */
+private const val EXTRA_RELEASE_YEAR = "orb.releaseYear"
 
 /**
  * Where AutoPlay's section of the queue begins, and so where a track queued by
@@ -191,6 +288,8 @@ fun MediaController.autoplaySectionStart(): Int = autoplaySectionStart(
     fromAutoplay = (0 until mediaItemCount).map { getMediaItemAt(it).fromAutoplay },
     currentIndex = currentMediaItemIndex,
 )
+
+
 
 /**
  * Takes back what AutoPlay queued and hasn't played yet — what switching
@@ -234,22 +333,42 @@ private fun resolvePlaybackUri(uriString: String, localPath: String?): String {
 }
 
 /**
- * The `&n=&a=&d=` tail every playback URI carries: what this track is, in the
- * terms [com.music.orb.data.sources.TrackMatcher] compares recordings on.
+ * The identity tail every playback URI carries: title, artist, runtime,
+ * explicit state, release identity, and (for YouTube) the authoritative source
+ * video id. [com.music.orb.data.sources.TrackMatcher] consumes these fields
+ * when another catalogue offers replacement audio.
  *
- * The runtime is the one of the three that can rule a candidate *out* on its
- * own, and it is only ever a hint here — a row that never carried a duration
- * simply omits it and the match is made on title and artist alone, as it was
- * before.
+ * Keeping album/year here is especially important because the resolver runs on
+ * ExoPlayer's loader thread with only this URI available; without them a cover
+ * can look deceptively valid when title, artist text and duration happen to
+ * agree.
  */
 private fun Song.matchQuery(): String = buildString {
     append("&n=").append(Uri.encode(title))
     append("&a=").append(Uri.encode(artist))
     TrackMatcher.secondsOf(durationText)?.let { append("&d=").append(it) }
+    // Cross-source resolution happens from this URI on ExoPlayer's loader
+    // thread, so all identity metadata needed to reject covers/re-recordings
+    // has to travel with the title. Album/year used to be lost here, which
+    // meant an external source could match only title + artist + runtime and
+    // then play a different release under the original Orb metadata.
+    albumName?.takeIf { it.isNotBlank() }?.let { append("&al=").append(Uri.encode(it)) }
+    releaseYear?.let { append("&y=").append(it) }
+    append("&e=").append(if (isExplicit) 1 else 0)
+    // A bare YouTube id identifies an official-carrier request. SourceResolver
+    // uses this only to turn on the stricter substitution gate; source-backed
+    // tracks keep their own catalogue semantics.
+    if (SourceRegistry.parseTrackKey(videoId) == null) {
+        append("&sv=").append(Uri.encode(videoId))
+    }
 }
 
-fun Song.toMediaItem(): MediaItem {
+fun Song.toMediaItem(albumSequential: Boolean = false): MediaItem {
     val sourceTrack = SourceRegistry.parseTrackKey(videoId)
+    // DefaultMediaSourceFactory chooses Progressive vs DASH before the custom
+    // resolving data source sees the final URL. A queue-prepared TIDAL FLAC
+    // manifest therefore has to advertise DASH on the MediaItem itself.
+    val preparedDash = localUri == null && SourceResolver.preparedLosslessIsDash(this)
     val uriString = localUri ?: when {
         videoId.startsWith("content://") || videoId.startsWith("file://") -> videoId
         // Title, artist and runtime ride along in the URI because they are what
@@ -259,61 +378,123 @@ fun Song.toMediaItem(): MediaItem {
         // current item, so reaching back for the session's metadata isn't an
         // option either.
         sourceTrack != null -> SourceRegistry.trackUri(sourceTrack.first, sourceTrack.second)
-            .let { "$it${matchQuery()}" }
+            .let { "$it${if (preparedDash) "&pl=1" else ""}${matchQuery()}" }
         // The same three fields, for the same reason, on the YouTube path: a
         // source ranked above YouTube gets offered this track before YouTube
         // resolves it — see [SourceResolver.substituteForYouTube] — and that
         // match is made on them, which the loader thread has no other way to
         // reach.
-        else -> "orb://watch?v=$videoId${matchQuery()}"
+        else -> "orb://watch?v=$videoId${if (preparedDash) "&pl=1" else ""}${matchQuery()}"
     }
     return MediaItem.Builder()
         .setMediaId(videoId)
         .setUri(resolvePlaybackUri(uriString, localPath))
-    .setMediaMetadata(
-        MediaMetadata.Builder()
-            .setTitle(title)
-            .setArtist(artist)
-            // Sized here rather than left as stored: this is what the lock
-            // screen, the notification and Android Auto draw, all of them
-            // large, and none of them go back for a better copy later.
-            .setArtworkUri(artworkAt(NOTIFICATION_ART_PX)?.toUri())
-            // System media surfaces (One UI's Now Bar, Android Auto, Assistant)
-            // classify a session by its media type; untyped sessions get treated
-            // as generic audio and lose the music-specific card.
-            .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
-            .setIsPlayable(true)
-            .setIsBrowsable(false)
-            // What a queue entry has to carry about itself: which section of
-            // the queue it belongs to, whether it is playing off the device,
-            // and how long the row that queued it said it runs. The uri two
-            // lines up answers the second question but does not survive the
-            // trip back out — Media3 leaves a MediaItem's localConfiguration
-            // out of the bundle it sends to a MediaController — so without this
-            // a track playing from a file reaches the UI looking like any other
-            // YouTube track, and the player's menu offers to rate, download and
-            // share it.
-            //
-            // Set for every track rather than only the local and AutoPlay ones,
-            // because the runtime applies to all of them: gated on those two, a
-            // plain YouTube track carried no extras at all, so [toSong] read
-            // back a null duration, [LastPlayed] stored a null, and the restored
-            // queue lost the `&d=` its matching depends on.
-            .apply {
-                if (fromAutoplay || localUri != null || durationText != null) {
-                    setExtras(
-                        bundleOf(
-                            EXTRA_FROM_AUTOPLAY to fromAutoplay,
-                            EXTRA_LOCAL_URI to localUri,
-                            EXTRA_LOCAL_PATH to localPath,
-                            EXTRA_DURATION to durationText,
-                        ),
-                    )
+        .apply {
+            if (preparedDash) setMimeType(MimeTypes.APPLICATION_MPD)
+        }
+        .setMediaMetadata(
+            MediaMetadata.Builder()
+                .setTitle(title)
+                .setArtist(artist)
+                // Sized here rather than left as stored: this is what the lock
+                // screen, the notification and Android Auto draw, all of them
+                // large, and none of them go back for a better copy later.
+                .setArtworkUri(artworkAt(NOTIFICATION_ART_PX)?.toUri())
+                // System media surfaces (One UI's Now Bar, Android Auto, Assistant)
+                // classify a session by its media type; untyped sessions get treated
+                // as generic audio and lose the music-specific card.
+                .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
+                .setIsPlayable(true)
+                .setIsBrowsable(false)
+                // What a queue entry has to carry about itself: which section of
+                // the queue it belongs to, whether it is playing off the device,
+                // and how long the row that queued it said it runs. The uri two
+                // lines up answers the second question but does not survive the
+                // trip back out — Media3 leaves a MediaItem's localConfiguration
+                // out of the bundle it sends to a MediaController — so without this
+                // a track playing from a file reaches the UI looking like any other
+                // YouTube track, and the player's menu offers to rate, download and
+                // share it.
+                //
+                // Set for every track rather than only the local and AutoPlay ones,
+                // because the runtime applies to all of them: gated on those two, a
+                // plain YouTube track carried no extras at all, so [toSong] read
+                // back a null duration, [LastPlayed] stored a null, and the restored
+                // queue lost the `&d=` its matching depends on.
+                .apply {
+                    if (
+                        fromAutoplay || queuePinned || localUri != null ||
+                        durationText != null || isExplicit || releaseYear != null || albumId != null ||
+                        albumName != null || albumSequential || sourcePlaylistId != null ||
+                        sourcePlaylistTitle != null || sourcePlaylistArtworkUrl != null
+                    ) {
+                        setExtras(
+                            bundleOf(
+                                EXTRA_FROM_AUTOPLAY to fromAutoplay,
+                                EXTRA_QUEUE_PINNED to queuePinned,
+                                EXTRA_ALBUM_ID to albumId,
+                                EXTRA_ALBUM_NAME to albumName,
+                                EXTRA_SOURCE_PLAYLIST_ID to sourcePlaylistId,
+                                EXTRA_SOURCE_PLAYLIST_TITLE to sourcePlaylistTitle,
+                                EXTRA_SOURCE_PLAYLIST_ARTWORK to sourcePlaylistArtworkUrl,
+                                EXTRA_ALBUM_SEQUENTIAL to albumSequential,
+                                EXTRA_LOCAL_URI to localUri,
+                                EXTRA_LOCAL_PATH to localPath,
+                                EXTRA_DURATION to durationText,
+                                EXTRA_EXPLICIT to isExplicit,
+                                EXTRA_RELEASE_YEAR to (releaseYear ?: 0),
+                            ),
+                        )
+                    }
                 }
-            }
-            .build(),
-    )
-    .build()
+                .build(),
+        )
+        .build()
+}
+
+/**
+ * Manual queue ordering is allowed while the current session is playing in its
+ * explicit queue order. Shuffle is the ownership boundary: once the listener
+ * enables Shuffle (either at launch or from Now Playing), the shuffled session
+ * owns the future order and drag gestures are ignored at the controller
+ * boundary as a second line of defence behind the UI.
+ */
+fun MediaController.moveMediaItemByUser(fromIndex: Int, toIndex: Int) {
+    if (QueueShuffle.enabled.value) return
+    if (fromIndex !in 0 until mediaItemCount || toIndex !in 0 until mediaItemCount) return
+    if (fromIndex == toIndex) return
+    if (fromIndex <= currentMediaItemIndex) return
+    ManualQueuePins.pin(getMediaItemAt(fromIndex).mediaId)
+    moveMediaItem(fromIndex, toIndex)
+}
+
+/**
+ * Removes both playback history still present in Media3's timeline and every
+ * future entry, preserving only the item that is actually current.
+ */
+fun MediaController.clearQueueKeepingCurrent() {
+    val current = currentMediaItemIndex
+    if (current !in 0 until mediaItemCount) return
+    if (mediaItemCount > current + 1) removeMediaItems(current + 1, mediaItemCount)
+    if (current > 0) removeMediaItems(0, current)
+    ManualQueuePins.clear()
+    QueueShuffle.onQueueCleared()
+}
+
+/**
+ * Ends playback and removes the complete timeline, including the current item.
+ *
+ * This is intentionally separate from [clearQueueKeepingCurrent]: the latter is
+ * the queue-sheet action, while this destructive variant is reserved for the
+ * MiniPlayer's explicit horizontal dismissal gesture. Removing the current
+ * item also emits a playlist-change event, which makes an in-flight Automix
+ * bail and tear down its standby deck instead of leaving a transition audible.
+ */
+fun MediaController.clearPlaybackQueue() {
+    stop()
+    clearMediaItems()
+    ManualQueuePins.clear()
+    QueueShuffle.onQueueCleared()
 }
 
 /**
@@ -339,14 +520,31 @@ fun mediaIdIn(uri: Uri): String? = if (uri.authority == "source") {
     uri.getQueryParameter("v")
 }
 
+private fun List<Song>.isOrderedAlbumQueue(): Boolean {
+    if (size < 2) return false
+    val ids = map { it.albumId?.trim().orEmpty() }
+    // Album pages stamp their own browse id onto every row before play. Requiring
+    // that explicit shared id avoids mistaking a playlist containing several
+    // songs from one album for an authored album session.
+    return ids.all { it.isNotEmpty() } && ids.distinct().size == 1
+}
+
 fun MediaController.playSongs(songs: List<Song>, startIndex: Int) {
     if (songs.isEmpty()) return
-    // A queue started while shuffle is on goes in shuffled rather than being
-    // played out of order — see [QueueShuffle]. The track the user picked still
-    // leads, so it ends up at the top instead of at [startIndex].
-    val shuffled = QueueShuffle.enabled.value
+    ManualQueuePins.clear()
+    // Shuffle for a replacement queue is a one-shot launch intent, not an
+    // inherited property of the queue that happened to be playing before it.
+    // Normal Play therefore resets Shuffle; only an album/playlist Shuffle
+    // button (enableForNextQueue) makes this new queue start shuffled.
+    val shuffled = QueueShuffle.consumeForNewQueue()
     val queue = if (shuffled) QueueShuffle.startingOrder(songs, startIndex) else songs
-    setMediaItems(queue.map { it.toMediaItem() }, if (shuffled) 0 else startIndex, 0L)
+    val orderedAlbum = !shuffled && queue.isOrderedAlbumQueue()
+    setMediaItems(
+        queue.map { it.toMediaItem(albumSequential = orderedAlbum) },
+        if (shuffled) 0 else startIndex,
+        0L,
+    )
+    if (shuffled) QueueShuffle.confirmActiveQueueShuffled()
     prepare()
     play()
 }
