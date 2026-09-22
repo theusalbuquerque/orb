@@ -1046,11 +1046,7 @@ class CrossfadeController(
             ?.minus(incomingCueTimeMs)
             ?.coerceAtLeast(0L)
         val incomingCap = remainingIncoming?.let { remaining ->
-            if (render.style == TransitionStyle.INTRO_BED) {
-                (remaining * INTRO_BED_MAX_INCOMING_FRACTION).toLong()
-            } else {
-                remaining / 3
-            }
+            remaining / 3
         } ?: Long.MAX_VALUE
         val span = minOf(fadeMs, incomingCap).coerceAtLeast(1L)
         val elapsed = (player.currentPosition - incomingCueTimeMs).coerceAtLeast(0L)
@@ -1235,7 +1231,6 @@ class CrossfadeController(
     private fun rideFilters(progress: Float) {
         when (render.style) {
             TransitionStyle.DJ_FILTER -> rideFilterSweep(progress)
-            TransitionStyle.INTRO_BED -> rideIntroBedFilters(progress)
             TransitionStyle.DJ_BLEND ->
                 if (render.bassSwap) rideBassSwap(progress) else rideVocalSeparation(progress)
             TransitionStyle.EQ_SWAP -> rideBassSwap(progress)
@@ -1394,54 +1389,6 @@ class CrossfadeController(
      * half, where it is already quiet enough that the change reads as it
      * receding rather than as an effect.
      */
-    /**
-     * Spectral choreography for a long intro bed.
-     *
-     * A stays spectrally open for almost the whole bed. B enters with its low
-     * end held out so it can sit below A without turning the result into a
-     * louder two-song stack. The bass changes hands only around the musical
-     * release, and A's top end recedes only after that point.
-     */
-    private fun rideIntroBedFilters(progress: Float) {
-        val handoff = musicalHandoffFraction()
-        val spanMs = fadeMs.coerceAtLeast(1L).toDouble()
-        val swapWidth = (INTRO_BED_BASS_SWAP_MS / spanMs)
-            .coerceIn(INTRO_BED_MIN_SWAP_FRACTION, INTRO_BED_MAX_SWAP_FRACTION)
-            .toFloat()
-        val swapStart = (handoff - swapWidth * 0.5f).coerceAtLeast(0f)
-        val handover = smoothStep(
-            ((progress - swapStart) / swapWidth).coerceIn(0f, 1f),
-        ).toDouble()
-
-        val clash = render.vocalOverlap.coerceIn(0.0, 1.0)
-        val vocalCorner = glide(
-            INTRO_BED_BASE_HIGH_PASS_HZ,
-            INTRO_BED_CLASH_HIGH_PASS_HZ,
-            clash,
-        )
-        val incomingHighPass = maxOf(
-            bassCutoff(1.0 - handover),
-            glide(vocalCorner, TransitionFilterProcessor.OFF_HZ.toDouble(), handover).toFloat(),
-        )
-
-        val postHandoff = if (progress <= handoff) {
-            0.0
-        } else {
-            smoothStep(
-                ((progress - handoff) / (1f - handoff).coerceAtLeast(0.001f))
-                    .coerceIn(0f, 1f),
-            ).toDouble()
-        }
-        val outgoingLowPass = glide(
-            TransitionFilterProcessor.OPEN_HZ.toDouble(),
-            INTRO_BED_EXIT_LOW_PASS_HZ,
-            postHandoff,
-        ).toFloat()
-
-        filters.incoming(TransitionFilterProcessor.OPEN_HZ, incomingHighPass)
-        filters.outgoing(outgoingLowPass, bassCutoff(handover))
-    }
-
     private fun rideBassSwap(progress: Float) {
         val swapAt = render.bassSwapFraction.coerceIn(0.05, 0.95)
         // 0 before the swap window, 1 after it: how much of the low end has
@@ -1660,8 +1607,6 @@ class CrossfadeController(
     private fun musicalHandoffFraction(): Float {
         val requested = render.handoffFraction.toFloat()
         return when (render.style) {
-            TransitionStyle.INTRO_BED ->
-                requested.coerceIn(0.76f, 0.985f)
             TransitionStyle.DJ_BLEND ->
                 requested.coerceIn(0.50f, 0.92f)
             TransitionStyle.EQ_SWAP ->
@@ -1685,10 +1630,6 @@ class CrossfadeController(
         }
 
         val handoff = musicalHandoffFraction()
-        if (render.style == TransitionStyle.INTRO_BED) {
-            return introBedGainAngle(p, handoff)
-        }
-
         // The server chooses the musical authority handoff. The phone only applies
         // style-specific safety bounds; tempo, gains and bass use the same point.
         val entryAngle = when (render.style) {
@@ -1708,51 +1649,6 @@ class CrossfadeController(
                 ((p - handoff) / (1f - handoff)).coerceIn(0f, 1f),
             )
             entryAngle + (PI.toFloat() / 2f - entryAngle) * takeover
-        }
-    }
-
-    /**
-     * INTRO_BED is a bed, not a fade:
-     *  - establish B around 10% while A remains effectively full scale;
-     *  - hold there through the long opening;
-     *  - lift toward ~20% during the final ~6 seconds before A releases;
-     *  - only then execute the real takeover.
-     */
-    private fun introBedGainAngle(progress: Float, handoff: Float): Float {
-        val spanMs = fadeMs.coerceAtLeast(1L).toFloat()
-        val liftLeadFraction = (INTRO_BED_LIFT_LEAD_MS / spanMs)
-            .coerceIn(INTRO_BED_MIN_LIFT_FRACTION, INTRO_BED_MAX_LIFT_FRACTION)
-        val liftStart = (handoff - liftLeadFraction)
-            .coerceIn(INTRO_BED_BASE_RISE_FRACTION, handoff)
-        val baseRiseEnd = minOf(
-            INTRO_BED_BASE_RISE_FRACTION,
-            (liftStart * 0.5f).coerceAtLeast(0.08f),
-        )
-
-        return when {
-            progress <= baseRiseEnd -> {
-                val amount = smoothStep(
-                    (progress / baseRiseEnd.coerceAtLeast(0.001f)).coerceIn(0f, 1f),
-                )
-                INTRO_BED_BASE_ANGLE * amount
-            }
-            progress < liftStart -> INTRO_BED_BASE_ANGLE
-            progress <= handoff -> {
-                val amount = smoothStep(
-                    ((progress - liftStart) / (handoff - liftStart).coerceAtLeast(0.001f))
-                        .coerceIn(0f, 1f),
-                )
-                INTRO_BED_BASE_ANGLE +
-                    (INTRO_BED_PRE_HANDOFF_ANGLE - INTRO_BED_BASE_ANGLE) * amount
-            }
-            else -> {
-                val takeover = smoothStep(
-                    ((progress - handoff) / (1f - handoff).coerceAtLeast(0.001f))
-                        .coerceIn(0f, 1f),
-                )
-                INTRO_BED_PRE_HANDOFF_ANGLE +
-                    (PI.toFloat() / 2f - INTRO_BED_PRE_HANDOFF_ANGLE) * takeover
-            }
         }
     }
 
@@ -1797,23 +1693,6 @@ class CrossfadeController(
         const val AUTOMIX_BLEND_ENTRY_ANGLE = 0.245f
         const val AUTOMIX_FILTER_ENTRY_ANGLE = 0.18f
         const val AUTOMIX_PHRASE_CUT_ENTRY_ANGLE = 0.06f
-
-        /** Long intro-bed levels: sin(0.10) ~= 10%, sin(0.20) ~= 20%. */
-        const val INTRO_BED_BASE_ANGLE = 0.10f
-        const val INTRO_BED_PRE_HANDOFF_ANGLE = 0.20f
-        const val INTRO_BED_BASE_RISE_FRACTION = 0.18f
-        const val INTRO_BED_LIFT_LEAD_MS = 6_000f
-        const val INTRO_BED_MIN_LIFT_FRACTION = 0.05f
-        const val INTRO_BED_MAX_LIFT_FRACTION = 0.30f
-        const val INTRO_BED_MAX_INCOMING_FRACTION = 0.45
-
-        /** Keep B's low end out during the bed; exchange it only around the release. */
-        const val INTRO_BED_BASS_SWAP_MS = 4_000.0
-        const val INTRO_BED_MIN_SWAP_FRACTION = 0.025
-        const val INTRO_BED_MAX_SWAP_FRACTION = 0.18
-        const val INTRO_BED_BASE_HIGH_PASS_HZ = 120.0
-        const val INTRO_BED_CLASH_HIGH_PASS_HZ = 260.0
-        const val INTRO_BED_EXIT_LOW_PASS_HZ = 2_200.0
 
         /** Ramp used when a fade is interrupted. */
         const val BAIL_MS = 120L
