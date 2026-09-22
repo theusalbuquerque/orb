@@ -128,4 +128,8 @@ object LastPlayed {
     private const val MAX_TRACKS = 60
 
     private const val KEY_QUEUE = "queue"
+    fun clear() {
+        prefs.edit().clear().apply()
+    }
+
 }

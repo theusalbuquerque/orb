@@ -321,6 +321,7 @@ class ModuleSource(
         get() = when (this) {
             is StreamRequest.Lossless -> LOSSLESS
             is StreamRequest.Best -> HIGH
+            is StreamRequest.Aac -> HIGH
             is StreamRequest.Capped -> if (maxKbps <= LOW_CEILING_KBPS) LOW else HIGH
         }
 

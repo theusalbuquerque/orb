@@ -1784,7 +1784,7 @@ class PlaybackService : MediaSessionService() {
         this,
         0,
         Intent(this, MainActivity::class.java)
-            .setAction(MainActivity.ACTION_OPEN_NOW_PLAYING)
+            .setAction(ACTION_OPEN_NOW_PLAYING)
             // MainActivity is singleTask, so this resumes the existing task
             // rather than stacking a second copy of the UI. The custom action
             // tells the Activity that a session/Live Notification tap should
@@ -3782,6 +3782,7 @@ class PlaybackService : MediaSessionService() {
         }
         return runCatching {
             AudioCache.warmRange(uri, 0L, warmBytes)
+            true
         }.onFailure {
             TrackLog.d(
                 "BitChord",
