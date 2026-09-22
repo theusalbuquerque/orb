@@ -100,8 +100,9 @@ data class TrackAnalysis(
      * track nothing has looked at yet has a blank [status], while one whose
      * decode failed is recorded [STATUS_READY] with every field at its default
      * so it is not retried forever. A zero [bpm] is what separates the second
-     * from a real result — and it is also the threshold the policy uses, since
-     * a tempo outside 40–220 drops a pairing to a plain crossfade anyway.
+     * from a real result — and it is also the threshold the policy uses. A
+     * tempo outside 40–220 cannot authorize an Automix operation; it does not
+     * silently turn into Crossfade.
      */
     val isUsable: Boolean get() = status == STATUS_READY && bpm > 0
 
