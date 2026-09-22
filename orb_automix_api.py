@@ -680,27 +680,35 @@ def _trusted_key(track: dict[str, Any]) -> tuple[int, str] | None:
 
 
 def _key_compatibility(a: dict[str, Any], b: dict[str, Any]) -> float:
-    """0..1 harmonic compatibility; unknown keys are deliberately neutral."""
+    """0..1 harmonic-mixing compatibility; unknown keys are deliberately neutral."""
     left = _trusted_key(a)
     right = _trusted_key(b)
     if left is None or right is None:
+        # Neutral enough for a filtered bridge, not high enough for an open blend.
         return 0.55
     li, lm = left
     ri, rm = right
     distance = min((li - ri) % 12, (ri - li) % 12)
+
     if lm and rm and lm != rm:
-        if distance <= 1:
-            return 0.78
+        # Relative major/minor shares the key signature and is the strongest
+        # cross-mode relationship. Parallel major/minor is useful only with a
+        # guarded/filtered transfer, not as an open harmonic blend.
         if distance == 3:
-            return 0.72
-        return 0.18
+            return 0.95
+        if distance == 0:
+            return 0.45
+        return 0.15
+
     if distance == 0:
         return 1.0
-    if distance <= 2:
-        return 0.86
     if distance == 5:
-        return 0.82
-    return 0.20
+        return 0.90
+    if distance == 2:
+        return 0.40
+    if distance == 1:
+        return 0.25
+    return 0.18
 
 
 def _tempo_bridge_rates(a_bpm: float, b_bpm: float) -> tuple[float, float]:
