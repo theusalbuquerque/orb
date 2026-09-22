@@ -271,6 +271,7 @@ class CrossfadeController(
         val bassSwapFraction: Double = 0.7,
         val filterSweep: Double = 0.0,
         val vocalOverlap: Double = 0.0,
+        val gainEnvelope: List<TransitionGainPoint> = emptyList(),
         /** Preserve the public Automix 2.0 gain/tempo choreography. */
         val legacy20: Boolean = false,
     )
@@ -786,6 +787,7 @@ class CrossfadeController(
                 bassSwapFraction = plan.bassSwapFraction,
                 filterSweep = plan.filterSweep,
                 vocalOverlap = plan.vocalOverlap,
+                gainEnvelope = plan.gainEnvelope,
             ),
         )
     }
@@ -1128,8 +1130,23 @@ class CrossfadeController(
         val incomingCap = remainingIncoming?.let { remaining ->
             remaining / 3
         } ?: Long.MAX_VALUE
-        val span = minOf(fadeMs, incomingCap).coerceAtLeast(1L)
-        val elapsed = (player.currentPosition - incomingCueTimeMs).coerceAtLeast(0L)
+        val longArrangementMix =
+            render.style == TransitionStyle.RUNWAY_BLEND ||
+                render.style == TransitionStyle.PHRASE_TAKEOVER
+        val span = if (longArrangementMix) {
+            fadeMs.coerceAtLeast(1L)
+        } else {
+            minOf(fadeMs, incomingCap).coerceAtLeast(1L)
+        }
+        val transitionStartMs = (fadeEndMs - fadeMs).coerceAtLeast(0L)
+        val elapsed = if (smartFadeActive && !render.legacy20) {
+            // 2.5 plans are authored in A's media timeline. This remains correct
+            // while B is time-stretched and keeps the curve-aligned handoff on
+            // the exact outgoing beat/phrase selected by the server.
+            (out.currentPosition - transitionStartMs).coerceAtLeast(0L)
+        } else {
+            (player.currentPosition - incomingCueTimeMs).coerceAtLeast(0L)
+        }
         val progress = (elapsed.toFloat() / span).coerceIn(0f, 1f)
 
         if (render.legacy20) {
@@ -1317,6 +1334,14 @@ class CrossfadeController(
      */
     private fun rideFilters(progress: Float) {
         when (render.style) {
+            TransitionStyle.RUNWAY_BLEND ->
+                when {
+                    render.bassSwap -> rideBassSwap(progress)
+                    render.filterSweep > 0.0 -> rideFilterSweep(progress)
+                    else -> rideVocalSeparation(progress)
+                }
+            TransitionStyle.PHRASE_TAKEOVER ->
+                if (render.filterSweep > 0.0) rideFilterSweep(progress) else rideVocalSeparation(progress)
             TransitionStyle.DJ_FILTER -> rideFilterSweep(progress)
             TransitionStyle.DJ_BLEND ->
                 if (render.bassSwap) rideBassSwap(progress) else rideVocalSeparation(progress)
@@ -1540,7 +1565,9 @@ class CrossfadeController(
      * did before Automix existed and would be a lie to advertise.
      */
     private fun isRealMix(): Boolean = smartFadeActive && (
-        render.style == TransitionStyle.DJ_BLEND ||
+        render.style == TransitionStyle.RUNWAY_BLEND ||
+            render.style == TransitionStyle.PHRASE_TAKEOVER ||
+            render.style == TransitionStyle.DJ_BLEND ||
             render.style == TransitionStyle.DJ_FILTER ||
             render.style == TransitionStyle.EQ_SWAP ||
             render.style == TransitionStyle.PHRASE_CUT ||
@@ -1636,6 +1663,8 @@ class CrossfadeController(
         into: ExoPlayer,
     ): Double {
         val beatMatchedStyle = when (render.style) {
+            TransitionStyle.RUNWAY_BLEND,
+            TransitionStyle.PHRASE_TAKEOVER,
             TransitionStyle.DJ_BLEND,
             TransitionStyle.DJ_FILTER,
             TransitionStyle.EQ_SWAP -> true
@@ -1684,15 +1713,44 @@ class CrossfadeController(
      * timing rather than a loudness bump: Automix is not allowed to become a
      * louder two-song pile-up just to avoid sounding like Crossfade.
      */
+    private fun envelopeGains(progress: Float): Pair<Float, Float>? {
+        val points = render.gainEnvelope
+            .filter { it.progress.isFinite() && it.incomingGain.isFinite() && it.outgoingGain.isFinite() }
+            .sortedBy { it.progress }
+        if (points.isEmpty()) return null
+        val p = progress.coerceIn(0f, 1f).toDouble()
+        if (p <= points.first().progress) {
+            return points.first().incomingGain.toFloat().coerceIn(0f, 1f) to
+                points.first().outgoingGain.toFloat().coerceIn(0f, 1f)
+        }
+        if (p >= points.last().progress) {
+            return points.last().incomingGain.toFloat().coerceIn(0f, 1f) to
+                points.last().outgoingGain.toFloat().coerceIn(0f, 1f)
+        }
+        val rightIndex = points.indexOfFirst { it.progress >= p }.coerceAtLeast(1)
+        val left = points[rightIndex - 1]
+        val right = points[rightIndex]
+        val span = (right.progress - left.progress).coerceAtLeast(1e-6)
+        val amount = ((p - left.progress) / span).coerceIn(0.0, 1.0)
+        fun lerp(a: Double, b: Double): Float =
+            (a + (b - a) * amount).toFloat().coerceIn(0f, 1f)
+        return lerp(left.incomingGain, right.incomingGain) to
+            lerp(left.outgoingGain, right.outgoingGain)
+    }
+
     private fun incomingGain(progress: Float): Float =
-        sin(gainAngle(progress))
+        envelopeGains(progress)?.first ?: sin(gainAngle(progress))
 
     private fun outgoingGain(progress: Float): Float =
-        cos(gainAngle(progress))
+        envelopeGains(progress)?.second ?: cos(gainAngle(progress))
 
     private fun musicalHandoffFraction(): Float {
         val requested = render.handoffFraction.toFloat()
         return when (render.style) {
+            TransitionStyle.RUNWAY_BLEND ->
+                requested.coerceIn(0.30f, 0.92f)
+            TransitionStyle.PHRASE_TAKEOVER ->
+                requested.coerceIn(0.35f, 0.88f)
             TransitionStyle.DJ_BLEND ->
                 requested.coerceIn(0.50f, 0.92f)
             TransitionStyle.EQ_SWAP ->
@@ -1719,6 +1777,8 @@ class CrossfadeController(
         // The server chooses the musical authority handoff. The phone only applies
         // style-specific safety bounds; tempo, gains and bass use the same point.
         val entryAngle = when (render.style) {
+            TransitionStyle.RUNWAY_BLEND -> AUTOMIX_RUNWAY_ENTRY_ANGLE
+            TransitionStyle.PHRASE_TAKEOVER -> AUTOMIX_TAKEOVER_ENTRY_ANGLE
             TransitionStyle.DJ_BLEND,
             TransitionStyle.EQ_SWAP -> AUTOMIX_BLEND_ENTRY_ANGLE
             TransitionStyle.DJ_FILTER -> AUTOMIX_FILTER_ENTRY_ANGLE
@@ -1776,6 +1836,8 @@ class CrossfadeController(
          * Angles on the constant-power circle at the pre-handoff plateau.
          * sin(0.245) ~= 0.24 (-12.3 dB); sin(0.18) ~= 0.18 (-14.9 dB).
          */
+        const val AUTOMIX_RUNWAY_ENTRY_ANGLE = 0.12f
+        const val AUTOMIX_TAKEOVER_ENTRY_ANGLE = 0.22f
         const val AUTOMIX_BLEND_ENTRY_ANGLE = 0.245f
         const val AUTOMIX_FILTER_ENTRY_ANGLE = 0.18f
         const val AUTOMIX_PHRASE_CUT_ENTRY_ANGLE = 0.06f
