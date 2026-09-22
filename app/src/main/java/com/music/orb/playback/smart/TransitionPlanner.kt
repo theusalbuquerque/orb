@@ -107,6 +107,12 @@ enum class TransitionStyle {
     /** Beat/key-aligned blend; may exchange the low end at the structural handoff. */
     DJ_BLEND,
 
+    /**
+     * Long, low-gain instrumental opening of B laid under A so B's first real
+     * impact lands at A's release/end. Deliberately not a long crossfade.
+     */
+    INTRO_BED,
+
     /** Beat-aware filtered bridge when the pair should not stay spectrally open. */
     DJ_FILTER,
 
