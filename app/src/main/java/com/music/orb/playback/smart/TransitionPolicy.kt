@@ -48,8 +48,8 @@ import kotlin.math.min
 const val MIN_BEATMATCH_CONFIDENCE = 0.55
 
 /**
- * Below this on both tracks, even the DJ-assisted crossfade (beat-quantized
- * anchors, EQ handoff) is off the table and the mix degrades to a plain fade.
+ * Below this on both tracks, even DJ-assisted timing is not trustworthy.
+ * Automix then declines to mix instead of disguising uncertainty as a crossfade.
  */
 const val MIN_DJ_CONFIDENCE = 0.2
 
@@ -57,8 +57,14 @@ const val MIN_DJ_CONFIDENCE = 0.2
 const val MIN_BPM = 40.0
 const val MAX_BPM = 220.0
 
-/** How far a tempo pairing may drift from unity and still be considered transparent to stretch. */
-const val MAX_STRETCH_DEVIATION = 0.04
+/**
+ * Maximum total tempo distance for a beatmatched pair.
+ *
+ * The renderer now splits the correction across both decks around a meeting
+ * tempo, so an 8% pair distance costs roughly 4% per side rather than forcing
+ * the whole correction onto B.
+ */
+const val MAX_STRETCH_DEVIATION = 0.08
 
 /**
  * A vocal-activity mask value at or above this counts as singing. A fallback
@@ -441,12 +447,12 @@ fun assessTransitionTier(
     if (outgoingBpm < MIN_BPM || outgoingBpm > MAX_BPM) reasons += "outgoing-tempo"
     if (incomingBpm < MIN_BPM || incomingBpm > MAX_BPM) reasons += "incoming-tempo"
     if (reasons.isNotEmpty()) {
-        return TransitionPolicyVerdict(TransitionTier.PLAIN_CROSSFADE, reasons, floorConfidence)
+        return TransitionPolicyVerdict(TransitionTier.NO_TRANSITION, reasons, floorConfidence)
     }
 
     if (outgoingConfidence < MIN_DJ_CONFIDENCE && incomingConfidence < MIN_DJ_CONFIDENCE) {
         return TransitionPolicyVerdict(
-            TransitionTier.PLAIN_CROSSFADE,
+            TransitionTier.NO_TRANSITION,
             listOf("beat-confidence"),
             floorConfidence,
         )
