@@ -1017,7 +1017,6 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     b_vocal = _vocal_curve(b)
     b_energy = _curve(b, "energyCurve")
     a_vocal_curve = _vocal_curve(a)
-    a_energy = _curve(a, "energyCurve")
 
     b_open_end = min(b_end if b_end > 0 else b_start + 8.0, b_start + 8.0)
     b_open_vocal = _mean_window(b_vocal, b_start, b_open_end, _finite(b.get("vocalProbability"), 0.5))
