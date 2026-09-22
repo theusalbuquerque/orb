@@ -1793,14 +1793,58 @@ def _best_structural_pair(
         )
 
         for cue, b_structure, b_kind in incoming:
+            # Tempo is evaluated at the *actual overlap*, not only at the track head/tail.
+            # This follows drift/live edits and chooses a meeting rate from the local curves.
+            a_local_bpm, a_local_conf = _tempo_near(
+                a,
+                a_start + actual_span * 0.50,
+                outgoing_bpm,
+            )
+            b_probe_time = cue + min(actual_span * 0.50, max(0.0, b_end - cue))
+            b_local_bpm, b_local_conf = _tempo_near(b, b_probe_time, incoming_bpm)
+            if a_local_bpm > 0.0 and b_local_bpm > 0.0:
+                while b_local_bpm / a_local_bpm > 1.5:
+                    b_local_bpm /= 2.0
+                while b_local_bpm / a_local_bpm < 0.67:
+                    b_local_bpm *= 2.0
+            local_tempo_fit = (
+                _clamp(1.0 - abs(b_local_bpm / a_local_bpm - 1.0) / 0.14, 0.0, 1.0)
+                if a_local_bpm > 0.0 and b_local_bpm > 0.0
+                else 0.0
+            )
+            local_out_rate, local_in_rate = _tempo_bridge_rates(a_local_bpm, b_local_bpm)
+            if local_out_rate == 1.0 and local_in_rate == 1.0 and incoming_rate != 1.0:
+                # No trustworthy local curve: retain the transition-level bridge.
+                local_in_rate = incoming_rate
+
             vocal_clash, energy_fit = _overlap_pair_metrics(
                 a,
                 b,
                 a_start,
                 a_end,
                 cue,
-                incoming_rate,
+                local_in_rate,
             )
+            curve_metrics = _transition_curve_metrics(
+                a,
+                b,
+                a_start,
+                a_end,
+                cue,
+                local_out_rate,
+                local_in_rate,
+            )
+            phase_fit, phase_error_ms = _beat_phase_metrics(
+                a,
+                b,
+                a_start,
+                cue,
+                a_local_bpm,
+                b_local_bpm,
+                local_out_rate,
+                local_in_rate,
+            )
+
             skipped = max(0.0, cue - b_start)
             skip_penalty = _clamp((skipped - 8.0) / 24.0, 0.0, 1.0)
             cue_proximity = 1.0 - _clamp(
@@ -1809,7 +1853,7 @@ def _best_structural_pair(
                 1.0,
             )
             phrase_pair_bonus = 1.0 if a_kind == "phrase" and b_kind == "phrase" else 0.0
-            pair_score = (
+            base_pair_score = (
                 0.18 * a_structure
                 + 0.18 * b_structure
                 + 0.24 * (1.0 - vocal_clash)
@@ -1819,6 +1863,17 @@ def _best_structural_pair(
                 + 0.07 * phrase_pair_bonus
                 - 0.16 * skip_penalty
             )
+            pair_score = base_pair_score
+            if bool(curve_metrics.get("evidence")):
+                pair_score = (
+                    0.68 * base_pair_score
+                    + 0.20 * float(curve_metrics.get("compatibility", 0.5))
+                    + 0.07 * phase_fit
+                    + 0.05 * local_tempo_fit
+                )
+            elif isinstance(a.get("beats"), list) and isinstance(b.get("beats"), list):
+                pair_score = 0.90 * base_pair_score + 0.10 * phase_fit
+
             if pair_score <= best_score:
                 continue
 
@@ -1842,6 +1897,22 @@ def _best_structural_pair(
                 "releaseFraction": release_fraction,
                 "outgoingAnchor": a_kind,
                 "incomingAnchor": b_kind,
+                "outgoingBpm": a_local_bpm,
+                "incomingBpm": b_local_bpm,
+                "outgoingRate": local_out_rate,
+                "incomingRate": local_in_rate,
+                "localTempoFit": local_tempo_fit,
+                "tempoCurveConfidence": min(a_local_conf, b_local_conf),
+                "beatPhaseFit": phase_fit,
+                "beatPhaseErrorMs": phase_error_ms,
+                "curveCompatibility": float(curve_metrics.get("compatibility", 0.5)),
+                "curveEvidence": bool(curve_metrics.get("evidence")),
+                "onsetCurveFit": float(curve_metrics.get("onsetFit", 0.5)),
+                "harmonicCurveFit": float(curve_metrics.get("harmonicFit", 0.5)),
+                "spectralCurveFit": float(curve_metrics.get("spectralFit", 0.5)),
+                "energyShapeFit": float(curve_metrics.get("energyShapeFit", 0.5)),
+                "lowBandCollision": float(curve_metrics.get("lowCollision", 0.0)),
+                "brightnessGap": float(curve_metrics.get("brightnessGap", 0.0)),
             }
 
     return best
