@@ -1,6 +1,7 @@
 name: Package Orb ZIP
 
 on:
+  workflow_dispatch:
   push:
     paths:
       - ".github/workflows/package-orb.yml"
