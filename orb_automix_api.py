@@ -599,6 +599,7 @@ async def health() -> dict[str, Any]:
         "version": API_VERSION,
         "automixVersion": "2.5",
         "analyzer": "orb-remote-dsp-v6",
+        "plannerRevision": "mix-v2",
     }
 
 
@@ -1818,7 +1819,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     best["outgoingTransitionBpm"] = round(a_bpm, 4)
     best["incomingTransitionBpm"] = round(b_bpm, 4)
     best["tempoCompatibility"] = round(tempo, 4)
-    best["planner"] = "orb-automix-2.5"
+    best["planner"] = "orb-automix-2.5-mix-v2"
     best["serverAuthoritative"] = True
     return best, candidates[:5]
 
@@ -1841,7 +1842,7 @@ async def plan(request: PlanRequest) -> dict[str, Any]:
     # minimal fallback is selected here on the server; Android may only reject impossible bounds.
     plan_result = dict(plan_result)
     plan_result["serverAuthoritative"] = True
-    plan_result["planner"] = "orb-automix-2.5"
+    plan_result["planner"] = "orb-automix-2.5-mix-v2"
     return {
         "version": API_VERSION,
         "automixVersion": "2.5",
