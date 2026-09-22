@@ -2130,6 +2130,17 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                 pair_fit = float(pair["pairScore"])
                 actual_beats = int(round(float(pair["actualBeats"])))
                 release_fraction = float(pair["releaseFraction"])
+                local_tempo_fit = float(pair.get("localTempoFit", tempo))
+                curve_fit = float(pair.get("curveCompatibility", 0.5))
+                curve_evidence = bool(pair.get("curveEvidence", False))
+                onset_curve_fit = float(pair.get("onsetCurveFit", 0.5))
+                harmonic_curve_fit = float(pair.get("harmonicCurveFit", 0.5))
+                spectral_curve_fit = float(pair.get("spectralCurveFit", 0.5))
+                phase_fit = float(pair.get("beatPhaseFit", 0.5))
+                phase_error_ms = float(pair.get("beatPhaseErrorMs", 0.0))
+                local_out_rate = float(pair.get("outgoingRate", bridge_out_rate))
+                local_in_rate = float(pair.get("incomingRate", bridge_in_rate))
+                low_collision = float(pair.get("lowBandCollision", 0.0))
 
                 style = requested_style
                 # A flat blend with real vocal-on-vocal collision is demoted to a filtered
@@ -2138,6 +2149,15 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                 if style == "DJ_BLEND" and overlap_vocal_clash >= 0.58:
                     style = "DJ_FILTER" if filter_ok and overlap_vocal_clash < 0.74 else None
                 elif style == "DJ_FILTER" and overlap_vocal_clash >= 0.74:
+                    style = None
+
+                # Global key labels can look compatible while the actual chords at the join are
+                # not. Curve-aware 2.5 therefore demotes an open blend when the local chroma
+                # trajectory disagrees, and rejects a beatmatched overlap when its transient
+                # contours cannot be phase-locked.
+                if curve_evidence and style == "DJ_BLEND" and harmonic_curve_fit < 0.42:
+                    style = "DJ_FILTER" if filter_ok and harmonic_curve_fit >= 0.24 else None
+                if curve_evidence and style is not None and onset_curve_fit < 0.30 and phase_fit < 0.45:
                     style = None
 
                 minimum_beats = 8 if style == "DJ_BLEND" else 4
@@ -2149,11 +2169,13 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                     and phrase_fit >= minimum_structure
                 ):
                     score = (
-                        0.15 + 0.20 * tempo + 0.12 * conf + 0.18 * key_fit
-                        + 0.11 * (1.0 - overlap_vocal_clash)
-                        + 0.08 * phrase_fit
-                        + 0.06 * energy_fit
+                        0.12 + 0.14 * local_tempo_fit + 0.09 * conf + 0.14 * key_fit
+                        + 0.10 * (1.0 - overlap_vocal_clash)
+                        + 0.07 * phrase_fit
+                        + 0.05 * energy_fit
                         + 0.10 * pair_fit
+                        + 0.08 * phase_fit
+                        + (0.11 * curve_fit if curve_evidence else 0.0)
                     )
                     if protected and style == "DJ_BLEND":
                         score -= 0.16
@@ -2165,8 +2187,8 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                         transitionEnd=round(a_end, 4),
                         incomingCueTime=round(cue, 4),
                         incomingHandoffTime=round(cue, 4),
-                        outgoingPlaybackRate=round(bridge_out_rate, 5),
-                        incomingPlaybackRate=round(bridge_in_rate, 5),
+                        outgoingPlaybackRate=round(local_out_rate, 5),
+                        incomingPlaybackRate=round(local_in_rate, 5),
                         transitionBeats=actual_beats,
                         requestedTransitionBeats=target_beats,
                         handoffFraction=round(
@@ -2186,7 +2208,17 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                             ),
                             4,
                         ),
-                        filterSweep=0.0 if style == "DJ_BLEND" else 0.72,
+                        filterSweep=(
+                            0.0
+                            if style == "DJ_BLEND"
+                            else round(_clamp(
+                                0.58
+                                + 0.24 * (1.0 - spectral_curve_fit)
+                                + 0.18 * low_collision,
+                                0.58,
+                                0.96,
+                            ), 4)
+                        ),
                         keyCompatibility=round(key_fit, 4),
                         tempoCompatibility=round(tempo, 4),
                         phraseAlignment=round(phrase_fit, 4),
@@ -2196,6 +2228,15 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                         spanCompatibility=round(span_fit, 4),
                         outgoingAnchor=str(pair["outgoingAnchor"]),
                         incomingAnchor=str(pair["incomingAnchor"]),
+                        curveCompatibility=round(curve_fit, 4),
+                        onsetCurveFit=round(onset_curve_fit, 4),
+                        harmonicCurveFit=round(harmonic_curve_fit, 4),
+                        spectralCurveFit=round(spectral_curve_fit, 4),
+                        beatPhaseFit=round(phase_fit, 4),
+                        beatPhaseErrorMs=round(phase_error_ms, 2),
+                        localTempoCompatibility=round(local_tempo_fit, 4),
+                        outgoingLocalBpm=round(float(pair.get("outgoingBpm", a_bpm)), 4),
+                        incomingLocalBpm=round(float(pair.get("incomingBpm", b_bpm)), 4),
                         gainEnvelope=[],
                     ))
 
