@@ -245,6 +245,10 @@ class CrossfadeController(
     private var tempoPreRollProgress = 1f
     private var tempoPreRollTooLate = false
 
+    /** Largest absolute deck-phase error observed during this transition. */
+    private var phaseLockPeakErrorMs = 0.0
+    private var phaseLockLogged = false
+
     /**
      * The style-specific half of the plan in flight — everything [rideFilters]
      * needs and nothing else. Fixed when the transition begins, because a plan
@@ -845,6 +849,8 @@ class CrossfadeController(
         tempoPreRollEndPositionMs = C.TIME_UNSET
         tempoPreRollProgress = if (abs(outgoingRate - 1.0) <= TEMPO_RATE_EPSILON) 1f else 0f
         tempoPreRollTooLate = false
+        phaseLockPeakErrorMs = 0.0
+        phaseLockLogged = false
         render = renderStyle
         armDeadline = SystemClock.elapsedRealtime() + ARM_TIMEOUT_MS
         handedOff = false
@@ -1129,6 +1135,9 @@ class CrossfadeController(
             settledAt = SystemClock.elapsedRealtime()
         }
         AppSettings.smartMixInProgress.value = false
+        if (phaseLockPeakErrorMs > 0.0) {
+            Log.d(TAG, "phase lock peak=${"%.1f".format(phaseLockPeakErrorMs)}ms")
+        }
         // Unconditional and idempotent, like the speed reset below: correct
         // whether or not this transition ever filtered anything.
         filters.open()
@@ -1167,6 +1176,8 @@ class CrossfadeController(
         tempoPreRollEndPositionMs = C.TIME_UNSET
         tempoPreRollProgress = 1f
         tempoPreRollTooLate = false
+        phaseLockPeakErrorMs = 0.0
+        phaseLockLogged = false
         phase = Phase.IDLE
     }
 
@@ -1496,7 +1507,7 @@ class CrossfadeController(
      * time-stretch processor.
      */
     private fun rideTempoBridge(progress: Float, out: ExoPlayer, into: ExoPlayer) {
-        val base = AppSettings.playbackSpeed.value.toDouble()
+        val base = AppSettings.playbackSpeed.value.toDouble().coerceAtLeast(0.01)
         val handoff = musicalHandoffFraction()
         val releaseStart = maxOf(TEMPO_RELEASE_MIN, (handoff + 0.06f).coerceAtMost(0.92f))
         val release = smoothStep(
@@ -1504,8 +1515,67 @@ class CrossfadeController(
         ).toDouble()
 
         out.setPlaybackSpeed((base * outgoingPlaybackRate).toFloat())
-        val inRate = incomingPlaybackRate + (1.0 - incomingPlaybackRate) * release
-        into.setPlaybackSpeed((base * inRate).toFloat())
+
+        val nominalIncomingRate =
+            incomingPlaybackRate + (1.0 - incomingPlaybackRate) * release
+        val phaseCorrection = phaseLockCorrection(
+            progress = progress,
+            releaseStart = releaseStart,
+            baseRate = base,
+            out = out,
+            into = into,
+        )
+        val correctedIncomingRate = (nominalIncomingRate * (1.0 + phaseCorrection))
+            .coerceIn(PHASE_LOCK_MIN_RATE, PHASE_LOCK_MAX_RATE)
+        into.setPlaybackSpeed((base * correctedIncomingRate).toFloat())
+    }
+
+    /**
+     * A bounded PLL for the first part of a real DJ overlap.
+     *
+     * Both decks are already at the same musical tempo; this only removes the
+     * residual *phase* error caused by player start latency and scheduler
+     * granularity. No seek is performed. A late B is sped up very slightly, an
+     * early B slowed very slightly, and the correction disappears before the
+     * post-handoff return to B's native tempo.
+     */
+    private fun phaseLockCorrection(
+        progress: Float,
+        releaseStart: Float,
+        baseRate: Double,
+        out: ExoPlayer,
+        into: ExoPlayer,
+    ): Double {
+        val beatMatchedStyle = when (render.style) {
+            TransitionStyle.DJ_BLEND,
+            TransitionStyle.DJ_FILTER,
+            TransitionStyle.EQ_SWAP -> true
+            else -> false
+        }
+        if (!smartFadeActive || !beatMatchedStyle || progress >= releaseStart) return 0.0
+
+        val transitionStartMs = (fadeEndMs - fadeMs).coerceAtLeast(0L)
+        val outMediaElapsed = (out.currentPosition - transitionStartMs).coerceAtLeast(0L).toDouble()
+        val inMediaElapsed = (into.currentPosition - incomingCueTimeMs).coerceAtLeast(0L).toDouble()
+
+        val outElapsedMs = outMediaElapsed / (baseRate * outgoingPlaybackRate).coerceAtLeast(0.01)
+        val inElapsedMs = inMediaElapsed / (baseRate * incomingPlaybackRate).coerceAtLeast(0.01)
+        val errorMs = inElapsedMs - outElapsedMs
+        phaseLockPeakErrorMs = maxOf(phaseLockPeakErrorMs, abs(errorMs))
+
+        if (!phaseLockLogged && progress >= PHASE_LOCK_LOG_PROGRESS) {
+            phaseLockLogged = true
+            Log.d(
+                TAG,
+                "phase lock initial=${"%.1f".format(errorMs)}ms " +
+                    "peak=${"%.1f".format(phaseLockPeakErrorMs)}ms",
+            )
+        }
+
+        if (abs(errorMs) <= PHASE_LOCK_DEADBAND_MS) return 0.0
+
+        return (-errorMs / PHASE_LOCK_CAPTURE_MS)
+            .coerceIn(-PHASE_LOCK_MAX_DELTA, PHASE_LOCK_MAX_DELTA)
     }
 
     private fun smoothStep(value: Float): Float {
@@ -1610,6 +1680,14 @@ class CrossfadeController(
 
         /** Never release B back to native tempo before this point of the overlap. */
         const val TEMPO_RELEASE_MIN = 0.66f
+
+        /** Small phase PLL: enough to erase scheduler/start latency, never enough to sound warped. */
+        const val PHASE_LOCK_CAPTURE_MS = 1_800.0
+        const val PHASE_LOCK_MAX_DELTA = 0.012
+        const val PHASE_LOCK_DEADBAND_MS = 3.0
+        const val PHASE_LOCK_MIN_RATE = 0.95
+        const val PHASE_LOCK_MAX_RATE = 1.05
+        const val PHASE_LOCK_LOG_PROGRESS = 0.08f
 
         /**
          * Angles on the constant-power circle at the pre-handoff plateau.
