@@ -56,6 +56,57 @@ def track(
     }
 
 
+def add_curve_analysis(
+    item: dict,
+    *,
+    pitch_class: int = 0,
+    onset_shift: int = 0,
+    local_bpm: float | None = None,
+) -> dict:
+    duration = int(item["duration"])
+    beats = []
+    beat = 60.0 / float(item["bpm"])
+    t = 0.0
+    while t <= duration:
+        beats.append(round(t, 6))
+        t += beat
+    item["beats"] = beats
+    item["analysisSchema"] = automix.ANALYSIS_SCHEMA
+
+    mid = []
+    high = []
+    bright = []
+    onset = []
+    chroma = []
+    for second in range(duration + 1):
+        phase = (second + onset_shift) % 8
+        mid.append({"time": float(second), "energy": 0.45 + 0.18 * (phase / 7.0)})
+        high.append({"time": float(second), "energy": 0.22 + 0.12 * ((7 - phase) / 7.0)})
+        bright.append({"time": float(second), "energy": 0.38 + 0.08 * (phase / 7.0)})
+        onset.append({"time": float(second), "energy": 1.0 if phase in {0, 4} else 0.08})
+        vector = [0.01] * 12
+        vector[pitch_class % 12] = 0.70
+        vector[(pitch_class + 4) % 12] = 0.16
+        vector[(pitch_class + 7) % 12] = 0.08
+        total = sum(vector)
+        chroma.append({
+            "time": float(second),
+            "chroma": [value / total for value in vector],
+        })
+    item["midEnergyCurve"] = mid
+    item["highEnergyCurve"] = high
+    item["brightnessCurve"] = bright
+    item["onsetCurve"] = onset
+    item["chromaCurve"] = chroma
+
+    bpm_value = float(local_bpm if local_bpm is not None else item["bpm"])
+    item["tempoCurve"] = [
+        {"time": float(t), "bpm": bpm_value, "confidence": 0.90}
+        for t in range(0, duration + 1, 6)
+    ]
+    return item
+
+
 class AutomixPlannerTest(unittest.TestCase):
     def test_automix_25_server_rejects_missing_entitlement(self) -> None:
         request = automix.PlanRequest(
@@ -147,6 +198,67 @@ class AutomixPlannerTest(unittest.TestCase):
         self.assertTrue(merged["phraseBoundaries"])
         self.assertTrue(merged["energyCurve"])
 
+
+    def test_curve_metrics_reward_harmonic_and_transient_alignment(self) -> None:
+        a = add_curve_analysis(track(bpm=128.0, key="C major"), pitch_class=0)
+        b = add_curve_analysis(track(bpm=128.0, key="C major"), pitch_class=0)
+
+        aligned = automix._transition_curve_metrics(a, b, 104.0, 112.0, 0.0, 1.0, 1.0)
+
+        shifted = add_curve_analysis(track(bpm=128.0, key="C major"), pitch_class=6, onset_shift=2)
+        misaligned = automix._transition_curve_metrics(a, shifted, 104.0, 112.0, 0.0, 1.0, 1.0)
+
+        self.assertTrue(aligned["evidence"])
+        self.assertGreater(float(aligned["harmonicFit"]), 0.90)
+        self.assertGreater(float(aligned["onsetFit"]), 0.80)
+        self.assertGreater(float(aligned["compatibility"]), float(misaligned["compatibility"]) + 0.15)
+
+    def test_structural_pair_uses_local_tempo_curve_at_join(self) -> None:
+        a = add_curve_analysis(track(bpm=120.0, key="C major"), pitch_class=0, local_bpm=128.0)
+        b = add_curve_analysis(track(bpm=140.0, key="C major"), pitch_class=0, local_bpm=130.0)
+
+        pair = automix._best_structural_pair(
+            a,
+            b,
+            116.0,
+            120.0,
+            0.0,
+            120.0,
+            0.0,
+            16,
+            120.0,
+            140.0,
+            1.0,
+        )
+
+        self.assertIsNotNone(pair)
+        assert pair is not None
+        self.assertAlmostEqual(float(pair["outgoingBpm"]), 128.0, delta=0.5)
+        self.assertAlmostEqual(float(pair["incomingBpm"]), 130.0, delta=0.5)
+        self.assertGreater(float(pair["localTempoFit"]), 0.85)
+        self.assertGreater(float(pair["beatPhaseFit"]), 0.80)
+
+    def test_spectral_feature_bundle_exposes_timbre_and_chroma(self) -> None:
+        sample_count = int(automix.SAMPLE_RATE * 2.0)
+        time = np.arange(sample_count, dtype=np.float32) / float(automix.SAMPLE_RATE)
+        audio = (
+            0.55 * np.sin(2.0 * np.pi * 130.8128 * time)
+            + 0.30 * np.sin(2.0 * np.pi * 261.6256 * time)
+            + 0.15 * np.sin(2.0 * np.pi * 1046.502 * time)
+        ).astype(np.float32)
+        frame = max(1024, int(0.50 * automix.SAMPLE_RATE))
+        frames = automix._frame_signal(audio, frame, frame)
+
+        low, mid, high, brightness, chroma = automix._spectral_transition_features(frames)
+
+        self.assertEqual(low.shape[0], frames.shape[0])
+        self.assertEqual(mid.shape, low.shape)
+        self.assertEqual(high.shape, low.shape)
+        self.assertEqual(brightness.shape, low.shape)
+        self.assertEqual(chroma.shape, (frames.shape[0], 12))
+        self.assertTrue(np.all(brightness >= 0.0))
+        self.assertTrue(np.all(brightness <= 1.0))
+        self.assertGreater(float(np.mean(chroma[:, 0])), 0.20)
 
     def test_downbeat_phase_follows_recurring_accents(self) -> None:
         hop = 0.10
