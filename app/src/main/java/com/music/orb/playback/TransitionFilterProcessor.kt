@@ -1,6 +1,7 @@
 package com.music.orb.playback
 
 import android.util.Log
+import android.os.SystemClock
 import androidx.media3.common.C
 import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.audio.BaseAudioProcessor
@@ -10,6 +11,7 @@ import kotlin.math.exp
 import kotlin.math.ln
 import kotlin.math.min
 import kotlin.math.tan
+import kotlin.math.sqrt
 
 /**
  * The filter a track rides through a Automix transition: a low-pass that can
@@ -67,8 +69,42 @@ class TransitionFilterProcessor : BaseAudioProcessor() {
     @Volatile
     private var targetHighPassHz: Float = OFF_HZ
 
+    private data class Level(val rms: Float, val atMs: Long)
+    @Volatile private var level: Level? = null
+    private var meanSquare = 0.0
+
+    /** Decoder output after EQ/filter, before the player fader; never proof of device output. */
+    fun recentRms(): Float? = level?.takeIf {
+        SystemClock.elapsedRealtime() - it.atMs in 0L..1500L
+    }?.rms
+
+    private fun measure(buffer: java.nio.ByteBuffer, frames: Int) {
+        val samples = buffer.duplicate().order(ByteOrder.nativeOrder())
+        var sum = 0.0
+        var count = 0
+        // Sample every fourth frame, all channels. Do not consume/modify audio bytes.
+        val stride = bytesPerSample * channelCount * 4
+        var frame = samples.position()
+        while (frame + bytesPerSample * channelCount <= samples.limit()) {
+            repeat(channelCount) { channel ->
+                val offset = frame + channel * bytesPerSample
+                val value = if (encoding == C.ENCODING_PCM_FLOAT) samples.getFloat(offset).toDouble()
+                    else samples.getShort(offset).toDouble() / 32768.0
+                if (value.isFinite()) sum += value * value
+                count++
+            }
+            frame += stride
+        }
+        if (count == 0) return
+        val weight = 1.0 - exp(-frames.toDouble() / sampleRate.coerceAtLeast(1) / 0.18)
+        meanSquare += (sum / count - meanSquare) * weight
+        level = Level(sqrt(meanSquare.coerceAtLeast(0.0)).toFloat(), SystemClock.elapsedRealtime())
+    }
+
     private var channelCount = 0
     private var sampleRate = 0
+    private var encoding = C.ENCODING_INVALID
+    private var bytesPerSample = 0
 
     private var currentLowPassHz = OPEN_HZ
     private var currentHighPassHz = OFF_HZ
@@ -99,7 +135,7 @@ class TransitionFilterProcessor : BaseAudioProcessor() {
     fun open() = setCutoffs(OPEN_HZ, OFF_HZ)
 
     /**
-     * 16-bit PCM only, matching [SpatialAudioProcessor] — and bowing out with
+     * Supports both 16-bit and float PCM, and bows out with
      * [AudioProcessor.AudioFormat.NOT_SET] rather than throwing for the same
      * reason it does: `DefaultAudioSink` configures every processor in its chain
      * whether or not the effect is switched on, and a throw from any of them
@@ -111,16 +147,20 @@ class TransitionFilterProcessor : BaseAudioProcessor() {
      * Phase 3 one, with nothing anywhere saying why.
      */
     override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
-        if (inputAudioFormat.encoding != C.ENCODING_PCM_16BIT || inputAudioFormat.channelCount < 1) {
+        if (inputAudioFormat.encoding !in setOf(C.ENCODING_PCM_16BIT, C.ENCODING_PCM_FLOAT) ||
+            inputAudioFormat.channelCount < 1
+        ) {
             Log.w(
                 TAG,
                 "Transition filtering inactive: encoding=${inputAudioFormat.encoding} " +
-                    "channels=${inputAudioFormat.channelCount} is not 16-bit PCM",
+                        "channels=${inputAudioFormat.channelCount} is not supported PCM",
             )
             return AudioProcessor.AudioFormat.NOT_SET
         }
         channelCount = inputAudioFormat.channelCount
         sampleRate = inputAudioFormat.sampleRate
+        encoding = inputAudioFormat.encoding
+        bytesPerSample = if (encoding == C.ENCODING_PCM_FLOAT) 4 else 2
         lowState = FloatArray(channelCount * STAGES * 2)
         highState = FloatArray(channelCount * STAGES * 2)
         currentLowPassHz = targetLowPassHz
@@ -129,6 +169,8 @@ class TransitionFilterProcessor : BaseAudioProcessor() {
     }
 
     override fun onFlush() {
+        level = null
+        meanSquare = 0.0
         lowState.fill(0f)
         highState.fill(0f)
         // Snapped, not glided: a flush means a seek or a fresh source, so there
@@ -138,14 +180,18 @@ class TransitionFilterProcessor : BaseAudioProcessor() {
     }
 
     override fun onReset() {
+        level = null
+        meanSquare = 0.0
         targetLowPassHz = OPEN_HZ
         targetHighPassHz = OFF_HZ
+        encoding = C.ENCODING_INVALID
+        bytesPerSample = 0
         lowState = FloatArray(0)
         highState = FloatArray(0)
     }
 
     override fun queueInput(inputBuffer: java.nio.ByteBuffer) {
-        val bytesPerFrame = BYTES_PER_SAMPLE * channelCount
+        val bytesPerFrame = bytesPerSample * channelCount
         if (bytesPerFrame == 0) return
         val frameCount = inputBuffer.remaining() / bytesPerFrame
         if (frameCount == 0) return
@@ -159,10 +205,11 @@ class TransitionFilterProcessor : BaseAudioProcessor() {
         // cutting the filter out from under that glide is the click it exists
         // to avoid.
         val parked = targetLow >= OPEN_HZ && targetHigh <= OFF_HZ &&
-            currentLowPassHz >= OPEN_HZ - SETTLED_HZ && currentHighPassHz <= OFF_HZ + SETTLED_HZ
+                currentLowPassHz >= OPEN_HZ - SETTLED_HZ && currentHighPassHz <= OFF_HZ + SETTLED_HZ
         if (parked) {
             outputBuffer.put(inputBuffer)
             outputBuffer.flip()
+            measure(outputBuffer, frameCount)
             return
         }
 
@@ -181,15 +228,16 @@ class TransitionFilterProcessor : BaseAudioProcessor() {
 
             repeat(block) {
                 for (channel in 0 until channelCount) {
-                    var sample = inputBuffer.short.toFloat()
+                    var sample = readSample(inputBuffer)
                     if (lowOn) sample = lowPass(channel, sample)
                     if (highOn) sample = highPass(channel, sample)
-                    outputBuffer.putShort(clampToShort(sample))
+                    writeSample(outputBuffer, sample)
                 }
             }
             remaining -= block
         }
         outputBuffer.flip()
+        measure(outputBuffer, frameCount)
     }
 
     // ---- Filter ------------------------------------------------------------
@@ -262,6 +310,17 @@ class TransitionFilterProcessor : BaseAudioProcessor() {
     private fun clampToShort(value: Float): Short =
         value.coerceIn(Short.MIN_VALUE.toFloat(), Short.MAX_VALUE.toFloat()).toInt().toShort()
 
+    private fun readSample(buffer: java.nio.ByteBuffer): Float =
+        if (encoding == C.ENCODING_PCM_FLOAT) buffer.float else buffer.short.toFloat()
+
+    private fun writeSample(buffer: java.nio.ByteBuffer, value: Float) {
+        if (encoding == C.ENCODING_PCM_FLOAT) {
+            buffer.putFloat(value.coerceIn(-1f, 1f))
+        } else {
+            buffer.putShort(clampToShort(value))
+        }
+    }
+
     companion object {
         private const val TAG = "BitChordTransitionFilter"
 
@@ -275,8 +334,6 @@ class TransitionFilterProcessor : BaseAudioProcessor() {
         const val MAX_HIGH_PASS_HZ = 2_000f
 
         private const val MIN_HZ = 10f
-        private const val BYTES_PER_SAMPLE = 2
-
         /** Two cascaded second-order sections: 24 dB/octave, the usual DJ-filter slope. */
         private const val STAGES = 2
 
@@ -307,16 +364,38 @@ class TransitionFilterProcessor : BaseAudioProcessor() {
  * lap.
  */
 interface TransitionFilters {
-    /** The track fading up — the session player, once the lap has handed the queue over. */
+    /**
+     * Freezes which concrete processors belong to the incoming and outgoing
+     * tracks for this audible overlap. The MediaSession may swap owners halfway
+     * through the blend, but the filters must keep following the same two audio
+     * streams rather than swapping with the UI/session roles.
+     */
+    fun begin() = Unit
+
+    /** The track fading up, regardless of which player currently owns the session. */
     fun incoming(lowPassHz: Float, highPassHz: Float)
 
-    /** The track fading out — the ghost player. */
+    /** The track fading out, regardless of which player currently owns the session. */
     fun outgoing(lowPassHz: Float, highPassHz: Float)
 
-    /** Parks both. Called whenever a transition ends, however it ended. */
+    /**
+     * Three-band DJ EQ automation for the arriving deck. Default no-op keeps
+     * older/test bindings source-compatible.
+     */
+    fun incomingEq(lowDb: Float, midDb: Float, highDb: Float) = Unit
+
+    /** Three-band DJ EQ automation for the departing deck. */
+    fun outgoingEq(lowDb: Float, midDb: Float, highDb: Float) = Unit
+
+    fun incomingRms(): Float? = null
+    fun outgoingRms(): Float? = null
+
+    /** Parks filters and EQ on both decks. Called however a transition ended. */
     fun open() {
         incoming(TransitionFilterProcessor.OPEN_HZ, TransitionFilterProcessor.OFF_HZ)
         outgoing(TransitionFilterProcessor.OPEN_HZ, TransitionFilterProcessor.OFF_HZ)
+        incomingEq(0f, 0f, 0f)
+        outgoingEq(0f, 0f, 0f)
     }
 
     /** For callers with no audio sink to filter — tests, and the default wiring. */
