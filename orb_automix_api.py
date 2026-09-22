@@ -599,7 +599,7 @@ async def health() -> dict[str, Any]:
         "version": API_VERSION,
         "automixVersion": "2.5",
         "analyzer": "orb-remote-dsp-v6",
-        "plannerRevision": "mix-v4",
+        "plannerRevision": "mix-v5",
     }
 
 
@@ -1487,6 +1487,133 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     vocal_clash = min(a_tail_vocal, b_open_vocal)
     candidates: list[dict[str, Any]] = []
 
+    # 0) Long runway blend. The references supplied for 2.5 show a recurring pattern:
+    # B can already be 13-30+ seconds into its opening when ownership changes, while A still
+    # has a meaningful tail left. This is not a conventional crossfade. B starts at its earliest
+    # safe audible point, stays subordinate, and its first major structural arrival is aimed at
+    # A's measured foreground release. The same prepared B deck then keeps running through the
+    # handoff; there is no restart at release.
+    runway = max(0.0, b_impact - b_start)
+    if 8.0 <= runway <= 72.0 and a_release > 0.0 and a_end > a_release:
+        desired_start = a_release - runway
+        if desired_start >= 0.0 and desired_start < a_release - 3.0:
+            intro_vocal = _mean_window(
+                b_vocal,
+                b_start,
+                b_impact,
+                _finite(b.get("vocalProbability"), 0.5),
+            )
+            a_runway_vocal = _mean_window(
+                a_vocal_curve,
+                desired_start,
+                a_release,
+                _finite(a.get("vocalProbability"), 0.5),
+            )
+            runway_vocal_clash = min(a_runway_vocal, intro_vocal)
+            known_key_conflict = key_evidence and key_fit < 0.35
+
+            pre_impact_energy = _mean_window(
+                b_energy,
+                max(b_start, b_impact - 6.0),
+                b_impact,
+                0.0,
+            )
+            post_impact_energy = _mean_window(
+                b_energy,
+                b_impact,
+                min(b_end, b_impact + 4.0),
+                pre_impact_energy,
+            )
+            impact_rise = _clamp(
+                (post_impact_energy - pre_impact_energy + 0.08) / 0.30,
+                0.0,
+                1.0,
+            )
+            span = a_end - desired_start
+            handoff_fraction = _clamp(
+                (a_release - desired_start) / max(span, 1e-6),
+                0.38,
+                0.90,
+            )
+            # Long overlaps need a very clean B runway. A may still be vocal-heavy because B is
+            # intentionally underneath it, but a vocal B intro would become a duet and is rejected.
+            if (
+                not known_key_conflict
+                and intro_vocal < 0.38
+                and runway_vocal_clash < 0.42
+                and span <= 82.0
+            ):
+                runway_score = (
+                    0.28
+                    + 0.16 * _clamp(runway / 32.0, 0.0, 1.0)
+                    + 0.16 * (1.0 - intro_vocal)
+                    + 0.12 * impact_rise
+                    + 0.10 * key_fit
+                    + 0.08 * tempo
+                    + 0.10 * _clamp((a_end - a_release) / 16.0, 0.0, 1.0)
+                )
+                pre_handoff = max(0.08, handoff_fraction - 0.16)
+                post_handoff = min(0.98, handoff_fraction + 0.12)
+                candidates.append(_candidate_plan(
+                    "RUNWAY_BLEND",
+                    runway_score,
+                    "server-long-runway-impact",
+                    transitionStart=round(desired_start, 4),
+                    transitionEnd=round(a_end, 4),
+                    incomingCueTime=round(b_start, 4),
+                    incomingHandoffTime=round(b_impact, 4),
+                    outgoingPlaybackRate=1.0,
+                    incomingPlaybackRate=1.0,
+                    transitionBeats=0,
+                    requestedTransitionBeats=0,
+                    handoffFraction=round(handoff_fraction, 4),
+                    bassSwap=bool(key_fit >= 0.58 and _low_curve(a) and _low_curve(b)),
+                    bassSwapFraction=round(handoff_fraction, 4),
+                    filterSweep=0.30 if key_fit >= 0.58 else 0.62,
+                    keyCompatibility=round(key_fit, 4),
+                    tempoCompatibility=round(tempo, 4),
+                    phraseAlignment=0.0,
+                    overlapVocalClash=round(runway_vocal_clash, 4),
+                    energyCompatibility=round(
+                        _clamp(1.0 - abs(
+                            _mean_window(_curve(a, "energyCurve"), desired_start, a_release, 0.5)
+                            - pre_impact_energy
+                        ), 0.0, 1.0),
+                        4,
+                    ),
+                    pairCompatibility=round(
+                        _clamp(0.55 * (1.0 - intro_vocal) + 0.45 * impact_rise, 0.0, 1.0),
+                        4,
+                    ),
+                    spanCompatibility=1.0,
+                    outgoingAnchor="release",
+                    incomingAnchor="impact",
+                    gainEnvelope=[
+                        {"progress": 0.0, "incomingGain": 0.0, "outgoingGain": 1.0},
+                        {
+                            "progress": round(min(0.14, handoff_fraction * 0.28), 4),
+                            "incomingGain": 0.12,
+                            "outgoingGain": 1.0,
+                        },
+                        {
+                            "progress": round(pre_handoff, 4),
+                            "incomingGain": 0.34,
+                            "outgoingGain": 0.99,
+                        },
+                        {
+                            "progress": round(handoff_fraction, 4),
+                            "incomingGain": 0.62,
+                            "outgoingGain": 0.94,
+                        },
+                        {
+                            "progress": round(post_handoff, 4),
+                            "incomingGain": 0.92,
+                            "outgoingGain": 0.38,
+                        },
+                        {"progress": 1.0, "incomingGain": 1.0, "outgoingGain": 0.0},
+                    ],
+                ))
+
     # 1) Beat/key bridge. The planner now searches *pairs* of structural anchors:
     # A's late phrase/downbeat and B's entry phrase/downbeat are scored together.
     if a_end > 0.0 and 40.0 <= a_bpm <= 220.0 and 40.0 <= b_bpm <= 220.0:
@@ -1782,6 +1909,123 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                     gainEnvelope=[],
                 ))
 
+    # 2.75) Phrase takeover. Some reference transitions deliberately hand ownership to B
+    # before A's file reaches its natural end, but only after A has released its foreground phrase.
+    # B starts at (or very near) its opening instead of being cued into a chorus. A gets a short
+    # musical tail after the handoff and is then retired; this is intentionally different from CUT.
+    release_tail = max(0.0, a_end - a_release)
+    immediate_entry = max(b_start, min(b_impact, _finite(b.get("mixInTime"), b_impact)))
+    entry_delay = max(0.0, immediate_entry - b_start)
+    if (
+        5.0 <= release_tail <= 24.0
+        and entry_delay <= 4.5
+        and a_end > 0.0
+        and b_end > b_start + 2.0
+    ):
+        out_beat = 60.0 / a_bpm if a_bpm > 0.0 else 0.55
+        in_beat = 60.0 / b_bpm if b_bpm > 0.0 else out_beat
+        takeover_start, outgoing_takeover_fit = _structural_snap(
+            a,
+            max(0.0, a_release - 4.0 * out_beat),
+            max(0.0, a_release - 8.0 * out_beat),
+            min(a_end - 0.20, a_release),
+            out_beat,
+        )
+        takeover_cue, incoming_takeover_fit = _structural_snap(
+            b,
+            b_start,
+            b_start,
+            min(b_end - 0.25, b_start + 4.0 * in_beat),
+            in_beat,
+        )
+        takeover_end = min(a_end, a_release + max(1.8, 4.0 * out_beat))
+        if takeover_end > takeover_start + 1.0:
+            takeover_vocal_clash, takeover_energy_fit = _overlap_pair_metrics(
+                a,
+                b,
+                takeover_start,
+                takeover_end,
+                takeover_cue,
+                1.0,
+            )
+            takeover_structure = min(outgoing_takeover_fit, incoming_takeover_fit)
+            known_key_conflict = key_evidence and key_fit < 0.18
+            if (
+                not known_key_conflict
+                and takeover_structure >= 0.52
+                and takeover_vocal_clash < 0.72
+            ):
+                handoff_fraction = _clamp(
+                    (a_release - takeover_start) / max(takeover_end - takeover_start, 1e-6),
+                    0.45,
+                    0.82,
+                )
+                takeover_score = (
+                    0.30
+                    + 0.20 * takeover_structure
+                    + 0.16 * (1.0 - takeover_vocal_clash)
+                    + 0.12 * takeover_energy_fit
+                    + 0.10 * key_fit
+                    + 0.06 * tempo
+                    + 0.06 * _clamp(release_tail / 12.0, 0.0, 1.0)
+                )
+                before = max(0.05, handoff_fraction - 0.16)
+                after = min(0.96, handoff_fraction + 0.10)
+                candidates.append(_candidate_plan(
+                    "PHRASE_TAKEOVER",
+                    takeover_score,
+                    "server-phrase-takeover",
+                    transitionStart=round(takeover_start, 4),
+                    transitionEnd=round(takeover_end, 4),
+                    incomingCueTime=round(takeover_cue, 4),
+                    incomingHandoffTime=round(takeover_cue, 4),
+                    outgoingPlaybackRate=1.0,
+                    incomingPlaybackRate=1.0,
+                    transitionBeats=max(1, int(round((takeover_end - takeover_start) / out_beat))),
+                    requestedTransitionBeats=4,
+                    handoffFraction=round(handoff_fraction, 4),
+                    bassSwap=bool(key_fit >= 0.58 and _low_curve(a) and _low_curve(b)),
+                    bassSwapFraction=round(handoff_fraction, 4),
+                    filterSweep=0.45 if key_fit < 0.58 else 0.0,
+                    keyCompatibility=round(key_fit, 4),
+                    tempoCompatibility=round(tempo, 4),
+                    phraseAlignment=round(takeover_structure, 4),
+                    overlapVocalClash=round(takeover_vocal_clash, 4),
+                    energyCompatibility=round(takeover_energy_fit, 4),
+                    pairCompatibility=round(
+                        _clamp(
+                            0.45 * takeover_structure
+                            + 0.35 * (1.0 - takeover_vocal_clash)
+                            + 0.20 * takeover_energy_fit,
+                            0.0,
+                            1.0,
+                        ),
+                        4,
+                    ),
+                    spanCompatibility=1.0,
+                    outgoingAnchor="release",
+                    incomingAnchor="opening-phrase",
+                    gainEnvelope=[
+                        {"progress": 0.0, "incomingGain": 0.0, "outgoingGain": 1.0},
+                        {
+                            "progress": round(before, 4),
+                            "incomingGain": 0.16,
+                            "outgoingGain": 1.0,
+                        },
+                        {
+                            "progress": round(handoff_fraction, 4),
+                            "incomingGain": 0.76,
+                            "outgoingGain": 0.90,
+                        },
+                        {
+                            "progress": round(after, 4),
+                            "incomingGain": 1.0,
+                            "outgoingGain": 0.24,
+                        },
+                        {"progress": 1.0, "incomingGain": 1.0, "outgoingGain": 0.0},
+                    ],
+                ))
+
     # 3) Phrase cut: a deliberate phrase/downbeat transfer, not a tiny crossfade.
     # Both sides must expose a usable structural point close to the intended handoff.
     strong_entry = max(b_start, _finite(b.get("mixInTime"), b_impact))
@@ -1902,9 +2146,11 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     # outranks a cut even when the cut's scalar score is slightly higher. Only when
     # no safe overlap exists do we consider phrase/cut handoffs; natural playback is last.
     overlap_floor = {
+        "RUNWAY_BLEND": 0.44,
         "DJ_BLEND": 0.42,
         "DJ_FILTER": 0.36,
         "EQ_SWAP": 0.42,
+        "PHRASE_TAKEOVER": 0.40,
     }
     overlap_candidates = [
         candidate
@@ -1924,14 +2170,24 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     ]
 
     if overlap_candidates:
+        runway_overlap = [
+            candidate for candidate in overlap_candidates
+            if candidate.get("style") == "RUNWAY_BLEND"
+        ]
         open_overlap = [
             candidate
             for candidate in overlap_candidates
             if candidate.get("style") in {"DJ_BLEND", "EQ_SWAP"}
         ]
-        # Prefer the richer open/bass-swap techniques whenever they clear their
-        # own safety floors. DJ_FILTER is the conservative overlap fallback.
-        best = max(open_overlap or overlap_candidates, key=lambda x: x["score"])
+        # A real measured runway is an arrangement-level opportunity and should not be
+        # thrown away merely because a shorter 8/16-beat bridge scores a few hundredths more.
+        # Otherwise prefer richer open/bass-swap techniques before the conservative filter.
+        if runway_overlap and max(runway_overlap, key=lambda x: x["score"])["score"] >= (
+            max(open_overlap, key=lambda x: x["score"])["score"] - 0.06 if open_overlap else 0.0
+        ):
+            best = max(runway_overlap, key=lambda x: x["score"])
+        else:
+            best = max(open_overlap or overlap_candidates, key=lambda x: x["score"])
     elif cut_candidates:
         best = max(cut_candidates, key=lambda x: x["score"])
     else:
@@ -1954,7 +2210,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     best["outgoingTransitionBpm"] = round(a_bpm, 4)
     best["incomingTransitionBpm"] = round(b_bpm, 4)
     best["tempoCompatibility"] = round(tempo, 4)
-    best["planner"] = "orb-automix-2.5-mix-v4"
+    best["planner"] = "orb-automix-2.5-mix-v5"
     best["serverAuthoritative"] = True
     return best, candidates[:5]
 
@@ -1977,7 +2233,7 @@ async def plan(request: PlanRequest) -> dict[str, Any]:
     # minimal fallback is selected here on the server; Android may only reject impossible bounds.
     plan_result = dict(plan_result)
     plan_result["serverAuthoritative"] = True
-    plan_result["planner"] = "orb-automix-2.5-mix-v4"
+    plan_result["planner"] = "orb-automix-2.5-mix-v5"
     return {
         "version": API_VERSION,
         "automixVersion": "2.5",
