@@ -236,6 +236,7 @@ class CrossfadeController(
      * at their own unrelated tempi and the result is a crossfade with
      * smarter timing, not a beatmatch.
      */
+    private var outgoingPlaybackRate: Double = 1.0
     private var incomingPlaybackRate: Double = 1.0
 
     /**
@@ -497,15 +498,10 @@ class CrossfadeController(
         requestAnalysis(currentItem, duration)
         requestAnalysis(nextItem, nextDuration)
 
-        // Only used before analysis lands, or when the evidence is too weak
-        // for more than a plain fade (see [TransitionTier.PLAIN_CROSSFADE]):
-        // once real analysis is available, [planTransition] sizes the overlap
-        // itself from tempo and structure and ignores this entirely. Honours
-        // the manual slider if the listener also set one, so the two settings
-        // don't fight; falls back to a fixed length when it's at "Off".
-        val fallbackSeconds = configuredFadeMs().takeIf { it > 0L }
-            ?.div(1000.0)
-            ?: DEFAULT_SMART_FALLBACK_SECONDS
+        // fadeSeconds is part of the shared planner signature, but SMART no
+        // longer degrades into manual Crossfade when evidence is weak. The
+        // planner either returns a real musical plan or NO_TRANSITION.
+        val fallbackSeconds = DEFAULT_SMART_FALLBACK_SECONDS
 
         // Resolved once and reused: [analysisFor] was being called five separate
         // times per tick below, and the answer cannot change mid-tick.
@@ -526,7 +522,7 @@ class CrossfadeController(
         // One line per distinct verdict rather than one per 250ms tick, so the
         // log says what the planner decided for this pair without burying it.
         val verdict = "${plan.reason}|${plan.transitionStyle}|fade=${plan.fadeMs}" +
-            "|cue=${plan.incomingCueTime}|rate=${plan.incomingPlaybackRate}" +
+            "|cue=${plan.incomingCueTime}|rates=${plan.outgoingPlaybackRate}/${plan.incomingPlaybackRate}" +
             "|vocalOverlap=${"%.2f".format(plan.vocalOverlap)}" +
             "|blocked=${plan.blocked}|policy=${plan.policyReasons.joinToString(",")}"
         if (verdict != lastPlanVerdict) {
@@ -598,6 +594,7 @@ class CrossfadeController(
             endMs = (plan.transitionEnd * 1000).roundToLong(),
             smart = true,
             cueTimeMs = (plan.incomingCueTime * 1000).roundToLong(),
+            outgoingRate = plan.outgoingPlaybackRate,
             playbackRate = plan.incomingPlaybackRate,
             renderStyle = Render(
                 style = plan.transitionStyle,
@@ -728,6 +725,7 @@ class CrossfadeController(
         endMs: Long,
         smart: Boolean,
         cueTimeMs: Long = 0L,
+        outgoingRate: Double = 1.0,
         playbackRate: Double = 1.0,
         renderStyle: Render = Render(),
     ): Boolean {
@@ -741,6 +739,7 @@ class CrossfadeController(
         fadeEndMs = endMs
         smartFadeActive = smart
         incomingCueTimeMs = cueTimeMs.coerceAtLeast(0L)
+        outgoingPlaybackRate = outgoingRate
         incomingPlaybackRate = playbackRate
         render = renderStyle
         armDeadline = SystemClock.elapsedRealtime() + ARM_TIMEOUT_MS
@@ -754,7 +753,8 @@ class CrossfadeController(
         Log.d(
             TAG,
             "arm ${if (smart) "smart" else "standard"} fade=${fade}ms end=${endMs}ms " +
-                "cue=${incomingCueTimeMs}ms rate=$incomingPlaybackRate at=${out.currentPosition}ms " +
+                "cue=${incomingCueTimeMs}ms rates=$outgoingPlaybackRate/$incomingPlaybackRate " +
+                "at=${out.currentPosition}ms " +
                 "style=${render.style} bassSwap=${render.bassSwap}@${render.bassSwapFraction} " +
                 "sweep=${render.filterSweep}",
         )
@@ -919,6 +919,7 @@ class CrossfadeController(
 
         player.volume = riseGain(progress)
         out.volume = fallGain(progress)
+        if (smartFadeActive) rideTempoBridge(progress, out, player)
         // Only from here, never during ARMING: the standby is silent until the
         // handoff, and [filters] describes the split between the track arriving
         // and the track leaving, which only exists once both are audible.
@@ -1029,6 +1030,7 @@ class CrossfadeController(
         handedOff = false
         queuedItemCount = 0
         incomingCueTimeMs = 0L
+        outgoingPlaybackRate = 1.0
         incomingPlaybackRate = 1.0
         phase = Phase.IDLE
     }
@@ -1313,8 +1315,36 @@ class CrossfadeController(
         render.style == TransitionStyle.DJ_BLEND ||
             render.style == TransitionStyle.DJ_FILTER ||
             incomingCueTimeMs > 0L ||
+            outgoingPlaybackRate != 1.0 ||
             incomingPlaybackRate != 1.0
         )
+
+    /**
+     * Makes tempo adaptation belong to both songs instead of forcing B onto A.
+     *
+     * B is prepared at the meeting tempo before it becomes audible. Once the
+     * overlap starts, A glides toward that same meeting tempo over the first
+     * third. In the final third, after the musical handoff is established, B
+     * glides back to its native tempo. Pitch stays unchanged because Media3's
+     * Sonic processor is already in the audio sink.
+     */
+    private fun rideTempoBridge(progress: Float, out: ExoPlayer, into: ExoPlayer) {
+        val base = AppSettings.playbackSpeed.value.toDouble()
+        val approach = smoothStep((progress / TEMPO_APPROACH_END).coerceIn(0f, 1f)).toDouble()
+        val release = smoothStep(
+            ((progress - TEMPO_RELEASE_START) / (1f - TEMPO_RELEASE_START)).coerceIn(0f, 1f),
+        ).toDouble()
+
+        val outRate = 1.0 + (outgoingPlaybackRate - 1.0) * approach
+        val inRate = incomingPlaybackRate + (1.0 - incomingPlaybackRate) * release
+        out.setPlaybackSpeed((base * outRate).toFloat())
+        into.setPlaybackSpeed((base * inRate).toFloat())
+    }
+
+    private fun smoothStep(value: Float): Float {
+        val x = value.coerceIn(0f, 1f)
+        return x * x * (3f - 2f * x)
+    }
 
     /** Equal-power pair: [riseGain]² + [fallGain]² = 1, so the blend never dips. */
     private fun riseGain(progress: Float): Float =
@@ -1334,12 +1364,16 @@ class CrossfadeController(
         const val TAG = "BitChordCrossfade"
 
         /**
-         * Used only before a pair has been analysed, or when the evidence is
-         * too weak for more than a plain fade — see [considerSmartTransition].
-         * Once real analysis lands, the overlap is sized from tempo and
-         * structure instead and this is never read.
+         * Placeholder for the shared planner signature. SMART never renders
+         * this as a fallback crossfade; weak evidence now means no transition.
          */
         const val DEFAULT_SMART_FALLBACK_SECONDS = 6.0
+
+        /** First third: A moves toward the meeting tempo. */
+        const val TEMPO_APPROACH_END = 0.34f
+
+        /** Final third: B returns from the meeting tempo to its native tempo. */
+        const val TEMPO_RELEASE_START = 0.66f
 
         /** Ramp used when a fade is interrupted. */
         const val BAIL_MS = 120L
