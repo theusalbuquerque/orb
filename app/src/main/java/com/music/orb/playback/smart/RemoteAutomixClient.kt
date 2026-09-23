@@ -18,14 +18,12 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
- * Thin network seam for Orb's remote Automix intelligence.
+ * Thin network seam for Orb's remote Automix planner.
  *
- * The Render service performs the expensive decode/feature extraction and searches complete
- * A -> B transition recipes. Buffering, final safety validation, DSP execution and the actual
- * two-player handoff stay on the phone. Transition-family selection is server-authoritative:
- * the device may reject a malformed/technically impossible directive, but it never substitutes
- * another Automix style of its own. If the 2.5 backend is unavailable, playback advances
- * normally with NO_TRANSITION rather than disguising a generic Crossfade as Automix.
+ * Schema 6 performs acoustic analysis locally (Beat This! + Orb DSP) and sends only derived
+ * A.TAIL/B.HEAD metadata to Render. Buffering, analysis, final validation, DSP execution and
+ * handoff stay on the phone. The remote planner remains preferred, while the complete local
+ * planner takes over when the network cannot return a recipe in time.
  */
 /**
  * Full server-authored transition recipe. The phone performs only transport/timeline validation
@@ -85,9 +83,9 @@ data class RemoteTransitionDirective(
 internal object RemoteAutomixClient {
     private const val TAG = "OrbRemoteAutomix"
     private const val BASE_URL = "https://orb-4mrh.onrender.com"
-    private const val VERSION = 7
+    private const val VERSION = 8
     private const val REQUIRED_PLANNER_REVISION = "mix-v9"
-    private const val REQUIRED_ANALYSIS_SCHEMA = 5
+    private const val REQUIRED_ANALYSIS_SCHEMA = 6
     private const val MAX_REMOTE_AUDIO_BYTES = 24L * 1024L * 1024L
     private const val MAX_PLAN_CURVE_POINTS = 1800
     private const val PLAN_WINDOW_SECONDS = 90.0
@@ -152,7 +150,7 @@ internal object RemoteAutomixClient {
                 val serverVersion = root.optInt("version", 0)
                 val advertised25 =
                     root.optString("automixVersion", "") == "2.5" ||
-                        root.optString("analyzer", "") == "orb-remote-dsp-v7"
+                        root.optString("analyzer", "") == "orb-metadata-planner-v8"
                 val plannerRevision = root.optString("plannerRevision", "")
                 val analysisSchema = root.optInt("analysisSchema", 0)
                 val ok = root.optBoolean("ok", false) &&
@@ -222,34 +220,11 @@ internal object RemoteAutomixClient {
      */
     fun requestPlan(outgoing: TrackAnalysis, incoming: TrackAnalysis): RemoteTransitionDirective? {
         if (!isAvailable() || !outgoing.isUsable || !incoming.isUsable) return null
-        // A defines the release/mix-out and therefore must be final schema 5.
-        // B may be a trusted opening preview: that is enough to choose an
-        // incoming cue/style while its full-track analysis refines in parallel.
-        if (outgoing.analysisSchema < REQUIRED_ANALYSIS_SCHEMA) return null
+        if (outgoing.analysisSchema < REQUIRED_ANALYSIS_SCHEMA ||
+            incoming.analysisSchema < REQUIRED_ANALYSIS_SCHEMA
+        ) return null
 
-        val incomingIsFull = incoming.analysisSchema >= REQUIRED_ANALYSIS_SCHEMA
-
-        // Fastest path when both sides are already in Render's schema-5 cache.
-        val compactPayload = JSONObject()
-            .put("version", VERSION)
-            .put("automixVersion", "2.5")
-            .put("preview", true)
-            .put("compact", true)
-            .put("accountHash", AppSettings.automix25AccountHash.value)
-            .put("outgoing", JSONObject().put("trackId", outgoing.trackId).put("analysisSchema", outgoing.analysisSchema))
-            .put("incoming", JSONObject().put("trackId", incoming.trackId).put("analysisSchema", incoming.analysisSchema))
-
-        if (incomingIsFull) {
-            val compact = executePlanRequest(compactPayload, allowCacheMiss = true)
-            if (compact.directive != null) return compact.directive
-            if (!compact.cacheMiss) return null
-        }
-
-        // If B is only planning-ready (or Render restarted and lost its RAM cache),
-        // send only the transition windows.
-        // windows: the final 90 s of A and the first 90 s of B, plus global
-        // tempo/key/landmarks. The middle of either song is irrelevant to A->B.
-        val windowPayload = JSONObject()
+        val payload = JSONObject()
             .put("version", VERSION)
             .put("automixVersion", "2.5")
             .put("preview", true)
@@ -258,8 +233,9 @@ internal object RemoteAutomixClient {
             .put("outgoing", transitionWindowSummary(outgoing, outgoingWindow = true))
             .put("incoming", transitionWindowSummary(incoming, outgoingWindow = false))
 
-        return executePlanRequest(windowPayload, allowCacheMiss = false).directive
+        return executePlanRequest(payload, allowCacheMiss = false).directive
     }
+
 
     private data class PlanRequestResult(
         val directive: RemoteTransitionDirective? = null,
