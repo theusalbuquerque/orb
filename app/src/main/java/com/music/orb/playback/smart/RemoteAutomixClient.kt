@@ -87,7 +87,7 @@ internal object RemoteAutomixClient {
     private const val BASE_URL = "https://orb-4mrh.onrender.com"
     private const val VERSION = 7
     private const val REQUIRED_PLANNER_REVISION = "mix-v8"
-    private const val REQUIRED_ANALYSIS_SCHEMA = 2
+    private const val REQUIRED_ANALYSIS_SCHEMA = 3
     private const val MAX_REMOTE_AUDIO_BYTES = 24L * 1024L * 1024L
     private const val MAX_PLAN_CURVE_POINTS = 1800
     private const val FAILURE_COOLDOWN_MS = 60_000L
