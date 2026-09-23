@@ -4227,8 +4227,12 @@ private fun NerdStatsLine(
             (window.start.coerceIn(0f, 1f) * trackDurationMs).toLong()
         }
     val pairAnalysisComplete =
-        smartAnalysis.current == TrackAnalysisState.ANALYSED &&
-            smartAnalysis.next == TrackAnalysisState.ANALYSED
+        smartAnalysis.current in setOf(TrackAnalysisState.ANALYSED, TrackAnalysisState.REFINING) &&
+            smartAnalysis.next in setOf(
+                TrackAnalysisState.READY_FOR_PLAN,
+                TrackAnalysisState.ANALYSED,
+                TrackAnalysisState.REFINING,
+            )
     val transitionStyle = automixStats?.style?.let { localizedAutomixStyle(it) }
     val transitionLine = when {
         // Never expose a provisional/stale verdict while either side is still
@@ -4311,6 +4315,7 @@ private fun nerdAnalysisLine(
 private fun localizedAnalysisState(state: TrackAnalysisState): String = when (state) {
     TrackAnalysisState.WAITING -> stringResource(R.string.nerd_analysis_waiting)
     TrackAnalysisState.ANALYSING -> stringResource(R.string.nerd_analysis_analysing)
+    TrackAnalysisState.READY_FOR_PLAN -> stringResource(R.string.nerd_analysis_ready_for_plan)
     TrackAnalysisState.ANALYSED -> stringResource(R.string.nerd_analysis_analysed)
     TrackAnalysisState.REFINING -> stringResource(R.string.nerd_analysis_refining)
     TrackAnalysisState.FAILED -> stringResource(R.string.nerd_analysis_failed)
