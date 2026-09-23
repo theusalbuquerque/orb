@@ -152,6 +152,10 @@ class AnalysisStore(private val context: Context) {
         val phraseBoundaries: List<Double> = emptyList(),
         val key: String = "",
         val keyConfidence: Double = 0.0,
+        val headKey: String = "",
+        val headKeyConfidence: Double = 0.0,
+        val tailKey: String = "",
+        val tailKeyConfidence: Double = 0.0,
         val audibleStartTime: Double? = null,
         val pickupTime: Double? = null,
         val introEndTime: Double = 0.0,
@@ -186,6 +190,10 @@ class AnalysisStore(private val context: Context) {
             phraseBoundaries = phraseBoundaries,
             key = key,
             keyConfidence = keyConfidence,
+            headKey = headKey,
+            headKeyConfidence = headKeyConfidence,
+            tailKey = tailKey,
+            tailKeyConfidence = tailKeyConfidence,
             audibleStartTime = audibleStartTime,
             pickupTime = pickupTime,
             introEndTime = introEndTime,
@@ -220,6 +228,10 @@ class AnalysisStore(private val context: Context) {
                 phraseBoundaries = analysis.phraseBoundaries.map(::round),
                 key = analysis.key,
                 keyConfidence = analysis.keyConfidence,
+                headKey = analysis.headKey,
+                headKeyConfidence = analysis.headKeyConfidence,
+                tailKey = analysis.tailKey,
+                tailKeyConfidence = analysis.tailKeyConfidence,
                 audibleStartTime = analysis.audibleStartTime,
                 pickupTime = analysis.pickupTime,
                 introEndTime = analysis.introEndTime,
@@ -297,7 +309,7 @@ class AnalysisStore(private val context: Context) {
          * re-analysis costs seconds, and a beat grid interpreted under the wrong
          * assumptions is silently wrong for the life of the file.
          */
-        const val SCHEMA_VERSION = 2
+        const val SCHEMA_VERSION = 3
 
         /** A few thousand tracks' worth, at tens of kilobytes each. */
         const val MAX_ENTRIES = 2_000
