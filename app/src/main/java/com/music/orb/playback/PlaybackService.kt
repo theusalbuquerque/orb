@@ -3817,10 +3817,9 @@ class PlaybackService : MediaSessionService() {
     /**
      * Orders only AutoPlay's untouched future section by musical proximity.
      *
-     * This deliberately does not start DSP on C/D/etc. Persisted analyses are restored first;
-     * Automix 2.5 may additionally read server-cached analyses, which is metadata-only and does
-     * not upload or decode those future tracks. Unknown candidates keep their radio order.
-     * The actual transition planner still decides the eventual A -> B recipe later.
+     * This uses only lightweight head previews for future AutoPlay candidates; full reliable
+     * analysis remains strictly A -> B -> C. Persisted/server-cached evidence is restored first.
+     * The transition planner still decides the eventual A -> B recipe later.
      */
     private fun scheduleAutoplayMusicalOrdering(live: ExoPlayer) {
         if (!AppSettings.autoplay.value || !AppSettings.smartFadeEnabled.value) return
@@ -3902,24 +3901,47 @@ class PlaybackService : MediaSessionService() {
 
         var anchor = trackAnalyzer.analysisFor(live.getMediaItemAt(firstAutoplay - 1).mediaId)
         if (!anchor.isUsable) return
-        val remaining = tail.toMutableList()
-        val desired = ArrayList<MediaItem>(tail.size)
 
-        while (remaining.isNotEmpty()) {
-            val scored = remaining.mapNotNull { candidate ->
-                val analysis = trackAnalyzer.analysisFor(candidate.mediaId)
-                if (!analysis.isUsable) null
-                else candidate to automixQueueCompatibility(anchor, analysis)
+        // Respect explicit user placement. AutoPlay may continuously reorganize only
+        // untouched future suggestions; manually pinned entries keep their slot.
+        val desired = tail.toMutableList()
+        var cursor = 0
+        while (cursor < tail.size) {
+            if (ManualQueuePins.isPinned(tail[cursor].mediaId) || tail[cursor].queuePinned) {
+                val pinnedAnalysis = trackAnalyzer.analysisFor(tail[cursor].mediaId)
+                if (pinnedAnalysis.isUsable) anchor = pinnedAnalysis
+                cursor += 1
+                continue
             }
-            if (scored.isEmpty()) {
-                // No evidence for the rest: preserve YouTube Radio's original order.
-                desired += remaining
-                break
+
+            val segmentStart = cursor
+            while (
+                cursor < tail.size &&
+                !ManualQueuePins.isPinned(tail[cursor].mediaId) &&
+                !tail[cursor].queuePinned
+            ) {
+                cursor += 1
             }
-            val best = scored.maxByOrNull { it.second }!!.first
-            desired += best
-            anchor = trackAnalyzer.analysisFor(best.mediaId)
-            remaining.remove(best)
+            val segment = tail.subList(segmentStart, cursor).toMutableList()
+            val ordered = ArrayList<MediaItem>(segment.size)
+            while (segment.isNotEmpty()) {
+                val scored = segment.mapNotNull { candidate ->
+                    val analysis = trackAnalyzer.analysisFor(candidate.mediaId)
+                    if (!analysis.isUsable) null
+                    else candidate to automixQueueCompatibility(anchor, analysis)
+                }
+                if (scored.isEmpty()) {
+                    ordered += segment
+                    break
+                }
+                val best = scored.maxByOrNull { it.second }!!.first
+                ordered += best
+                anchor = trackAnalyzer.analysisFor(best.mediaId)
+                segment.remove(best)
+            }
+            ordered.forEachIndexed { offset, item ->
+                desired[segmentStart + offset] = item
+            }
         }
 
         val currentOrder = tail.map { it.mediaId }
@@ -4593,10 +4615,13 @@ class PlaybackService : MediaSessionService() {
                     // or has already settled.
                     primeImmediateSuccessorQuality(player)
                     prioritizeImminentSuccessorBuffer(player)
-                    // Stored analysis may land asynchronously with no Media3
-                    // callback. Revisit the short future window on the existing
-                    // five-second sampler so the queue can improve as evidence
-                    // becomes available, without a separate polling loop.
+                    // Stored/preview analysis may land asynchronously with no Media3
+                    // callback. Re-evaluate AutoPlay on this existing five-second
+                    // sampler so BPM/key/beat evidence can improve the future order
+                    // at any time, without a separate polling loop.
+                    if (AppSettings.autoplay.value && AppSettings.smartFadeEnabled.value) {
+                        applyAutoplayMusicalOrder()
+                    }
                 }
                 delay(PROGRESS_SAMPLE_MS)
             }
