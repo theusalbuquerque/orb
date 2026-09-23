@@ -35,6 +35,7 @@
     <string name="automix_style_crossfade">Equal-Power Crossfade</string>
     <string name="nerd_analysis_waiting">Waiting</string>
     <string name="nerd_analysis_analysing">Analyzing</string>
+    <string name="nerd_analysis_ready_for_plan">Ready to plan</string>
     <string name="nerd_analysis_analysed">Analyzed</string>
     <string name="nerd_analysis_refining">Refining</string>
     <string name="nerd_analysis_failed">Failed</string>
