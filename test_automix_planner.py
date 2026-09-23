@@ -136,7 +136,8 @@ class AutomixPlannerTest(unittest.TestCase):
         self.assertEqual(result["automixVersion"], "2.5")
         self.assertEqual(result["authority"], "server")
         self.assertIn(result["style"], {
-            "RUNWAY_BLEND", "PHRASE_TAKEOVER",
+            "RUNWAY_BLEND", "INTRO_BED", "INTRO_BRIDGE_FILTER",
+            "FOREGROUND_TAKEOVER", "PHRASE_TAKEOVER",
             "DJ_BLEND", "DJ_FILTER", "EQ_SWAP", "PHRASE_CUT", "CUT",
         })
 
@@ -654,12 +655,12 @@ class AutomixPlannerTest(unittest.TestCase):
         self.assertAlmostEqual(float(pair["releaseFraction"]), 0.5, delta=0.10)
         self.assertGreaterEqual(float(pair["phraseAlignment"]), 0.78)
 
-    def test_removed_transition_families_never_selected(self) -> None:
-        a = track(bpm=128.0, key="C major", vocal=0.10, duration=180.0)
-        b = track(bpm=128.0, key="A minor", vocal=0.10, duration=180.0)
+    def test_instrumental_bed_families_are_available_remotely(self) -> None:
+        a = track(bpm=128.0, key="C major", vocal=0.72, duration=180.0)
+        b = track(bpm=128.0, key="A minor", vocal=0.16, duration=180.0)
 
-        # Even a pair that previously looked ideal for a long instrumental bed
-        # must now resolve through the active strategy set.
+        # A stays active to the end while B exposes a long, low-vocal intro
+        # followed by a sustained energy/bass arrival.
         for index, point in enumerate(a["energyCurve"]):
             if point["time"] >= 100.0:
                 point["energy"] = 0.84
@@ -675,14 +676,40 @@ class AutomixPlannerTest(unittest.TestCase):
                 point["energy"] = 0.86
                 b["lowEnergyCurve"][index]["energy"] = 0.78
                 b["vocalActivityMask"][index] = 0.18
+        b["introEndTime"] = 56.0
+        b["mixInTime"] = 56.0
         b["vocalProbability"] = 0.16
 
-        best, candidates = automix._remote_plan(a, b)
-        removed = {"INTRO_BED", "INTRO_BRIDGE_FILTER", "FOREGROUND_TAKEOVER"}
+        _, candidates = automix._remote_plan(a, b)
+        styles = {candidate["style"] for candidate in candidates}
 
-        self.assertNotIn(best["style"], removed)
-        self.assertFalse(any(candidate["style"] in removed for candidate in candidates))
+        self.assertTrue(
+            {"INTRO_BED", "INTRO_BRIDGE_FILTER"} & styles,
+            f"expected a remote instrumental-bed family, got {styles}",
+        )
 
+    def test_foreground_takeover_is_available_remotely(self) -> None:
+        a = track(bpm=120.0, key="C major", vocal=0.12, duration=160.0)
+        b = track(bpm=121.0, key="A minor", vocal=0.58, duration=160.0)
+
+        for index, point in enumerate(a["energyCurve"]):
+            if point["time"] >= 145.0:
+                point["energy"] = 0.28
+                a["vocalActivityMask"][index] = 0.08
+        a["vocalProbability"] = 0.10
+
+        for index, point in enumerate(b["energyCurve"]):
+            if point["time"] <= 8.0:
+                point["energy"] = 0.86
+                b["vocalActivityMask"][index] = 0.62
+        b["introEndTime"] = 4.0
+        b["mixInTime"] = 0.0
+        b["vocalProbability"] = 0.58
+
+        _, candidates = automix._remote_plan(a, b)
+        self.assertTrue(
+            any(candidate["style"] == "FOREGROUND_TAKEOVER" for candidate in candidates)
+        )
 
     def test_good_energy_without_structural_anchors_never_becomes_dj_overlap(self) -> None:
         a = track(bpm=128.0, key="C major", vocal=0.10)
