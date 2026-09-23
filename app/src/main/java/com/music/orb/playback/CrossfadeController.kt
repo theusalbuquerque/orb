@@ -163,7 +163,7 @@ class CrossfadeController(
      */
     private val analysisRunningFor: (MediaItem) -> Boolean = { false },
     /** True only when the analysis is final enough for the 2.5 remote planner. */
-    private val analysisReadyForPlan: (MediaItem) -> Boolean = { true },
+    private val analysisReadyForPlan: (MediaItem, Boolean) -> Boolean = { _, _ -> true },
     /** True only when B has a validated route selected for this A→B pair. */
     private val incomingAudioReadyFor: (MediaItem) -> Boolean = { true },
 ) {
@@ -687,8 +687,8 @@ class CrossfadeController(
         // The server only needs musical evidence. Waiting for B's quality preflight used to
         // consume most of A's runway and made otherwise valid recipes arrive after their beat.
         // The standby player still proves the actual route/buffer before B becomes audible.
-        val currentReadyForPlan = !useAutomix25 || analysisReadyForPlan(currentItem)
-        val nextReadyForPlan = !useAutomix25 || analysisReadyForPlan(nextItem)
+        val currentReadyForPlan = !useAutomix25 || analysisReadyForPlan(currentItem, false)
+        val nextReadyForPlan = !useAutomix25 || analysisReadyForPlan(nextItem, true)
 
         if (useAutomix25 &&
             currentReadyForPlan && nextReadyForPlan &&
@@ -945,8 +945,15 @@ class CrossfadeController(
         AppSettings.automixVersion.value == AutomixVersion.V2_5 &&
             AppSettings.automix25Available.value &&
             analysis.isUsable &&
-            !analysisReadyForPlan(item) ->
+            !analysisReadyForPlan(item, requireIncomingAudioReady) ->
             if (analysisRunningFor(item)) TrackAnalysisState.REFINING else TrackAnalysisState.ANALYSING
+        analysis.isUsable &&
+            AppSettings.automixVersion.value == AutomixVersion.V2_5 &&
+            AppSettings.automix25Available.value &&
+            requireIncomingAudioReady &&
+            analysisReadyForPlan(item, true) &&
+            analysisRunningFor(item) ->
+            TrackAnalysisState.READY_FOR_PLAN
         analysis.isUsable ->
             if (analysisRunningFor(item)) TrackAnalysisState.REFINING else TrackAnalysisState.ANALYSED
         analysisRunningFor(item) -> TrackAnalysisState.ANALYSING
