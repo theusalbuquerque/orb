@@ -261,7 +261,10 @@ object AppSettings {
     val syncedLyrics = MutableStateFlow(true)
 
     /** The databases [syncedLyrics] may ask. Empty is the same as off. */
-    val lyricsSources = MutableStateFlow(LyricsSource.entries.toSet())
+    private fun availableLyricsSources(): Set<LyricsSource> =
+        LyricsSource.entries.filterNot { it == LyricsSource.YOUTUBE_MUSIC }.toSet()
+
+    val lyricsSources = MutableStateFlow(availableLyricsSources())
 
     /** Keep looking for syllable/word timing after a line-synced result is found. */
     val prioritizeSyllableSync = MutableStateFlow(false)
@@ -813,8 +816,9 @@ object AppSettings {
     }
 
     fun setLyricsSources(value: Set<LyricsSource>) {
-        lyricsSources.value = value
-        prefs.edit().putString(KEY_LYRICS_SOURCES, value.joinToString(",") { it.name }).apply()
+        val sanitized = value.filterNot { it == LyricsSource.YOUTUBE_MUSIC }.toSet()
+        lyricsSources.value = sanitized
+        prefs.edit().putString(KEY_LYRICS_SOURCES, sanitized.joinToString(",") { it.name }).apply()
     }
 
     fun setPrioritizeSyllableSync(value: Boolean) {
@@ -848,10 +852,11 @@ object AppSettings {
         val stored = prefs.getString(KEY_LYRICS_SOURCES, null)
         if (stored == null) {
             prefs.edit().putBoolean(KEY_LYRICS_PROVIDER_EXPANSION_MIGRATED, true).apply()
-            return LyricsSource.entries.toSet()
+            return availableLyricsSources()
         }
         val parsed = stored.split(",")
             .mapNotNull { name -> LyricsSource.entries.firstOrNull { it.name == name } }
+            .filterNot { it == LyricsSource.YOUTUBE_MUSIC }
             .toSet()
         if (prefs.getBoolean(KEY_LYRICS_PROVIDER_EXPANSION_MIGRATED, false)) return parsed
 
@@ -863,7 +868,9 @@ object AppSettings {
             LyricsSource.SIMP_MUSIC,
             LyricsSource.LRCLIB,
         )
-        val migrated = parsed + LyricsSource.entries.filterNot { it in legacy }
+        val migrated = parsed + LyricsSource.entries.filterNot {
+            it in legacy || it == LyricsSource.YOUTUBE_MUSIC
+        }
         prefs.edit()
             .putString(KEY_LYRICS_SOURCES, migrated.joinToString(",") { it.name })
             .putBoolean(KEY_LYRICS_PROVIDER_EXPANSION_MIGRATED, true)
