@@ -27,10 +27,9 @@
 // beside the decode around it, and a string is far easier to log and to test
 // against than a hand-packed buffer.
 //
-// Only the subset the transition policy actually reads is emitted. Chroma,
-// the mid and high energy curves, loudness, peak and dynamic range are
-// computed by the analyzer but nothing downstream consumes them, and emitting
-// them would mean three more float arrays per track for no reader.
+// Schema 6 sends transition metadata to the remote planner, so the spectral
+// evidence already computed by the native analyzer is emitted as well. Raw
+// audio never leaves the device.
 
 #include <jni.h>
 
@@ -166,6 +165,12 @@ Java_com_music_orb_playback_smart_TrackFeatures_nativeAnalyze(
   AppendEnergyCurve(json, result.energy_curve);
   json += ",\"lowEnergyCurve\":";
   AppendEnergyCurve(json, result.low_energy_curve);
+  json += ",\"midEnergyCurve\":";
+  AppendEnergyCurve(json, result.mid_energy_curve);
+  json += ",\"highEnergyCurve\":";
+  AppendEnergyCurve(json, result.high_energy_curve);
+  json += ",\"chroma\":";
+  AppendDoubles(json, result.chroma);
   json += ",\"mixInCandidates\":";
   AppendCuePoints(json, result.mix_in_candidates);
   json += ",\"mixOutCandidates\":";
