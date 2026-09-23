@@ -422,13 +422,26 @@ def _hybrid_beat_grid(
     if not native_valid:
         return lib_bpm, lib_conf, lib_beats, "librosa"
 
-    # Compare tempo modulo the common half/double-time ambiguity.
-    ratios = (
-        abs(lib_bpm / native_bpm - 1.0),
-        abs((lib_bpm * 2.0) / native_bpm - 1.0),
-        abs((lib_bpm * 0.5) / native_bpm - 1.0),
-    )
-    tempo_disagreement = min(ratios)
+    # Compare tempo modulo the common half/double-time ambiguity, and normalize
+    # Librosa's *grid* as well as its scalar BPM. Treating 90 and 180 as equivalent
+    # without changing beat spacing would align every other beat and corrupt downbeats.
+    tempo_hypotheses = [
+        (abs(lib_bpm / native_bpm - 1.0), 1.0),
+        (abs((lib_bpm * 2.0) / native_bpm - 1.0), 2.0),
+        (abs((lib_bpm * 0.5) / native_bpm - 1.0), 0.5),
+    ]
+    tempo_disagreement, lib_factor = min(tempo_hypotheses, key=lambda item: item[0])
+    if lib_factor == 2.0 and len(lib_beats) >= 2:
+        expanded: list[float] = []
+        for left, right in zip(lib_beats, lib_beats[1:], strict=False):
+            expanded.extend([left, (left + right) * 0.5])
+        expanded.append(lib_beats[-1])
+        lib_beats = expanded
+        lib_bpm *= 2.0
+    elif lib_factor == 0.5:
+        lib_beats = lib_beats[::2]
+        lib_bpm *= 0.5
+
     native_support = _beat_grid_support(native_beats, onset, hop_seconds)
     lib_support = _beat_grid_support(lib_beats, onset, hop_seconds)
 
