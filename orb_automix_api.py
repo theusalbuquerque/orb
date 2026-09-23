@@ -1,10 +1,9 @@
-"""Remote musical intelligence for Orb Automix.
+"""Remote musical planner for Orb Automix 2.5.
 
-Mount this router into the existing Orb FastAPI service. The Android client uploads only its
-standalone lightweight analysis rendition (normally YouTube Opus), never the Lossless/Hi-Res
-playback file. Audio is deleted immediately after feature extraction; only derived metadata is
-kept in a bounded in-memory cache. Automix v5 makes the server the sole authority for choosing
-the transition family, timing and choreography; Android only executes or transport-falls back.
+Schema 6 moves acoustic analysis to Android: Beat This! + Orb DSP measure the transition
+windows locally, then send only derived A.TAIL / B.HEAD metadata here. The server searches
+transition families, timing and choreography; raw audio is no longer required by the current
+client protocol. The legacy /analyze endpoint remains temporarily for older beta builds.
 """
 from __future__ import annotations
 
@@ -21,11 +20,6 @@ from typing import Any
 import av
 import numpy as np
 
-try:
-    import librosa
-except Exception:  # Optional at runtime: native Orb DSP remains a safe fallback.
-    librosa = None
-
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
@@ -33,11 +27,10 @@ from billing_api import premium_entitled_for_account_hash
 
 router = APIRouter(prefix="/api/automix", tags=["automix"])
 
-API_VERSION = 7
-# Schema 5 keeps Librosa as the primary rhythm tracker but limits expensive
-# analysis to the transition-relevant windows: first 90 s + last 90 s.
-# The middle of a track is not needed to plan A -> B.
-ANALYSIS_SCHEMA = 5
+API_VERSION = 8
+# Schema 6 is metadata-first: Android's Beat This! grid is authoritative for
+# rhythm, while the server receives transition-window evidence and only plans.
+ANALYSIS_SCHEMA = 6
 SAMPLE_RATE = int(os.getenv("AUTOMIX_SAMPLE_RATE", "22050"))
 MAX_UPLOAD_BYTES = int(os.getenv("AUTOMIX_MAX_UPLOAD_BYTES", str(24 * 1024 * 1024)))
 MAX_DURATION_SECONDS = float(os.getenv("AUTOMIX_MAX_DURATION_SECONDS", "900"))
@@ -393,98 +386,21 @@ def _fold_tempo_and_grid(bpm: float, beats: list[float]) -> tuple[float, list[fl
     return bpm, result
 
 
-def _librosa_beat_grid(
-    onset_env: np.ndarray,
-    hop_seconds: float,
-) -> tuple[float, float, list[float]]:
-    """Librosa beat-tracker second opinion over Orb's already-computed onset envelope.
-
-    Recomputing a second full STFT/onset-strength pass over every song roughly doubled
-    server analysis time. The expensive acoustic evidence is already present here;
-    Librosa now contributes the independent *tracker* over the same envelope.
-    """
-    if librosa is None or onset_env.size < 16 or hop_seconds <= 0.0:
-        return 0.0, 0.0, []
-    try:
-        hop_length = max(1, int(round(hop_seconds * SAMPLE_RATE)))
-        if float(np.max(onset_env)) <= 1e-8:
-            return 0.0, 0.0, []
-        tempo, beat_frames = librosa.beat.beat_track(
-            onset_envelope=np.asarray(onset_env, dtype=np.float32),
-            sr=SAMPLE_RATE,
-            hop_length=hop_length,
-            trim=False,
-            sparse=True,
-        )
-        bpm = float(np.asarray(tempo).reshape(-1)[0]) if np.asarray(tempo).size else 0.0
-        beats = [
-            float(value)
-            for value in librosa.frames_to_time(
-                np.asarray(beat_frames, dtype=np.int64),
-                sr=SAMPLE_RATE,
-                hop_length=hop_length,
-            ).tolist()
-        ]
-        bpm, beats = _fold_tempo_and_grid(bpm, beats)
-        if not (40.0 <= bpm <= 220.0) or len(beats) < 4:
-            return 0.0, 0.0, []
-
-        # Librosa exposes the grid but not a single confidence scalar. Build one
-        # from onset support plus interval regularity, keeping it intentionally
-        # bounded so agreement with Orb can increase confidence rather than letting
-        # one library become absolute authority.
-        peak = float(np.percentile(onset_env, 95)) + 1e-9
-        beat_strengths = []
-        for frame in np.asarray(beat_frames, dtype=np.int64):
-            lo = max(0, int(frame) - 1)
-            hi = min(onset_env.size, int(frame) + 2)
-            if hi > lo:
-                beat_strengths.append(float(np.max(onset_env[lo:hi])) / peak)
-        intervals = np.diff(np.asarray(beats, dtype=np.float64))
-        regularity = 0.0
-        if intervals.size >= 3:
-            median = float(np.median(intervals))
-            if median > 1e-6:
-                mad = float(np.median(np.abs(intervals - median))) / median
-                regularity = _clamp(1.0 - mad / 0.12, 0.0, 1.0)
-        onset_support = float(np.mean(np.clip(beat_strengths, 0.0, 1.0))) if beat_strengths else 0.0
-        confidence = _clamp(0.35 + 0.35 * onset_support + 0.30 * regularity, 0.0, 0.90)
-        return bpm, confidence, beats
-    except Exception:
-        return 0.0, 0.0, []
-
-
 def _primary_beat_grid(
     onset: np.ndarray,
     hop_seconds: float,
 ) -> tuple[float, float, list[float], str]:
-    """Use Librosa as the primary rhythm tracker; run Orb only as a true fallback.
+    """Legacy audio endpoint fallback only.
 
-    The expensive onset evidence is shared. A healthy Librosa result is accepted
-    directly and the native autocorrelation tracker is never executed for that
-    track. Orb is invoked only when Librosa is absent, fails, or returns a grid
-    with too little support in the actual onset envelope.
+    Current schema-6 clients send Beat This! beats/downbeats from Android and never
+    need server-side beat tracking. Older beta clients hitting /analyze still get
+    Orb's lightweight autocorrelation grid without pulling in Librosa.
     """
-    lib_bpm, lib_conf, lib_beats = _librosa_beat_grid(onset, hop_seconds)
-    lib_valid = 40.0 <= lib_bpm <= 220.0 and len(lib_beats) >= 4
-    if lib_valid:
-        support = _beat_grid_support(lib_beats, onset, hop_seconds)
-        if support >= 0.16:
-            confidence = _clamp(0.72 * lib_conf + 0.28 * support, 0.0, 0.95)
-            return lib_bpm, confidence, lib_beats, "librosa-primary"
-
-    # Only now pay for the native autocorrelation pass.
-    native_bpm, native_conf, native_beats = _beat_grid(onset, hop_seconds)
-    native_valid = 40.0 <= native_bpm <= 220.0 and len(native_beats) >= 4
-    if native_valid:
-        return native_bpm, native_conf, native_beats, "orb-fallback"
-
-    # Preserve the least-bad Librosa evidence for diagnostics, but do not invent
-    # a usable rhythm when both trackers failed.
-    if lib_valid:
-        return lib_bpm, _clamp(lib_conf * 0.70, 0.0, 0.65), lib_beats, "librosa-weak"
+    bpm, confidence, beats = _beat_grid(onset, hop_seconds)
+    valid = 40.0 <= bpm <= 220.0 and len(beats) >= 4
+    if valid:
+        return bpm, confidence, beats, "orb-legacy-fallback"
     return 0.0, 0.0, [], "none"
-
 
 def _tempo_from_beats(
     beats: list[float],
@@ -1247,7 +1163,7 @@ async def health() -> dict[str, Any]:
         "ok": True,
         "version": API_VERSION,
         "automixVersion": "2.5",
-        "analyzer": "orb-remote-dsp-v8",
+        "analyzer": "orb-metadata-planner-v8",
         "plannerRevision": "mix-v9",
         "analysisSchema": ANALYSIS_SCHEMA,
     }
