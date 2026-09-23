@@ -757,14 +757,36 @@ class CrossfadeController(
         val currentInfo = currentItem.toTransitionInfo(duration)
         val nextInfo = nextItem.toTransitionInfo(nextDuration)
         val plan = if (rescueDue) {
-            resilientAutomix25Fallback(
+            // Remote planning is preferred, never mandatory. Once the pair has
+            // waited its short grace period, hand the same measured A/B evidence
+            // to the complete on-device adaptive planner. It may choose any local
+            // Automix family; the minimal structural handoff remains only a final
+            // continuity guard if even the local planner refuses the pair.
+            val local = planTransition(
                 analysis = currentAnalysis,
                 nextAnalysis = nextAnalysis,
                 currentTrack = currentInfo,
                 nextTrack = nextInfo,
                 currentTime = player.currentPosition / 1000.0,
                 duration = duration / 1000.0,
+                fadeSeconds = fallbackSeconds,
+                mode = CrossfadeMode.SMART,
+                styleHint = null,
+                remoteDirective = null,
+                serverAuthoritative = false,
             )
+            if (!local.blocked) {
+                local.copy(reason = "automix-2.5-local-fallback-${local.reason}")
+            } else {
+                resilientAutomix25Fallback(
+                    analysis = currentAnalysis,
+                    nextAnalysis = nextAnalysis,
+                    currentTrack = currentInfo,
+                    nextTrack = nextInfo,
+                    currentTime = player.currentPosition / 1000.0,
+                    duration = duration / 1000.0,
+                )
+            }
         } else {
             planTransition(
                 analysis = currentAnalysis,
@@ -777,9 +799,9 @@ class CrossfadeController(
                 mode = CrossfadeMode.SMART,
                 styleHint = null,
                 remoteDirective = remotePlan,
-                // Automix 2.0 keeps the current local engine from this src. Only
-                // the entitled 2.5 preview delegates musical-family selection to
-                // the new remote planner.
+                // Automix 2.5 prefers the remote recipe. If it cannot arrive
+                // within the grace window above, the complete local planner
+                // takes over instead of leaving the pair pending.
                 serverAuthoritative = useAutomix25,
             )
         }
