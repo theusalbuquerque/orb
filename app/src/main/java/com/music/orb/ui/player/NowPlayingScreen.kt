@@ -974,7 +974,10 @@ fun NowPlayingScreen(
 
     NowPlayingWindowBehavior(
         hideStatusBar = hideStatusBarNowPlaying,
-        keepScreenOn = keepScreenOnNowPlaying,
+        // Expanded lyrics are a reading surface: never let Android dim/lock it
+        // while the user is following the song, regardless of the global
+        // "keep screen on in Now Playing" preference.
+        keepScreenOn = keepScreenOnNowPlaying || lyricsOpen,
         // The first sampled artwork band sits behind the fixed status bar.
         darkStatusIcons = windowArtworkPalette.statusBarProfile.darkIconsAt(0f),
         // The navigation/gesture region sits on the generated player surface.
