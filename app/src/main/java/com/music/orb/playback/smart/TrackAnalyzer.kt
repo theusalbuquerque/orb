@@ -362,7 +362,7 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
 
         // Backend reachability is transient; analysis completeness is not.
         // Never relabel a legacy/schema-3 result as "complete" merely because
-        // the health probe is temporarily false — /plan still requires schema 4.
+        // the health probe is temporarily false — /plan still requires schema 5.
         return !curveAware25 || analysis.analysisSchema >= REMOTE_CURVE_SCHEMA
     }
 
@@ -1944,7 +1944,7 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
 
     private companion object {
         /** Server analysis schema required by curve-aware Automix 2.5 mix-v6. */
-        const val REMOTE_CURVE_SCHEMA = 4
+        const val REMOTE_CURVE_SCHEMA = 5
         const val READY_FOR_PLAN_MIN_BEAT_CONFIDENCE = 0.45
         const val TAG = "BitChordTrackAnalyzer"
 
