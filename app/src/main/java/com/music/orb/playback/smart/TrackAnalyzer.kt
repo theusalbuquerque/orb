@@ -237,11 +237,14 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
     fun requestQueuePreview(trackId: String, uri: Uri, durationSeconds: Double) {
         if (trackId.isBlank()) return
         restoreOnce(trackId)
-        // 2.5 only analyzes the live A/B pair. Queue sorting may reuse stored evidence.
-        if (AppSettings.automixVersion.value == AutomixVersion.V2_5) return
         if (results[trackId]?.isUsable == true) return
-        cache.requestAnalysisHead(uri)
+
+        // AutoPlay ordering is allowed a lightweight head preview in 2.5, but it
+        // never competes with the authoritative A/B pipeline. Full reliable
+        // analysis remains strictly A -> B -> C; this preview extracts only the
+        // rhythm/key evidence needed to order future radio suggestions.
         if (running.isNotEmpty() || reliablePending.isNotEmpty()) return
+        cache.requestAnalysisHead(uri)
         val rendition = headWorthTrying(trackId, uri, durationSeconds) ?: return
         if (!running.add(trackId)) return
 
