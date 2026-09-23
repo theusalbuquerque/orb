@@ -15,5 +15,10 @@ add_library(bitchord_analysis SHARED
 )
 target_include_directories(bitchord_analysis PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${ANALYZER_DIR})
 target_compile_options(bitchord_analysis PRIVATE -O3 -fvisibility=hidden)
+# Keep ELF LOAD and RELRO boundaries compatible with 16 KB Android devices.
+target_link_options(bitchord_analysis PRIVATE
+    "-Wl,-z,max-page-size=16384"
+    "-Wl,-z,common-page-size=16384"
+)
 find_library(log-lib log)
 target_link_libraries(bitchord_analysis ${log-lib})

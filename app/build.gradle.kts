@@ -112,6 +112,9 @@ require(betaRevision in 1..89) {
 }
 
 android {
+    // NDK r28 builds native libraries with 16 KB page support by default.
+    ndkVersion = "28.2.13676358"
+
     namespace = "com.music.orb"
     compileSdk = 36
 

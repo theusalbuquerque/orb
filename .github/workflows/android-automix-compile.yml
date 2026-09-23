@@ -3,6 +3,7 @@ name: Android Automix compile
 on:
   push:
     paths:
+      - "scripts/check_native_page_alignment.py"
       - "app/src/**"
       - "app/src/main/java/com/music/orb/playback/**"
       - "app/src/main/java/com/music/orb/playback/smart/**"
@@ -17,6 +18,7 @@ on:
       - ".github/workflows/android-automix-compile.yml"
   pull_request:
     paths:
+      - "scripts/check_native_page_alignment.py"
       - "app/src/**"
       - "app/src/main/java/com/music/orb/playback/**"
       - "app/src/main/java/com/music/orb/playback/smart/**"
@@ -56,6 +58,17 @@ jobs:
 
       - name: Assemble Dev and Prod debug APKs
         run: ./gradlew :app:assembleDevDebug :app:assembleProdDebug --stacktrace
+
+      - name: Verify native 16 KB page alignment
+        run: python3 scripts/check_native_page_alignment.py 'app/build/outputs/apk/**/*.apk'
+
+      - name: Upload verified debug APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: Orb-debug-16KB
+          path: app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Package updated Orb
         run: |
