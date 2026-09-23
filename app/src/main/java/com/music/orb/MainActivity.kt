@@ -1839,13 +1839,11 @@ private fun BitChordApp(
         if (!autoplay || activeNetworkMetered == null) return@LaunchedEffect
         if (player.repeatMode == Player.REPEAT_MODE_ALL) return@LaunchedEffect
 
-        // Do not wait until the very last note to ask YouTube Music what follows.
-        // Keeping a small tail already appended gives playback time to prepare and
-        // order AutoPlay before the listener crosses the user/AutoPlay boundary.
+        // Refill only when the live queue is genuinely close to its end.
+        // Two remaining tracks give Automix enough runway to inspect/order the next
+        // batch without maintaining a large speculative radio tail.
         val remaining = (player.queue.lastIndex - player.queueIndex).coerceAtLeast(0)
-        val futureSuggestions = player.queue.drop(player.queueIndex + 1).count { it.fromAutoplay }
-        if (automixForSuggestions && futureSuggestions >= 8) return@LaunchedEffect
-        if (!automixForSuggestions && remaining > AUTOPLAY_PREFETCH_REMAINING) return@LaunchedEffect
+        if (remaining > AUTOPLAY_PREFETCH_REMAINING) return@LaunchedEffect
 
         // Seed from the tail that will actually lead into the new batch, not
         // necessarily from the song playing right now. On an album this means
@@ -1865,7 +1863,11 @@ private fun BitChordApp(
                 val candidates = related
                     .filterNot(viewModel::shouldAvoidPlayback)
                     .sortedByDescending(viewModel::shouldPreferPlayback)
-                val extra = QueueBuilder.extend(player.queue, candidates, if (automixForSuggestions) 24 else RADIO_BATCH)
+                val extra = QueueBuilder.extend(
+                    player.queue,
+                    candidates,
+                    AUTOPLAY_REFILL_BATCH,
+                )
                 if (extra.isNotEmpty()) {
                     val resolved = coroutineScope {
                         extra.map { async { YtMusicRepository.resolveAudio(it) } }.awaitAll()
@@ -1873,8 +1875,11 @@ private fun BitChordApp(
                     controller?.addMediaItems(
                         resolved
                             .filterNot(viewModel::shouldAvoidPlayback)
+                            .take(AUTOPLAY_REFILL_BATCH)
                             .map { it.copy(fromAutoplay = true).toMediaItem() },
                     )
+                } else if (autoplaySeed == seedId) {
+                    autoplaySeed = null
                 }
             }
             .onFailure {
@@ -4765,6 +4770,9 @@ private const val RADIO_BATCH = 3
 
 /** Keep this many queued tracks after the playhead before AutoPlay is refilled. */
 private const val AUTOPLAY_PREFETCH_REMAINING = 2
+
+/** AutoPlay grows in small musical batches so Automix can curate each A -> B -> C chain. */
+private const val AUTOPLAY_REFILL_BATCH = 3
 
 private const val SEEK_END_GUARD_MS = 1_000L
 private const val ALBUM_VERSION_FIRST_NOTE_BUDGET_MS = 850L
