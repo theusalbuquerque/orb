@@ -459,6 +459,26 @@ class CrossfadeController(
     }
 
 
+    /**
+     * Analysis completion is an event, not something the 250 ms idle heartbeat should
+     * have to discover. PlaybackService invokes this on Main as soon as A/B evidence
+     * settles so /plan starts immediately and maximizes the remaining runway in A.
+     */
+    fun onAnalysisUpdated(trackId: String) {
+        if (phase != Phase.IDLE) return
+        val live = active()
+        if (!live.isPlaying) return
+        val current = live.currentMediaItem ?: return
+        val nextIndex = live.nextMediaItemIndex
+        val next = if (nextIndex != C.INDEX_UNSET && nextIndex in 0 until live.mediaItemCount) {
+            live.getMediaItemAt(nextIndex)
+        } else {
+            null
+        }
+        if (trackId != current.mediaId && trackId != next?.mediaId) return
+        considerAutoTransition()
+    }
+
     /** Move the controller listener after PlaybackService replaces both ExoPlayers. */
     fun onPlayersRebuilt() {
         if (phase != Phase.IDLE) return
@@ -2813,7 +2833,7 @@ class CrossfadeController(
         const val CUT_IN_FROM = 0.30f
         const val CUT_IN_BY = 0.56f
         const val REMOTE_STYLE_CACHE_LIMIT = 32
-        const val REMOTE_PLAN_RETRY_MS = 3_000L
+        const val REMOTE_PLAN_RETRY_MS = 500L
 
         /** Ramp used when a fade is interrupted. */
         const val BAIL_MS = 120L
