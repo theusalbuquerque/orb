@@ -125,7 +125,9 @@ fun LyricsSourcesDialog(
                     .verticalScroll(rememberScrollState()),
             ) {
                 Column {
-                    LyricsSource.entries.forEach { source ->
+                    LyricsSource.entries
+                        .filterNot { it == LyricsSource.YOUTUBE_MUSIC }
+                        .forEach { source ->
                         AlertRule()
                         val checked = source in selected
                         SourceRow(
