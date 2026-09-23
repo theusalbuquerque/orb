@@ -84,7 +84,7 @@ internal object RemoteAutomixClient {
     private const val TAG = "OrbRemoteAutomix"
     private const val BASE_URL = "https://orb-4mrh.onrender.com"
     private const val VERSION = 8
-    private const val REQUIRED_PLANNER_REVISION = "mix-v9"
+    private const val REQUIRED_PLANNER_REVISION = "mix-v10"
     private const val REQUIRED_ANALYSIS_SCHEMA = 6
     private const val MAX_REMOTE_AUDIO_BYTES = 24L * 1024L * 1024L
     private const val MAX_PLAN_CURVE_POINTS = 1800
@@ -348,6 +348,9 @@ internal object RemoteAutomixClient {
         "RUNWAY_BLEND", "RUNWAY" -> TransitionStyle.RUNWAY_BLEND
         "PHRASE_TAKEOVER", "TAKEOVER" -> TransitionStyle.PHRASE_TAKEOVER
         "EQ_SWAP" -> TransitionStyle.EQ_SWAP
+        "INTRO_BED" -> TransitionStyle.INTRO_BED
+        "INTRO_BRIDGE_FILTER" -> TransitionStyle.INTRO_BRIDGE_FILTER
+        "FOREGROUND_TAKEOVER" -> TransitionStyle.FOREGROUND_TAKEOVER
         "PHRASE_CUT" -> TransitionStyle.PHRASE_CUT
         "CUT" -> TransitionStyle.CUT
         // Equal-power is the manual/simple Crossfade family, not Automix 2.5.
