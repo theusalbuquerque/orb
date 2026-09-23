@@ -25,17 +25,27 @@ def check_apk(path):
                 continue
             offset = struct.unpack_from('<Q', data, 32)[0]
             size, number = struct.unpack_from('<HH', data, 54)
+            headers = [struct.unpack_from('<IIQQQQQQ', data, offset + index * size)
+                       for index in range(number)]
             loads = 0
-            for index in range(number):
-                kind, flags, file_offset, address, _, file_size, mem_size, alignment = struct.unpack_from(
-                    '<IIQQQQQQ', data, offset + index * size
-                )
+            for kind, flags, file_offset, address, _, file_size, mem_size, alignment in headers:
                 if kind == 1:
                     loads += 1
                     if alignment < PAGE or (address - file_offset) % PAGE:
                         errors.append(f'{name}: LOAD not 16 KB aligned ({alignment})')
-                if kind == 0x6474E552 and (address + mem_size) % PAGE:
-                    errors.append(f'{name}: RELRO end not 16 KB aligned')
+                if kind == 0x6474E552:
+                    # A RELRO suffix can safely end before a page boundary when
+                    # the remainder is padding, rather than mutable LOAD data.
+                    end = address + mem_size
+                    protected_start = address // PAGE * PAGE
+                    protected_end = (end + PAGE - 1) // PAGE * PAGE
+                    for load in headers:
+                        if load[0] != 1 or not load[1] & 2:
+                            continue
+                        start = max(protected_start, load[3])
+                        stop = min(protected_end, load[3] + load[6])
+                        if start < stop and (start < address or stop > end):
+                            errors.append(f'{name}: RELRO page overlaps writable data')
             if not loads:
                 errors.append(f'{name}: missing LOAD segments')
             if info.compress_type == zipfile.ZIP_STORED:
