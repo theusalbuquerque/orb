@@ -26,10 +26,15 @@ val githubRepository: String =
         .trim()
         .ifBlank { "theusalbuquerque/orb" }
 
+val publicClientProps = Properties().apply {
+    rootProject.file("orb-client.properties").inputStream().use { load(it) }
+}
+
 fun gradleProperty(name: String): String =
     providers.gradleProperty(name).orNull
         ?: localProps.getProperty(name)
-        ?: providers.environmentVariable(name).orNull.orEmpty()
+        ?: providers.environmentVariable(name).orNull
+        ?: publicClientProps.getProperty(name, "")
 
 fun buildConfigString(value: String): String =
     "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
