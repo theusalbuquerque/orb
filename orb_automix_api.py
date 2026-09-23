@@ -32,9 +32,9 @@ from billing_api import premium_entitled_for_account_hash
 router = APIRouter(prefix="/api/automix", tags=["automix"])
 
 API_VERSION = 7
-# Schema 3 adds hybrid Orb + Librosa beat evidence. Bump it so cached schema-2
-# analyses are automatically recomputed instead of silently bypassing the new detector.
-ANALYSIS_SCHEMA = 3
+# Schema 4 promotes Librosa to the primary rhythm tracker. Orb's autocorrelation
+# tracker is now fallback-only, and local tempo is derived from the accepted beat grid.
+ANALYSIS_SCHEMA = 4
 SAMPLE_RATE = int(os.getenv("AUTOMIX_SAMPLE_RATE", "22050"))
 MAX_UPLOAD_BYTES = int(os.getenv("AUTOMIX_MAX_UPLOAD_BYTES", str(24 * 1024 * 1024)))
 MAX_DURATION_SECONDS = float(os.getenv("AUTOMIX_MAX_DURATION_SECONDS", "900"))
@@ -408,63 +408,108 @@ def _librosa_beat_grid(
         return 0.0, 0.0, []
 
 
-def _hybrid_beat_grid(
-    audio: np.ndarray,
+def _primary_beat_grid(
     onset: np.ndarray,
     hop_seconds: float,
 ) -> tuple[float, float, list[float], str]:
-    """Fuse Orb's tracker with Librosa; uncertainty demotes confidence instead of killing beats."""
-    native_bpm, native_conf, native_beats = _beat_grid(onset, hop_seconds)
+    """Use Librosa as the primary rhythm tracker; run Orb only as a true fallback.
+
+    The expensive onset evidence is shared. A healthy Librosa result is accepted
+    directly and the native autocorrelation tracker is never executed for that
+    track. Orb is invoked only when Librosa is absent, fails, or returns a grid
+    with too little support in the actual onset envelope.
+    """
     lib_bpm, lib_conf, lib_beats = _librosa_beat_grid(onset, hop_seconds)
-
-    native_valid = 40.0 <= native_bpm <= 220.0 and len(native_beats) >= 4
     lib_valid = 40.0 <= lib_bpm <= 220.0 and len(lib_beats) >= 4
-    if not lib_valid:
-        return native_bpm, native_conf, native_beats, "orb"
-    if not native_valid:
-        return lib_bpm, lib_conf, lib_beats, "librosa"
+    if lib_valid:
+        support = _beat_grid_support(lib_beats, onset, hop_seconds)
+        if support >= 0.16:
+            confidence = _clamp(0.72 * lib_conf + 0.28 * support, 0.0, 0.95)
+            return lib_bpm, confidence, lib_beats, "librosa-primary"
 
-    # Compare tempo modulo the common half/double-time ambiguity, and normalize
-    # Librosa's *grid* as well as its scalar BPM. Treating 90 and 180 as equivalent
-    # without changing beat spacing would align every other beat and corrupt downbeats.
-    tempo_hypotheses = [
-        (abs(lib_bpm / native_bpm - 1.0), 1.0),
-        (abs((lib_bpm * 2.0) / native_bpm - 1.0), 2.0),
-        (abs((lib_bpm * 0.5) / native_bpm - 1.0), 0.5),
-    ]
-    tempo_disagreement, lib_factor = min(tempo_hypotheses, key=lambda item: item[0])
-    if lib_factor == 2.0 and len(lib_beats) >= 2:
-        expanded: list[float] = []
-        for left, right in zip(lib_beats, lib_beats[1:], strict=False):
-            expanded.extend([left, (left + right) * 0.5])
-        expanded.append(lib_beats[-1])
-        lib_beats = expanded
-        lib_bpm *= 2.0
-    elif lib_factor == 0.5:
-        lib_beats = lib_beats[::2]
-        lib_bpm *= 0.5
+    # Only now pay for the native autocorrelation pass.
+    native_bpm, native_conf, native_beats = _beat_grid(onset, hop_seconds)
+    native_valid = 40.0 <= native_bpm <= 220.0 and len(native_beats) >= 4
+    if native_valid:
+        return native_bpm, native_conf, native_beats, "orb-fallback"
 
-    native_support = _beat_grid_support(native_beats, onset, hop_seconds)
-    lib_support = _beat_grid_support(lib_beats, onset, hop_seconds)
+    # Preserve the least-bad Librosa evidence for diagnostics, but do not invent
+    # a usable rhythm when both trackers failed.
+    if lib_valid:
+        return lib_bpm, _clamp(lib_conf * 0.70, 0.0, 0.65), lib_beats, "librosa-weak"
+    return 0.0, 0.0, [], "none"
 
-    if tempo_disagreement <= 0.035:
-        # Both independent trackers see the same pulse. Prefer the phase/grid with
-        # stronger onset support and materially raise confidence.
-        if lib_support > native_support + 0.06:
-            bpm, beats, source = lib_bpm, lib_beats, "hybrid-librosa-grid"
-        else:
-            bpm, beats, source = native_bpm, native_beats, "hybrid-orb-grid"
-        agreement_bonus = 0.20 + 0.15 * (1.0 - tempo_disagreement / 0.035)
-        confidence = _clamp(max(native_conf, lib_conf) + agreement_bonus, 0.0, 1.0)
-        return bpm, confidence, beats, source
 
-    # When they disagree, select the grid actually supported by the source audio.
-    # Do not average BPMs: an average of two wrong hypotheses is not a tempo.
-    native_score = 0.58 * native_conf + 0.42 * native_support
-    lib_score = 0.58 * lib_conf + 0.42 * lib_support
-    if lib_score > native_score + 0.10:
-        return lib_bpm, _clamp(lib_conf * 0.88, 0.0, 0.82), lib_beats, "librosa-disagreement"
-    return native_bpm, _clamp(native_conf * 0.88, 0.0, 0.82), native_beats, "orb-disagreement"
+def _tempo_from_beats(
+    beats: list[float],
+    start_s: float,
+    end_s: float,
+    fallback_bpm: float = 0.0,
+    fallback_confidence: float = 0.0,
+) -> tuple[float, float]:
+    """Derive local BPM from the accepted beat grid without another tracker pass."""
+    if end_s <= start_s or len(beats) < 3:
+        return fallback_bpm, fallback_confidence
+
+    local = [beat for beat in beats if start_s - 0.10 <= beat <= end_s + 0.10]
+    if len(local) < 3:
+        return fallback_bpm, fallback_confidence
+
+    intervals = np.diff(np.asarray(local, dtype=np.float64))
+    intervals = intervals[(intervals > 0.15) & (intervals < 2.0)]
+    if intervals.size < 2:
+        return fallback_bpm, fallback_confidence
+
+    median = float(np.median(intervals))
+    if median <= 1e-6:
+        return fallback_bpm, fallback_confidence
+
+    bpm = 60.0 / median
+    while bpm < 70.0:
+        bpm *= 2.0
+    while bpm > 190.0:
+        bpm /= 2.0
+    if not 40.0 <= bpm <= 220.0:
+        return fallback_bpm, fallback_confidence
+
+    deviation = float(np.median(np.abs(intervals - median))) / median
+    regularity = _clamp(1.0 - deviation / 0.10, 0.0, 1.0)
+    coverage = _clamp(intervals.size / max(4.0, (end_s - start_s) * bpm / 60.0), 0.0, 1.0)
+    confidence = _clamp(0.55 * regularity + 0.45 * coverage, 0.0, 0.98)
+    return bpm, confidence
+
+
+def _tempo_curve_from_beats(
+    beats: list[float],
+    duration: float,
+    fallback_bpm: float,
+    fallback_confidence: float,
+) -> list[dict[str, float]]:
+    """Cheap local-tempo curve derived from Librosa's accepted beat grid."""
+    if duration <= 0.0 or len(beats) < 3:
+        return []
+    window_seconds = 18.0
+    step_seconds = 6.0
+    result: list[dict[str, float]] = []
+    center = min(window_seconds / 2.0, duration / 2.0)
+    while center <= duration:
+        start = max(0.0, center - window_seconds / 2.0)
+        end = min(duration, center + window_seconds / 2.0)
+        bpm, confidence = _tempo_from_beats(
+            beats,
+            start,
+            end,
+            fallback_bpm=fallback_bpm,
+            fallback_confidence=fallback_confidence,
+        )
+        if 40.0 <= bpm <= 220.0 and confidence >= 0.12:
+            result.append({
+                "time": round(center, 3),
+                "bpm": round(bpm, 5),
+                "confidence": round(confidence, 5),
+            })
+        center += step_seconds
+    return result
 
 
 def _downbeats_from_beats(
@@ -757,13 +802,17 @@ def _analyze(path: str, track_id: str, declared_duration: float) -> dict[str, An
     beat_frames = _frame_signal(audio, beat_frame, beat_frame)
     beat_rms = np.sqrt(np.mean(beat_frames.astype(np.float64) ** 2, axis=1) + 1e-12)
     onset = np.maximum(0.0, np.diff(np.log1p(beat_rms * 1000.0), prepend=0.0))
-    bpm, beat_conf, beats, beat_source = _hybrid_beat_grid(
-        audio,
+    bpm, beat_conf, beats, beat_source = _primary_beat_grid(
         onset,
         beat_frame / SAMPLE_RATE,
     )
     beat_interval = 60.0 / bpm if bpm > 0 else 0.0
-    tempo_curve = _tempo_curve(onset, beat_frame / SAMPLE_RATE, duration)
+    tempo_curve = _tempo_curve_from_beats(
+        beats,
+        duration,
+        fallback_bpm=bpm,
+        fallback_confidence=beat_conf,
+    )
 
     # Coarse transient curve on the same 500 ms timeline as the spectral curves.
     # The beat grid stays at 100 ms; this curve is for A↔B contour matching, not beat detection.
@@ -792,27 +841,22 @@ def _analyze(path: str, track_id: str, declared_duration: float) -> dict[str, An
     audible_start = float(times[active[0]]) if active.size else 0.0
     content_end = min(duration, float(times[active[-1]] + hop / SAMPLE_RATE)) if active.size else duration
 
-    # Local tempo matters more than a track-wide average at the join. Estimate the first and last
-    # ~30 seconds independently so an intro/outro tempo change does not poison compatibility.
-    def local_tempo(start_s: float, end_s: float) -> tuple[float, float]:
-        start_frame = max(0, int(math.floor(start_s / (beat_frame / SAMPLE_RATE))))
-        end_frame = min(onset.size, int(math.ceil(end_s / (beat_frame / SAMPLE_RATE))))
-        if end_frame - start_frame < 16:
-            return 0.0, 0.0
-        local_bpm, local_conf, _ = _beat_grid(
-            onset[start_frame:end_frame],
-            beat_frame / SAMPLE_RATE,
-        )
-        return local_bpm, local_conf
-
+    # Local tempo comes directly from the already accepted Librosa beat grid.
+    # No second/third beat-tracking pass is needed for intro and outro.
     tempo_window = min(30.0, max(12.0, duration * 0.22))
-    head_bpm, head_beat_conf = local_tempo(
+    head_bpm, head_beat_conf = _tempo_from_beats(
+        beats,
         audible_start,
         min(content_end, audible_start + tempo_window),
+        fallback_bpm=bpm,
+        fallback_confidence=beat_conf,
     )
-    tail_bpm, tail_beat_conf = local_tempo(
+    tail_bpm, tail_beat_conf = _tempo_from_beats(
+        beats,
         max(audible_start, content_end - tempo_window),
         content_end,
+        fallback_bpm=bpm,
+        fallback_confidence=beat_conf,
     )
 
     # Structure anchors from sustained changes in the normalized energy envelope.
