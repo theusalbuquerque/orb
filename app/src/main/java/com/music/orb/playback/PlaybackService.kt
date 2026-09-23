@@ -1278,7 +1278,9 @@ class PlaybackService : MediaSessionService() {
             },
             stemDeck = { transitionStemDeck },
             analysisRunningFor = { item -> trackAnalyzer.isAnalysing(item.mediaId) },
-            analysisReadyForPlan = { item -> trackAnalyzer.isFullyAnalysed(item.mediaId) },
+            analysisReadyForPlan = { item, incoming ->
+                trackAnalyzer.isReadyForPlan(item.mediaId, incoming)
+            },
         )
         crossfade = controller
         controller.start()
@@ -4053,6 +4055,16 @@ class PlaybackService : MediaSessionService() {
         if (!automixOutgoingReadyForIncoming(current.mediaId)) return
 
         item.localConfiguration?.uri?.let { uri ->
+            // Once A is final, B first gets the cheapest useful opening pass.
+            // If that produces enough BPM/beat/key/entry evidence, planning can
+            // start immediately while requestReliable continues the full refinement.
+            if (!trackAnalyzer.isReadyForPlan(item.mediaId, incoming = true)) {
+                trackAnalyzer.requestQueuePreview(
+                    item.mediaId,
+                    uri,
+                    durationMs / 1000.0,
+                )
+            }
             trackAnalyzer.requestReliable(item.mediaId, uri, durationMs / 1000.0)
         }
         primeImmediateSuccessorQuality(live)
