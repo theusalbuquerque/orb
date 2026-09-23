@@ -972,7 +972,7 @@ async def health() -> dict[str, Any]:
         "version": API_VERSION,
         "automixVersion": "2.5",
         "analyzer": "orb-remote-dsp-v8",
-        "plannerRevision": "mix-v8",
+        "plannerRevision": "mix-v9",
         "analysisSchema": ANALYSIS_SCHEMA,
     }
 
@@ -3035,7 +3035,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     # tempo/downbeat evidence is good but harmony/phrase confidence is not strong enough
     # for an open DJ blend. It is still a real overlap: B becomes audible several beats
     # before A ends, both decks share a meeting tempo, and the filter/EQ gesture masks
-    # weaker harmonic evidence. CUT/NO_TRANSITION remain fallbacks *after* this search.
+    # weaker harmonic evidence. CUT remains the final conservative handoff after richer candidates.
     if (
         a_end > 0.0
         and 40.0 <= a_bpm <= 220.0
@@ -3757,7 +3757,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
             4,
         )
 
-    best["planner"] = "orb-automix-2.5-mix-v8"
+    best["planner"] = "orb-automix-2.5-mix-v9"
     best["serverAuthoritative"] = True
     return best, candidates[:5]
 
@@ -3780,7 +3780,7 @@ async def plan(request: PlanRequest) -> dict[str, Any]:
     # minimal fallback is selected here on the server; Android may only reject impossible bounds.
     plan_result = dict(plan_result)
     plan_result["serverAuthoritative"] = True
-    plan_result["planner"] = "orb-automix-2.5-mix-v8"
+    plan_result["planner"] = "orb-automix-2.5-mix-v9"
     return {
         "version": API_VERSION,
         "automixVersion": "2.5",
