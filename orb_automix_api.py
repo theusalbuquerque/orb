@@ -2522,6 +2522,39 @@ def _candidate_plan(style: str, score: float, reason: str, **kwargs: Any) -> dic
     return plan
 
 
+def _candidate_selection_score(candidate: dict[str, Any]) -> float:
+    """Compare transition recipes on musical evidence, never on family name.
+
+    Each generator still has family-specific rules for constructing something
+    executable, but once a candidate exists every style competes on the same
+    dimensions. This prevents RUNWAY/TAKEOVER/BLEND/CUT from having an implicit
+    hard-coded priority just because of an if/elif ordering.
+    """
+    raw = _clamp(_finite(candidate.get("score"), 0.0), 0.0, 1.0)
+    pair = _clamp(_finite(candidate.get("pairCompatibility"), raw), 0.0, 1.0)
+    curve = _clamp(_finite(candidate.get("curveCompatibility"), 0.5), 0.0, 1.0)
+    phrase = _clamp(_finite(candidate.get("phraseAlignment"), 0.5), 0.0, 1.0)
+    tempo = _clamp(_finite(candidate.get("tempoCompatibility"), 0.5), 0.0, 1.0)
+    key = _clamp(_finite(candidate.get("keyCompatibility"), 0.5), 0.0, 1.0)
+    vocal_safety = 1.0 - _clamp(_finite(candidate.get("overlapVocalClash"), 0.25), 0.0, 1.0)
+    energy = _clamp(_finite(candidate.get("energyCompatibility"), 0.5), 0.0, 1.0)
+    span = _clamp(_finite(candidate.get("spanCompatibility"), 0.5), 0.0, 1.0)
+
+    return _clamp(
+        0.26 * raw
+        + 0.17 * pair
+        + 0.12 * curve
+        + 0.11 * phrase
+        + 0.10 * tempo
+        + 0.07 * key
+        + 0.09 * vocal_safety
+        + 0.05 * energy
+        + 0.03 * span,
+        0.0,
+        1.0,
+    )
+
+
 def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     a_release, a_end, protected = _release_landmarks(a)
     b_audible_start = _audible_start(b)
@@ -3563,101 +3596,132 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                 gainEnvelope=[],
             ))
 
-    # 5) Doing nothing is a first-class Automix decision. Weak beat evidence, harmonic
-    # conflict or a vocal collision can make natural playback better than an artificial blend.
-    if a_end > 0.0:
-        weak_evidence = 1.0 - _clamp(0.55 * conf + 0.45 * tempo, 0.0, 1.0)
-        no_mix_score = (
-            0.22 + 0.30 * weak_evidence + 0.22 * (1.0 - key_fit) +
-            0.16 * vocal_clash + (0.12 if not key_evidence else 0.0)
-        )
+    # 5) Automix 2.5 always creates a transition in normal playback.
+    # "No transition" is reserved for album-original-order playback, which is
+    # intercepted on Android before analysis/planning reaches this endpoint.
+    #
+    # If all richer generators declined the pair, build one conservative but
+    # still intentional fallback from the actual vocal/tempo evidence instead of
+    # silently giving up. High vocal collision gets a phrase-style handoff;
+    # otherwise a short filtered bridge masks weak harmonic/tempo evidence.
+    if not candidates and a_end > 0.0 and b_end > b_start:
+        beat = 60.0 / a_bpm if a_bpm > 0.0 else 0.55
+        if vocal_clash >= 0.55 or b_open_vocal >= 0.62:
+            fallback_span = _clamp(beat * 1.5, 0.55, 1.40)
+            fallback_start = max(0.0, a_end - fallback_span)
+            candidates.append(_candidate_plan(
+                "PHRASE_CUT",
+                0.42 + 0.14 * (1.0 - vocal_clash),
+                "server-adaptive-phrase-fallback",
+                transitionStart=round(fallback_start, 4),
+                transitionEnd=round(a_end, 4),
+                incomingCueTime=round(b_start, 4),
+                incomingHandoffTime=round(b_start, 4),
+                outgoingPlaybackRate=1.0,
+                incomingPlaybackRate=1.0,
+                transitionBeats=1,
+                requestedTransitionBeats=1,
+                handoffFraction=0.72,
+                bassSwap=False,
+                bassSwapFraction=0.72,
+                filterSweep=0.0,
+                keyCompatibility=round(key_fit, 4),
+                tempoCompatibility=round(tempo, 4),
+                phraseAlignment=0.50,
+                overlapVocalClash=round(vocal_clash, 4),
+                energyCompatibility=0.50,
+                pairCompatibility=round(_clamp(0.55 * (1.0 - vocal_clash) + 0.45 * tempo, 0.0, 1.0), 4),
+                spanCompatibility=1.0,
+                gainEnvelope=[],
+            ))
+        else:
+            fallback_span = _clamp(4.0 * beat, 2.0, 6.0)
+            fallback_start = max(0.0, a_end - fallback_span)
+            candidates.append(_candidate_plan(
+                "DJ_FILTER",
+                0.44 + 0.12 * tempo + 0.10 * (1.0 - vocal_clash),
+                "server-adaptive-filter-fallback",
+                transitionStart=round(fallback_start, 4),
+                transitionEnd=round(a_end, 4),
+                incomingCueTime=round(b_start, 4),
+                incomingHandoffTime=round(b_start, 4),
+                outgoingPlaybackRate=1.0,
+                incomingPlaybackRate=1.0,
+                transitionBeats=max(2, int(round(fallback_span / max(beat, 1e-6)))),
+                requestedTransitionBeats=4,
+                handoffFraction=0.66,
+                bassSwap=False,
+                bassSwapFraction=0.66,
+                filterSweep=round(_clamp(0.72 + 0.18 * (1.0 - key_fit), 0.72, 0.96), 4),
+                keyCompatibility=round(key_fit, 4),
+                tempoCompatibility=round(tempo, 4),
+                phraseAlignment=0.50,
+                overlapVocalClash=round(vocal_clash, 4),
+                energyCompatibility=0.50,
+                pairCompatibility=round(_clamp(0.45 * tempo + 0.55 * (1.0 - vocal_clash), 0.0, 1.0), 4),
+                spanCompatibility=1.0,
+                gainEnvelope=[
+                    {"progress": 0.0, "incomingGain": 0.0, "outgoingGain": 1.0},
+                    {"progress": 0.35, "incomingGain": 0.22, "outgoingGain": 1.0},
+                    {"progress": 0.66, "incomingGain": 0.68, "outgoingGain": 0.72},
+                    {"progress": 1.0, "incomingGain": 1.0, "outgoingGain": 0.0},
+                ],
+            ))
+
+    if not candidates:
+        # Degenerate metadata should still not surface NO_TRANSITION in normal
+        # Automix playback. Use a minimal clean handoff rather than inventing silence.
+        end = max(0.0, a_end)
+        start = max(0.0, end - 0.65)
         candidates.append(_candidate_plan(
-            "NO_TRANSITION", no_mix_score, "server-no-transition",
-            transitionStart=round(a_end, 4), transitionEnd=round(a_end, 4),
-            incomingCueTime=round(b_start, 4), incomingHandoffTime=round(b_start, 4),
-            outgoingPlaybackRate=1.0, incomingPlaybackRate=1.0,
-            transitionBeats=0,
-            handoffFraction=1.0, bassSwap=False, bassSwapFraction=0.70,
+            "CUT",
+            0.30,
+            "server-minimal-handoff",
+            transitionStart=round(start, 4),
+            transitionEnd=round(end, 4),
+            incomingCueTime=round(max(0.0, b_start), 4),
+            incomingHandoffTime=round(max(0.0, b_start), 4),
+            outgoingPlaybackRate=1.0,
+            incomingPlaybackRate=1.0,
+            transitionBeats=1,
+            requestedTransitionBeats=1,
+            handoffFraction=0.86,
+            bassSwap=False,
+            bassSwapFraction=0.70,
             filterSweep=0.0,
             keyCompatibility=round(key_fit, 4),
             tempoCompatibility=round(tempo, 4),
+            phraseAlignment=0.25,
+            overlapVocalClash=round(vocal_clash, 4),
+            energyCompatibility=0.40,
+            pairCompatibility=0.30,
+            spanCompatibility=1.0,
             gainEnvelope=[],
         ))
 
-    if not candidates:
-        return _candidate_plan(
-            "NO_TRANSITION", 0.50, "server-minimal-no-transition",
-            transitionStart=a_end, transitionEnd=a_end,
-            incomingCueTime=b_start, incomingHandoffTime=b_start,
-            outgoingPlaybackRate=1.0, incomingPlaybackRate=1.0,
-            handoffFraction=0.50, bassSwap=False, bassSwapFraction=0.70,
-            filterSweep=0.0, gainEnvelope=[],
-        ), []
+    # No transition family has priority. All executable recipes are normalized
+    # through the same musical-quality score and compete directly.
+    for candidate in candidates:
+        candidate["selectionScore"] = round(_candidate_selection_score(candidate), 4)
 
-    candidates.sort(key=lambda x: x["score"], reverse=True)
-
-    # The 2.5 product is a mixing engine, not a silence skipper. A valid overlap
-    # outranks a cut even when the cut's scalar score is slightly higher. Only when
-    # no safe overlap exists do we consider phrase/cut handoffs; natural playback is last.
-    overlap_floor = {
-        "RUNWAY_BLEND": 0.44,
-        "DJ_BLEND": 0.42,
-        "DJ_FILTER": 0.36,
-        "EQ_SWAP": 0.42,
-        "PHRASE_TAKEOVER": 0.40,
-    }
-    overlap_candidates = [
-        candidate
-        for candidate in candidates
-        if candidate.get("style") in overlap_floor
-        and candidate.get("score", 0.0) >= overlap_floor[candidate.get("style")]
-    ]
-    cut_floor = {
-        "PHRASE_CUT": 0.34,
-        "CUT": 0.36,
-    }
-    cut_candidates = [
-        candidate
-        for candidate in candidates
-        if candidate.get("style") in cut_floor
-        and candidate.get("score", 0.0) >= cut_floor[candidate.get("style")]
-    ]
-
-    if overlap_candidates:
-        runway_overlap = [
-            candidate for candidate in overlap_candidates
-            if candidate.get("style") == "RUNWAY_BLEND"
-        ]
-        takeover_overlap = [
-            candidate for candidate in overlap_candidates
-            if candidate.get("style") == "PHRASE_TAKEOVER"
-        ]
-        open_overlap = [
-            candidate
-            for candidate in overlap_candidates
-            if candidate.get("style") in {"DJ_BLEND", "EQ_SWAP"}
-        ]
-        # Arrangement-specific opportunities outrank generic grid matches. A measured long
-        # runway is exactly the behaviour seen in the supplied Apple/Spotify references, and a
-        # real A-release + immediate B opening is better served by takeover than by stretching a
-        # full symmetric blend across music A has already released.
-        if runway_overlap:
-            best = max(runway_overlap, key=lambda x: x["score"])
-        elif takeover_overlap:
-            best = max(takeover_overlap, key=lambda x: x["score"])
-        else:
-            # Otherwise prefer richer open/bass-swap techniques before the conservative filter.
-            best = max(open_overlap or overlap_candidates, key=lambda x: x["score"])
-    elif cut_candidates:
-        best = max(cut_candidates, key=lambda x: x["score"])
-    else:
-        best = max(candidates, key=lambda x: x["score"])
-    second = max(
-        (candidate["score"] for candidate in candidates if candidate is not best),
-        default=0.0,
+    candidates.sort(
+        key=lambda candidate: (
+            candidate["selectionScore"],
+            candidate.get("score", 0.0),
+        ),
+        reverse=True,
     )
-    # Confidence describes confidence in the *choice among candidates*, not analysis quality alone.
-    confidence = _clamp(0.48 + 0.36 * best["score"] + 0.28 * max(0.0, best["score"] - second), 0.0, 0.99)
+    best = candidates[0]
+    second = candidates[1]["selectionScore"] if len(candidates) > 1 else 0.0
+    best_selection = best["selectionScore"]
+
+    # Confidence describes confidence in the choice among candidates, not a
+    # preference for any particular transition family.
+    confidence = _clamp(
+        0.44 + 0.40 * best_selection + 0.28 * max(0.0, best_selection - second),
+        0.0,
+        0.99,
+    )
     best = dict(best)
     best["confidence"] = round(confidence, 4)
     best["protectedOutgoing"] = protected
