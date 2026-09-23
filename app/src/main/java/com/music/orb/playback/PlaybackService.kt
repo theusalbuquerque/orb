@@ -3954,9 +3954,17 @@ class PlaybackService : MediaSessionService() {
         val current = player.getMediaItemAt(currentIndex)
         requestAutomixAnalysisFor(player, currentIndex, current)
 
+        val nextIndex = player.nextMediaItemIndex
+        if (nextIndex != C.INDEX_UNSET && nextIndex in 0 until player.mediaItemCount &&
+            AppSettings.wifiConnection.value == true
+        ) {
+            // Preserve strict A -> B inference ordering, but pull B's immutable
+            // analysis carrier down while A is using CPU/server time.
+            player.getMediaItemAt(nextIndex).localConfiguration?.uri?.let(trackAnalyzer::prewarmReliableAudio)
+        }
+
         if (!automixOutgoingReadyForIncoming(current.mediaId)) return
 
-        val nextIndex = player.nextMediaItemIndex
         if (nextIndex == C.INDEX_UNSET || nextIndex !in 0 until player.mediaItemCount) return
         val next = player.getMediaItemAt(nextIndex)
         // B's Automix preparation is composite: start DSP analysis and best-route discovery
