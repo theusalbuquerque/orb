@@ -1854,7 +1854,7 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
 
     private companion object {
         /** Server analysis schema required by curve-aware Automix 2.5 mix-v6. */
-        const val REMOTE_CURVE_SCHEMA = 2
+        const val REMOTE_CURVE_SCHEMA = 3
         const val TAG = "BitChordTrackAnalyzer"
 
         /**
