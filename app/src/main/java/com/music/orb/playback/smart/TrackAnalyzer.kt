@@ -1843,6 +1843,7 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
                     it,
                     actualStart,
                     featureOffsetSeconds = if (features == null) actualStart else 0.0,
+                    preferTailCoverage = startSeconds > 0.5,
                 )
             },
             seconds = seconds,
@@ -1892,44 +1893,111 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
     }
 
     /**
-     * A vocal-presence value for every point on the energy curve, filled only where the model
-     * actually ran.
+     * Builds a full transition-window vocal curve without making Open-Unmix process all 60-90 s.
      *
-     * The policy indexes the mask against energy-curve sample times and requires the two to be the
-     * same length, but the model's window is fixed at about 22 seconds, far less than a track. So
-     * the mask is built at full length and filled only over this region.
-     *
-     * Everywhere else stays at [NEUTRAL_VOCAL]. That is not a guess dressed up as data: it sits
-     * below the policy's own VOCAL_ACTIVE_THRESHOLD, so unmeasured material can never trip vocal
-     * logic in either direction.
+     * The native DSP mask is the baseline for the whole region. Open-Unmix then overwrites the
+     * transition-critical probes it actually measured: the opening of an incoming track, the real
+     * ending of an outgoing track, and one late-intro probe when B exposes a long runway. This
+     * keeps the expensive model bounded while avoiding the old failure mode where every unmeasured
+     * point became a neutral 0.5 and the final 60 s of A were effectively invisible to vocal logic.
      */
     private fun vocalMask(
         stereo: AudioDecoder.StereoPcm,
         features: TrackFeatures.Features,
         actualStart: Double,
         featureOffsetSeconds: Double = 0.0,
+        preferTailCoverage: Boolean = false,
     ): DoubleArray? {
         val curve = features.energyCurve
         if (curve.isEmpty() || !VocalSpectrogram.available) return null
 
-        // The beat model's window is longer than the vocal model's fixed input, so the region is
-        // trimmed rather than handed over whole — [VocalTracker.track] refuses anything wider than
-        // its graph, and refusing is how the tail of every region would otherwise go unmeasured.
         // Two frames of margin absorb the ±1 sample a rate conversion can land on.
-        val maxSeconds = (VocalTracker.FIXED_FRAMES - 2) * VocalSpectrogram.hop / VocalSpectrogram.sampleRate
+        val maxSeconds =
+            (VocalTracker.FIXED_FRAMES - 2) * VocalSpectrogram.hop / VocalSpectrogram.sampleRate
         val maxSamples = (maxSeconds * stereo.sampleRate).toInt().coerceAtMost(stereo.left.size)
         if (maxSamples <= 0) return null
-        val left = if (maxSamples < stereo.left.size) stereo.left.copyOf(maxSamples) else stereo.left
-        val right = if (maxSamples < stereo.right.size) stereo.right.copyOf(maxSamples) else stereo.right
 
-        val values = vocals.track(left, right, stereo.sampleRate) ?: return null
-
-        val mask = DoubleArray(curve.size) { NEUTRAL_VOCAL }
-        for (index in curve.indices) {
-            val frame = ((curve[index].time + featureOffsetSeconds - actualStart) * VocalSpectrogram.frameRate).toInt()
-            if (frame in values.indices) mask[index] = values[frame].toDouble()
+        // Keep the DSP estimate everywhere the model does not run. The model is a refinement,
+        // not a reason to throw away already-measured vocal evidence from the rest of the window.
+        val mask = DoubleArray(curve.size) { index ->
+            features.vocalActivityMask.getOrNull(index)
+                ?.takeIf { it.isFinite() }
+                ?.coerceIn(0.0, 1.0)
+                ?: NEUTRAL_VOCAL
         }
-        return mask
+        var measuredAny = false
+        val usedStarts = ArrayList<Int>(2)
+
+        fun runProbe(rawStartSample: Int) {
+            val startSample = rawStartSample
+                .coerceIn(0, (stereo.left.size - maxSamples).coerceAtLeast(0))
+            if (usedStarts.any { abs(it - startSample) < maxSamples / 3 }) return
+            usedStarts += startSample
+
+            val endSample = minOf(stereo.left.size, startSample + maxSamples)
+            if (endSample - startSample < stereo.sampleRate.toInt().coerceAtLeast(1)) return
+
+            val left = if (startSample == 0 && endSample == stereo.left.size) {
+                stereo.left
+            } else {
+                stereo.left.copyOfRange(startSample, endSample)
+            }
+            val right = if (startSample == 0 && endSample == stereo.right.size) {
+                stereo.right
+            } else {
+                stereo.right.copyOfRange(startSample, endSample)
+            }
+            val values = vocals.track(left, right, stereo.sampleRate) ?: return
+            val probeStartSeconds = startSample / stereo.sampleRate
+
+            for (index in curve.indices) {
+                val pointOnRegion =
+                    curve[index].time + featureOffsetSeconds - actualStart
+                val frame =
+                    ((pointOnRegion - probeStartSeconds) * VocalSpectrogram.frameRate).toInt()
+                if (frame in values.indices) {
+                    mask[index] = values[frame].toDouble().coerceIn(0.0, 1.0)
+                    measuredAny = true
+                }
+            }
+        }
+
+        if (preferTailCoverage) {
+            // A's release is decided at the end of the tail, not at the beginning of a 90 s
+            // tail window. Measure the final model-sized slice so the last vocal/reverb phrase is
+            // what the planner sees.
+            runProbe(stereo.left.size - maxSamples)
+        } else {
+            // Always classify the start of B.
+            runProbe(0)
+
+            // Long instrumental intros (for example an impact around 40-60 s) need one more
+            // high-confidence look. Aim the second probe around the strongest structural entry
+            // instead of chunking the whole 90 s window and multiplying inference cost.
+            val lateIntroTarget = buildList {
+                if (features.introEndTime.isFinite() && features.introEndTime > 0.0) {
+                    add(features.introEndTime)
+                }
+                if (features.mixInTime.isFinite() && features.mixInTime > 0.0) {
+                    add(features.mixInTime)
+                }
+                features.mixInCandidates
+                    .maxByOrNull { it.score }
+                    ?.time
+                    ?.takeIf { it.isFinite() && it > 0.0 }
+                    ?.let(::add)
+            }.maxOrNull()
+
+            if (lateIntroTarget != null && lateIntroTarget > maxSeconds * 0.85) {
+                val regionSeconds = stereo.left.size / stereo.sampleRate
+                val desiredStartSeconds =
+                    (lateIntroTarget - maxSeconds * 0.72)
+                        .coerceIn(0.0, max(0.0, regionSeconds - maxSeconds))
+                runProbe((desiredStartSeconds * stereo.sampleRate).toInt())
+            }
+        }
+
+        return mask.takeIf { measuredAny }
     }
 
     /**
