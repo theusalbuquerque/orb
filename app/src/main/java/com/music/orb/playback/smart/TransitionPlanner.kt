@@ -284,6 +284,80 @@ private fun blocked(reason: String, transitionStart: Double = 0.0, transitionEnd
         transitionEnd = transitionEnd,
     )
 
+/**
+ * Last-resort 2.5 continuity plan when the remote recipe cannot arrive in time.
+ *
+ * This is deliberately NOT an equal-power crossfade and it never chooses among
+ * the richer Automix families. It uses only measured structural landmarks to
+ * perform a short phrase/cut handoff so a transient network/server problem
+ * cannot leave a fully analysed pair stuck on "awaiting plan".
+ */
+internal fun resilientAutomix25Fallback(
+    analysis: TrackAnalysis,
+    nextAnalysis: TrackAnalysis,
+    currentTrack: TransitionTrackInfo?,
+    nextTrack: TransitionTrackInfo?,
+    currentTime: Double,
+    duration: Double,
+): TransitionPlan {
+    val length = max(duration.orZero(), trackDurationSeconds(currentTrack))
+    if (length <= 0.0) return blocked("automix-2.5-rescue-no-duration")
+
+    val analyzedEnd = analysis.contentEndTime.orZero().takeIf { it > 0.0 } ?: length
+    val end = min(length, analyzedEnd).coerceAtLeast(0.0)
+    val beat = analysis.beatInterval.orZero().takeIf { it > 0.0 }
+        ?: analysis.bpm.orZero().takeIf { it > 0.0 }?.let { 60.0 / it }
+        ?: 0.60
+    val rawStart = max(0.0, end - clamp(beat, 0.45, 1.10))
+    val start = alignedTransitionStart(
+        analysis = analysis,
+        target = rawStart,
+        end = end,
+        preferEarlier = true,
+        minimum = max(0.0, end - 2.5 * beat),
+    )
+
+    val nextLength = max(nextAnalysis.duration.orZero(), trackDurationSeconds(nextTrack))
+    val rawCue = listOfNotNull(
+        nextAnalysis.audibleStartTime,
+        nextAnalysis.pickupTime,
+        nextAnalysis.mixInTime.takeIf { it.isFinite() && it > 0.0 },
+        nextAnalysis.firstBeat.takeIf { it.isFinite() && it > 0.0 },
+    ).firstOrNull()?.coerceAtLeast(0.0) ?: 0.0
+    val cue = if (nextLength > 0.25) rawCue.coerceAtMost(nextLength - 0.25) else 0.0
+
+    val hasPhraseEvidence =
+        analysis.phraseBoundaries.isNotEmpty() ||
+            analysis.downbeats.isNotEmpty() ||
+            nextAnalysis.phraseBoundaries.isNotEmpty() ||
+            nextAnalysis.downbeats.isNotEmpty()
+    val style = if (hasPhraseEvidence && end - start >= 0.60) {
+        TransitionStyle.PHRASE_CUT
+    } else {
+        TransitionStyle.CUT
+    }
+
+    return TransitionPlan(
+        shouldStart = currentTime.orZero() >= start,
+        markerVisible = true,
+        blocked = false,
+        reason = "automix-2.5-resilient-local-handoff",
+        transitionStart = start,
+        transitionEnd = end,
+        fadeSeconds = (end - start).coerceAtLeast(0.35),
+        handoffDuration = (end - start).coerceAtLeast(0.35),
+        incomingCueTime = cue,
+        incomingHandoffTime = cue,
+        outgoingPlaybackRate = 1.0,
+        incomingPlaybackRate = 1.0,
+        transitionBeats = 1,
+        handoffFraction = if (style == TransitionStyle.PHRASE_CUT) 0.78 else 0.88,
+        transitionStyle = style,
+        outgoingBpm = analysis.bpm.orZero(),
+        incomingBpm = nextAnalysis.bpm.orZero(),
+    )
+}
+
 private fun trackDurationSeconds(track: TransitionTrackInfo?): Double =
     if (track == null || track.durationMs <= 0) 0.0 else track.durationMs / 1000.0
 
