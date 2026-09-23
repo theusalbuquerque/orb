@@ -207,6 +207,22 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
     }
 
     /**
+     * Tiny network/cache probes must never sit behind PCM decode / ONNX work on the
+     * single analysis worker. They can eliminate that work entirely on a server cache hit.
+     */
+    private val cacheLookupExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread({
+            runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND) }
+            runnable.run()
+        }, "orb-automix-cache-lookup").apply {
+            isDaemon = true
+            priority = Thread.MIN_PRIORITY
+        }
+    }
+    private val remoteCacheLookupPending = ConcurrentHashMap.newKeySet<String>()
+    private val remoteCacheChecked = ConcurrentHashMap.newKeySet<String>()
+
+    /**
      * What is known about [trackId] right now: never a computation, never a
      * block. Returns an empty analysis for anything not yet finished, which
      * [assessTransitionTier] reads as no evidence rather than as a failure.
@@ -594,11 +610,46 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
         // Always let persisted evidence win without touching the network or decoding again.
         restoreOnce(trackId)
 
+        val hasAnalysisCarrier = !uri.getQueryParameter("v").isNullOrBlank()
+        val remote25 =
+            hasAnalysisCarrier &&
+                AppSettings.automixVersion.value == AutomixVersion.V2_5 &&
+                AppSettings.automix25Available.value &&
+                RemoteAutomixClient.isAvailable()
+
+        // Ask Render first. A warm schema-4 cache hit is dramatically cheaper than
+        // downloading an entire Opus carrier only to have /analyze answer "cached".
+        if (remote25 && trackId !in remoteCacheChecked) {
+            if (remoteCacheLookupPending.add(trackId)) {
+                cacheLookupExecutor.execute {
+                    try {
+                        val cached = RemoteAutomixClient.cachedAnalysisForQueue(trackId)
+                        remoteCacheChecked.add(trackId)
+                        if (cached?.isUsable == true &&
+                            cached.analysisSchema >= REMOTE_CURVE_SCHEMA
+                        ) {
+                            acceptCachedAnalysis(cached)
+                            NerdStats.onAutomixAnalysisSource(
+                                trackId,
+                                NerdStats.AutomixAnalysisSource.REMOTE,
+                            )
+                            Log.d(TAG, "Remote cache hit for $trackId; skipped analysis audio download")
+                        }
+                    } finally {
+                        remoteCacheLookupPending.remove(trackId)
+                        // A miss continues the normal reliable path immediately;
+                        // a hit returns at the recorded-analysis guard below.
+                        requestReliable(trackId, uri, durationSeconds)
+                    }
+                }
+            }
+            return
+        }
+
         // Remote analysis needs the immutable YouTube/Opus analysis rendition. Local files and
         // source-only items keep the existing local analyzer because there is no separate
         // analysis carrier to upload. Before the backend health probe succeeds, local behaviour
         // is also preserved exactly — this makes deployment of the server half non-breaking.
-        val hasAnalysisCarrier = !uri.getQueryParameter("v").isNullOrBlank()
         if (!hasAnalysisCarrier ||
             !RemoteAutomixClient.isAvailable() ||
             AppSettings.meteredConnection.value == true
@@ -1865,6 +1916,9 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
 
     fun release() {
         executor.shutdownNow()
+        cacheLookupExecutor.shutdownNow()
+        remoteCacheLookupPending.clear()
+        remoteCacheChecked.clear()
         results.clear()
         reliableAudio.release()
         stemResults.values.forEach { it.deleteFiles() }
