@@ -330,7 +330,19 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
      */
     fun isFullyAnalysed(trackId: String): Boolean {
         val analysis = results[trackId] ?: return false
-        return analysis.status == TrackAnalysis.STATUS_READY && trackId !in provisional
+        if (analysis.status != TrackAnalysis.STATUS_READY || trackId in provisional) return false
+
+        // Automix 2.5 must not release B from the A -> B gate merely because an older
+        // persisted/local analysis says READY. While the curve-aware backend is available,
+        // A is complete only after the remote schema carrying onset/energy/chroma/tempo
+        // curves has landed. Otherwise B can begin its download/upload/inference while A is
+        // still waiting for exactly the evidence the 2.5 planner needs.
+        val curveAware25 =
+            AppSettings.automixVersion.value == AutomixVersion.V2_5 &&
+                AppSettings.automix25Available.value &&
+                RemoteAutomixClient.isAvailable()
+
+        return !curveAware25 || analysis.analysisSchema >= REMOTE_CURVE_SCHEMA
     }
 
     /**
