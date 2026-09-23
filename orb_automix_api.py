@@ -63,6 +63,7 @@ MAX_PLAN_CACHE_ENTRIES = 96
 class PlanRequest(BaseModel):
     version: int = API_VERSION
     preview: bool = False
+    compact: bool = False
     accountHash: str = ""
     outgoing: dict[str, Any]
     incoming: dict[str, Any]
@@ -3796,8 +3797,20 @@ async def plan(request: PlanRequest) -> dict[str, Any]:
     )
     if not request.preview or not entitled:
         raise HTTPException(status_code=403, detail="Automix 2.5 entitlement required")
-    outgoing = _plan_track(request.outgoing)
-    incoming = _plan_track(request.incoming)
+    if request.compact:
+        outgoing_id = str(request.outgoing.get("trackId") or "").strip()
+        incoming_id = str(request.incoming.get("trackId") or "").strip()
+        outgoing = _cache_get(outgoing_id) if outgoing_id else None
+        incoming = _cache_get(incoming_id) if incoming_id else None
+        if outgoing is None or incoming is None:
+            # Render may have restarted since Android received the analyses.
+            # Tell the client to retry once with only the relevant transition
+            # windows, never the complete full-track curves.
+            raise HTTPException(status_code=409, detail="Automix analysis cache miss")
+    else:
+        outgoing = _plan_track(request.outgoing)
+        incoming = _plan_track(request.incoming)
+
     cache_key = _plan_cache_key(outgoing, incoming)
     cached_plan = _plan_cache_get(cache_key)
     if cached_plan is not None:
