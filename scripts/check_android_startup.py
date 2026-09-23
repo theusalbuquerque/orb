@@ -44,4 +44,5 @@ for flavor in ('dev', 'prod'):
             subprocess.run(['adb', 'exec-out', 'screencap', '-p'], stdout=screenshot, check=True)
         print(f'PASS: {flavor} cold launch remains alive and resumed for 15 seconds', flush=True)
     finally:
-        (OUTPUT / f'{flavor}-logcat.txt').write_text(adb('logcat', '-d'))
+        # Diagnostic collection must not mask a startup failure or abort the next flavor.
+        (OUTPUT / f'{flavor}-logcat.txt').write_text(adb('logcat', '-d', check=False))
