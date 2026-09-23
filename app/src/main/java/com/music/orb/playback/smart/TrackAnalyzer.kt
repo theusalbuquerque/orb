@@ -357,6 +357,24 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
     fun hasUsableAnalysis(trackId: String): Boolean = results[trackId]?.isUsable == true
 
     /**
+     * Planning readiness is intentionally weaker than full analysis for the incoming track.
+     * A may only plan from final schema-4 evidence, but B can become plan-ready from a
+     * trustworthy opening analysis (BPM/beat/key/mix-in) while its full-track refinement continues.
+     */
+    fun isReadyForPlan(trackId: String, incoming: Boolean): Boolean {
+        val analysis = results[trackId] ?: return false
+        if (!analysis.isUsable) return false
+        if (!incoming) return isFullyAnalysed(trackId)
+
+        if (isFullyAnalysed(trackId)) return true
+        if (trackId !in provisional) return false
+        return analysis.bpm > 0.0 &&
+            analysis.beatConfidence >= READY_FOR_PLAN_MIN_BEAT_CONFIDENCE &&
+            (analysis.key.isNotBlank() || analysis.keyConfidence > 0.0) &&
+            (analysis.mixInTime > 0.0 || analysis.audibleStartTime != null || analysis.firstBeat > 0.0)
+    }
+
+    /**
      * True while a decode and inference for [trackId] is actually in flight.
      *
      * Distinct from "not analysed": a track waiting on bytes and a track being
@@ -1873,6 +1891,7 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
     private companion object {
         /** Server analysis schema required by curve-aware Automix 2.5 mix-v6. */
         const val REMOTE_CURVE_SCHEMA = 4
+        const val READY_FOR_PLAN_MIN_BEAT_CONFIDENCE = 0.45
         const val TAG = "BitChordTrackAnalyzer"
 
         /**
