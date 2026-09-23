@@ -3,7 +3,7 @@ name: Android Automix compile
 on:
   push:
     paths:
-      - "scripts/check_native_page_alignment.py"
+      - "scripts/**"
       - "app/src/**"
       - "app/src/main/java/com/music/orb/playback/**"
       - "app/src/main/java/com/music/orb/playback/smart/**"
@@ -18,7 +18,7 @@ on:
       - ".github/workflows/android-automix-compile.yml"
   pull_request:
     paths:
-      - "scripts/check_native_page_alignment.py"
+      - "scripts/**"
       - "app/src/**"
       - "app/src/main/java/com/music/orb/playback/**"
       - "app/src/main/java/com/music/orb/playback/smart/**"
@@ -35,7 +35,7 @@ on:
 jobs:
   compile:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
 
     steps:
       - name: Checkout
@@ -61,6 +61,30 @@ jobs:
 
       - name: Verify native 16 KB page alignment
         run: python3 scripts/check_native_page_alignment.py 'app/build/outputs/apk/**/*.apk'
+
+      - name: Enable emulator acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Verify Dev and Prod cold startup on Android 16
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 36
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          script: python3 scripts/check_android_startup.py
+
+      - name: Upload startup diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Orb-startup-diagnostics
+          path: startup-diagnostics/
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Upload verified debug APKs
         uses: actions/upload-artifact@v4
