@@ -541,6 +541,19 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
     }
 
     /**
+     * Downloads the immutable analysis carrier without starting DSP/inference.
+     *
+     * Used for B while A is being analysed on Wi-Fi. This preserves the strict
+     * A -> B analysis order, but removes B's network download from the critical
+     * path: once A finishes, B can upload/analyse immediately from a ready file.
+     */
+    fun prewarmReliableAudio(uri: Uri) {
+        if (AppSettings.wifiConnection.value != true) return
+        if (uri.getQueryParameter("v").isNullOrBlank()) return
+        reliableAudio.request(uri) { /* byte-only prewarm; requestReliable owns analysis */ }
+    }
+
+    /**
      * Guarantees a seekable analysis source for the immediate transition pair.
      *
      * [request] remains the zero-duplication fast path and may finish from persisted analysis or
