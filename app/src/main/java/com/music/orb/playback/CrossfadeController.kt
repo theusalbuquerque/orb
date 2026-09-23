@@ -28,6 +28,7 @@ import com.music.orb.playback.smart.TransitionStyle
 import com.music.orb.playback.smart.TransitionLoopTarget
 import com.music.orb.playback.smart.TransitionTrackInfo
 import com.music.orb.playback.smart.planTransition
+import com.music.orb.playback.smart.resilientAutomix25Fallback
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -361,6 +362,8 @@ class CrossfadeController(
     /** One full remote recipe per immutable A -> B pair. Local validation remains final. */
     private val remotePlanByPair = ConcurrentHashMap<String, RemoteTransitionDirective>()
     private val remotePlanAttempted = ConcurrentHashMap.newKeySet<String>()
+    /** First instant both tracks were ready to plan; bounds how long UI can wait on the network. */
+    private val remotePlanReadyAtMs = ConcurrentHashMap<String, Long>()
     /** Pair whose preview-authored recipe has already been replaced once by full B evidence. */
     private val remotePlanRefined = ConcurrentHashMap.newKeySet<String>()
 
@@ -707,6 +710,12 @@ class CrossfadeController(
         val currentReadyForPlan = !useAutomix25 || analysisReadyForPlan(currentItem, false)
         val nextReadyForPlan = !useAutomix25 || analysisReadyForPlan(nextItem, true)
 
+        if (useAutomix25 && currentReadyForPlan && nextReadyForPlan) {
+            remotePlanReadyAtMs.putIfAbsent(analysisPair, SystemClock.elapsedRealtime())
+        } else {
+            remotePlanReadyAtMs.remove(analysisPair)
+        }
+
         if (useAutomix25 &&
             currentReadyForPlan && nextReadyForPlan &&
             !remotePlanByPair.containsKey(analysisPair) &&
@@ -739,23 +748,41 @@ class CrossfadeController(
             }
         }
         val remotePlan = if (useAutomix25) remotePlanByPair[analysisPair] else null
+        val readySince = remotePlanReadyAtMs[analysisPair] ?: Long.MAX_VALUE
+        val rescueDue = useAutomix25 &&
+            remotePlan == null &&
+            currentReadyForPlan && nextReadyForPlan &&
+            SystemClock.elapsedRealtime() - readySince >= REMOTE_PLAN_GRACE_MS
 
-        val plan = planTransition(
-            analysis = currentAnalysis,
-            nextAnalysis = nextAnalysis,
-            currentTrack = currentItem.toTransitionInfo(duration),
-            nextTrack = nextItem.toTransitionInfo(nextDuration),
-            currentTime = player.currentPosition / 1000.0,
-            duration = duration / 1000.0,
-            fadeSeconds = fallbackSeconds,
-            mode = CrossfadeMode.SMART,
-            styleHint = null,
-            remoteDirective = remotePlan,
-            // Automix 2.0 keeps the current local engine from this src. Only
-            // the entitled 2.5 preview delegates musical-family selection to
-            // the new remote planner.
-            serverAuthoritative = useAutomix25,
-        )
+        val currentInfo = currentItem.toTransitionInfo(duration)
+        val nextInfo = nextItem.toTransitionInfo(nextDuration)
+        val plan = if (rescueDue) {
+            resilientAutomix25Fallback(
+                analysis = currentAnalysis,
+                nextAnalysis = nextAnalysis,
+                currentTrack = currentInfo,
+                nextTrack = nextInfo,
+                currentTime = player.currentPosition / 1000.0,
+                duration = duration / 1000.0,
+            )
+        } else {
+            planTransition(
+                analysis = currentAnalysis,
+                nextAnalysis = nextAnalysis,
+                currentTrack = currentInfo,
+                nextTrack = nextInfo,
+                currentTime = player.currentPosition / 1000.0,
+                duration = duration / 1000.0,
+                fadeSeconds = fallbackSeconds,
+                mode = CrossfadeMode.SMART,
+                styleHint = null,
+                remoteDirective = remotePlan,
+                // Automix 2.0 keeps the current local engine from this src. Only
+                // the entitled 2.5 preview delegates musical-family selection to
+                // the new remote planner.
+                serverAuthoritative = useAutomix25,
+            )
+        }
         // A blocked 2.5 plan means the recipe is still unavailable/invalid,
         // not that the musical decision is "no transition". Normal 2.5 playback
         // never reports NO_TRANSITION; album-original-order is handled above.
@@ -2883,6 +2910,8 @@ class CrossfadeController(
         const val CUT_IN_BY = 0.56f
         const val REMOTE_STYLE_CACHE_LIMIT = 32
         const val REMOTE_PLAN_RETRY_MS = 500L
+        /** Fully analysed pairs never wait indefinitely for a remote recipe. */
+        const val REMOTE_PLAN_GRACE_MS = 1_750L
 
         /** Ramp used when a fade is interrupted. */
         const val BAIL_MS = 120L
