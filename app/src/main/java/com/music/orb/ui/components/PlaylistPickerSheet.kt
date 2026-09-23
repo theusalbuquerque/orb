@@ -52,16 +52,19 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import com.music.orb.R
 import com.music.orb.data.model.PlaylistPrivacy
 import com.music.orb.data.model.ROW_ART_PX
 import com.music.orb.data.model.Song
 import com.music.orb.data.model.UserPlaylist
 import com.music.orb.data.model.artworkAt
 import com.music.orb.ui.icons.BitChordIcons
+import com.music.orb.ui.flavor.OrbFlavorUi
 
 /**
  * Where a track goes: one of the account's playlists, or a new one.
@@ -104,11 +107,11 @@ fun PlaylistPickerSheet(
             SheetTrackHeader(song)
             HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outline)
         }
-        SheetHeading(if (song != null) "ADD TO PLAYLIST" else "YOUR PLAYLISTS")
+        SheetHeading(stringResource(if (song != null) R.string.playlist_picker_add_to_playlist_heading else R.string.playlist_picker_your_playlists_heading))
 
         ActionRow(
             icon = BitChordIcons.Plus,
-            label = "New playlist",
+            label = stringResource(R.string.playlist_picker_new_playlist),
             onClick = { creating = true },
         )
 
@@ -128,7 +131,7 @@ fun PlaylistPickerSheet(
             }
 
             playlists.isEmpty() -> Text(
-                text = "No playlists yet — the row above makes one.",
+                text = stringResource(R.string.playlist_picker_empty),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 22.dp, vertical = 18.dp),
@@ -233,22 +236,27 @@ private fun NewPlaylistForm(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             onBack?.let {
-                IconButton(onClick = it) {
+                IconButton(
+                    onClick = it,
+                    modifier = Modifier.then(
+                        if (OrbFlavorUi.expressive) Modifier.size(44.dp) else Modifier
+                    ),
+                ) {
                     Icon(
                         Icons.AutoMirrored.Rounded.ArrowBack,
-                        contentDescription = "Back",
+                        contentDescription = stringResource(R.string.playlist_picker_back),
                         tint = MaterialTheme.colorScheme.onBackground,
                     )
                 }
             }
             Column(Modifier.weight(1f)) {
                 Text(
-                    text = "New playlist",
+                    text = stringResource(R.string.playlist_picker_new_playlist_title),
                     style = MaterialTheme.typography.titleLarge,
                     color = MaterialTheme.colorScheme.onBackground,
                 )
                 Text(
-                    text = "Saved to your YouTube Music account",
+                    text = stringResource(R.string.playlist_picker_saved_to_youtube),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -267,7 +275,7 @@ private fun NewPlaylistForm(
             Box(Modifier.weight(1f)) {
                 if (name.isEmpty()) {
                     Text(
-                        text = "Playlist name",
+                        text = stringResource(R.string.playlist_picker_name_hint),
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -297,7 +305,7 @@ private fun NewPlaylistForm(
                 ) {
                     Icon(
                         Icons.Rounded.Close,
-                        contentDescription = "Clear name",
+                        contentDescription = stringResource(R.string.playlist_picker_clear_name),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(18.dp),
                     )
@@ -305,7 +313,7 @@ private fun NewPlaylistForm(
             }
         }
 
-        SheetHeading("WHO CAN SEE IT")
+        SheetHeading(stringResource(R.string.playlist_picker_visibility_heading))
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -315,7 +323,7 @@ private fun NewPlaylistForm(
             PlaylistPrivacy.entries.forEach { option ->
                 PrivacyPill(
                     icon = option.icon,
-                    label = option.label,
+                    label = option.localizedLabel(),
                     selected = option == privacy,
                     onClick = { privacy = option },
                 )
@@ -330,7 +338,7 @@ private fun NewPlaylistForm(
                 .fillMaxWidth()
                 .padding(horizontal = 22.dp),
         ) {
-            Text("Create playlist")
+            Text(stringResource(R.string.playlist_picker_create))
         }
         Spacer(Modifier.height(28.dp))
     }
@@ -366,52 +374,74 @@ fun PlaylistActionsSheet(
     }
 
     Column(modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        ProgressiveActionSheetItem(
+            index = 0,
+            itemKey = "playlist:${playlist.browseId}:header",
         ) {
-            AsyncImage(
-                model = playlist.thumbnailUrl.artworkAt(ROW_ART_PX),
-                contentDescription = null,
-                modifier = Modifier
-                    .size(52.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .thumbnailBorder(RoundedCornerShape(8.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
-            )
-            Spacer(Modifier.width(14.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    text = playlist.title,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onBackground,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    text = playlist.subtitle.ifBlank { "Playlist" },
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+            Column {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    AsyncImage(
+                        model = playlist.thumbnailUrl.artworkAt(ROW_ART_PX),
+                        contentDescription = null,
+                        modifier = Modifier
+                            .size(52.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .thumbnailBorder(RoundedCornerShape(8.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant),
+                    )
+                    Spacer(Modifier.width(14.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = playlist.title,
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onBackground,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = playlist.subtitle.ifBlank { "Playlist" },
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+                HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outline)
             }
         }
-        HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outline)
 
-        ActionRow(Icons.Rounded.PlayArrow, "Open playlist", onClick = onOpen)
-        ActionRow(Icons.Rounded.Edit, "Rename") { renaming = true }
-        if (confirmingDelete) {
-            ActionRow(
-                icon = Icons.Rounded.DeleteForever,
-                label = "Delete \"${playlist.title}\" — tap to confirm",
-                tint = MaterialTheme.colorScheme.error,
-                onClick = onDelete,
-            )
-        } else {
-            ActionRow(Icons.Rounded.Delete, "Delete playlist") { confirmingDelete = true }
+        ProgressiveActionSheetItem(
+            index = 1,
+            itemKey = "playlist:${playlist.browseId}:open",
+        ) {
+            ActionRow(Icons.Rounded.PlayArrow, "Open playlist", onClick = onOpen)
+        }
+        ProgressiveActionSheetItem(
+            index = 2,
+            itemKey = "playlist:${playlist.browseId}:rename",
+        ) {
+            ActionRow(Icons.Rounded.Edit, "Rename") { renaming = true }
+        }
+        ProgressiveActionSheetItem(
+            index = 3,
+            itemKey = "playlist:${playlist.browseId}:delete",
+        ) {
+            if (confirmingDelete) {
+                ActionRow(
+                    icon = Icons.Rounded.DeleteForever,
+                    label = "Delete \"${playlist.title}\" — tap to confirm",
+                    tint = MaterialTheme.colorScheme.error,
+                    onClick = onDelete,
+                )
+            } else {
+                ActionRow(Icons.Rounded.Delete, "Delete playlist") { confirmingDelete = true }
+            }
         }
         Spacer(Modifier.height(24.dp))
     }
@@ -450,10 +480,15 @@ private fun RenamePlaylistForm(
                 .padding(start = 8.dp, end = 22.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = onBack) {
+            IconButton(
+                onClick = onBack,
+                modifier = Modifier.then(
+                    if (OrbFlavorUi.expressive) Modifier.size(44.dp) else Modifier
+                ),
+            ) {
                 Icon(
                     Icons.AutoMirrored.Rounded.ArrowBack,
-                    contentDescription = "Back",
+                    contentDescription = stringResource(R.string.playlist_picker_back),
                     tint = MaterialTheme.colorScheme.onBackground,
                 )
             }
@@ -507,6 +542,13 @@ private fun RenamePlaylistForm(
  * link, a globe. Three words that all sound like degrees of the same thing
  * read much faster as three different shapes.
  */
+@Composable
+private fun PlaylistPrivacy.localizedLabel(): String = when (this) {
+    PlaylistPrivacy.PRIVATE -> stringResource(R.string.playlist_picker_privacy_private)
+    PlaylistPrivacy.UNLISTED -> stringResource(R.string.playlist_picker_privacy_unlisted)
+    PlaylistPrivacy.PUBLIC -> stringResource(R.string.playlist_picker_privacy_public)
+}
+
 private val PlaylistPrivacy.icon: ImageVector
     get() = when (this) {
         PlaylistPrivacy.PRIVATE -> Icons.Rounded.Lock

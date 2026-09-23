@@ -1784,7 +1784,7 @@ class PlaybackService : MediaSessionService() {
         this,
         0,
         Intent(this, MainActivity::class.java)
-            .setAction(ACTION_OPEN_NOW_PLAYING)
+            .setAction(MainActivity.ACTION_OPEN_NOW_PLAYING)
             // MainActivity is singleTask, so this resumes the existing task
             // rather than stacking a second copy of the UI. The custom action
             // tells the Activity that a session/Live Notification tap should
@@ -1997,7 +1997,8 @@ class PlaybackService : MediaSessionService() {
 
                 val ahead = (live.bufferedPosition - live.currentPosition).coerceAtLeast(0L)
                 val remaining = live.duration
-                    .takeIf { it != C.TIME_UNSET && it > 0L }                    ?.minus(live.currentPosition)
+                    .takeIf { it != C.TIME_UNSET && it > 0L }
+                    ?.minus(live.currentPosition)
                     ?.coerceAtLeast(0L)
                 val safeTarget = remaining
                     ?.let { minOf(AUTOMIX_POST_HANDOFF_SAFE_BUFFER_MS, (it - AUTOMIX_POST_HANDOFF_END_GUARD_MS).coerceAtLeast(AUTOMIX_POST_HANDOFF_MIN_SAFE_BUFFER_MS)) }
@@ -2996,7 +2997,8 @@ class PlaybackService : MediaSessionService() {
             //
             // An upgraded rendition is only ever fetched from the swap point
             // onward, so its first seconds are the one region nothing downloads
-            // on its own — [UPGRADE_HEADER_BYTES] covers the header and stops            // well short of enough *audio* to measure. A megabyte of lossless is
+            // on its own — [UPGRADE_HEADER_BYTES] covers the header and stops
+            // well short of enough *audio* to measure. A megabyte of lossless is
             // four seconds, against the twelve the analyzer needs, so a track
             // that upgrades early could never be analysed from any rendition:
             // the lossless copy had no audio at its head and the copy it
@@ -3782,7 +3784,6 @@ class PlaybackService : MediaSessionService() {
         }
         return runCatching {
             AudioCache.warmRange(uri, 0L, warmBytes)
-            true
         }.onFailure {
             TrackLog.d(
                 "BitChord",
@@ -4012,7 +4013,8 @@ class PlaybackService : MediaSessionService() {
                 .getOrNull()
                 ?.toLongOrNull()
                 ?.takeIf { it > 0 }
-                ?.times(1000L)            ?: 0L
+                ?.times(1000L)
+            ?: 0L
 
         trackAnalyzer.requestReliable(item.mediaId, uri, durationMs / 1000.0)
     }
@@ -5011,7 +5013,8 @@ class PlaybackService : MediaSessionService() {
                     ).apply {
                         useNowPlaying = snapshot.nowPlaying
                     }
-                }            }
+                }
+            }
         }
     }
 
@@ -5424,13 +5427,14 @@ class PlaybackService : MediaSessionService() {
     }
 
     private companion object {
-        /** Let persisted evidence land before spending network/CPU on recommendation previews. */
+        /** Brief disk-cache settle before ordering a freshly appended AutoPlay batch. */
         const val AUTOPLAY_ORDER_STORE_SETTLE_MS = 650L
+
+        /** Bound cache-only server lookups; no future-track audio analysis is started here. */
         const val AUTOPLAY_REMOTE_ANALYSIS_LOOKAHEAD = 16
         const val AUTOPLAY_PREVIEW_ANALYSIS_LOOKAHEAD = 8
         const val AUTOPLAY_PREVIEW_BUDGET_MS = 7_000L
         const val AUTOPLAY_PREVIEW_POLL_MS = 250L
-        const val ACTION_OPEN_NOW_PLAYING = "com.music.orb.action.OPEN_NOW_PLAYING"
 
         private const val REMOTE_AUTOMIX_PROBE_RETRY_MS = 120_000L
         /**

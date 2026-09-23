@@ -1,6 +1,7 @@
 package com.music.orb
 
 import android.app.Application
+import android.app.ActivityManager
 import androidx.annotation.OptIn
 import androidx.media3.common.util.UnstableApi
 import coil3.ImageLoader
@@ -11,14 +12,31 @@ import coil3.disk.directory
 import coil3.memory.MemoryCache
 import coil3.request.crossfade
 import com.music.orb.auth.AuthStore
+import com.music.orb.auth.OrbGoogleAuth
 import com.music.orb.playback.AudioCache
 import com.music.orb.playback.DolbyAtmos
 import com.music.orb.playback.LastPlayed
+import com.music.orb.data.ArtistCreditResolver
 import com.music.orb.data.innertube.Innertube
 import com.music.orb.data.scrobbling.LastFM
 import com.music.orb.data.settings.AppSettings
+import com.music.orb.data.settings.HomeSuggestionStore
+import com.music.orb.data.settings.ArtistRankingHistoryStore
+import com.music.orb.data.settings.ArtistGenreStore
+import com.music.orb.data.settings.ArtistPreferenceStore
+import com.music.orb.data.settings.LikeStatusStore
+import com.music.orb.data.settings.ProfileSnapshotStore
+import com.music.orb.data.settings.StatsSnapshotStore
+import com.music.orb.data.social.SocialSessionManager
+import com.music.orb.data.stats.TrackLanguageResolver
 import com.music.orb.data.settings.SearchHistory
+import com.music.orb.data.settings.PlaylistListeningStore
+import com.music.orb.data.settings.ProfilePrivacyStore
+import com.music.orb.data.settings.RecentPlaybackStore
 import com.music.orb.data.sources.SourceRegistry
+import com.music.orb.data.update.BetaUpdateScheduler
+import com.music.orb.data.update.UpdateAvailableStore
+import com.music.orb.data.update.UpdateReadyStore
 import com.music.orb.download.Downloads
 
 class BitChordApplication : Application(), SingletonImageLoader.Factory {
@@ -26,19 +44,56 @@ class BitChordApplication : Application(), SingletonImageLoader.Factory {
     @OptIn(UnstableApi::class)
     override fun onCreate() {
         super.onCreate()
-        // PlaybackService shares this process, so seeding the cookie here means
-        // stream resolution is authenticated from the first play onwards.
+        // Orb now has one Google identity. Credential Manager/Supabase owns the
+        // app login; the old YouTube browser cookie survives only as an
+        // Innertube compatibility fallback for endpoints that reject OAuth.
         authStore = AuthStore(this)
+        OrbGoogleAuth.init(this, authStore)
         Innertube.cookie = authStore.cookie
+        // Google identity and YouTube Music authorization are separate states.
+        // A stored Google profile must never make private Innertube calls look
+        // authenticated by itself. A cached OAuth token can be refreshed by
+        // Google Play services when it expires; a verified legacy cookie is the
+        // compatibility path for private Music endpoints that reject OAuth.
+        Innertube.accountSignedIn =
+            authStore.hasLegacyYouTubeSession || !authStore.youtubeAccessToken.isNullOrBlank()
+        Innertube.oauthAccessTokenProvider = { OrbGoogleAuth.youtubeAccessToken() }
+        Innertube.oauthRejectedHandler = { token -> OrbGoogleAuth.onYoutubeOAuthRejected(token) }
+        Innertube.legacySessionRejectedHandler = { OrbGoogleAuth.onLegacyYoutubeSessionRejected() }
+        SocialSessionManager.start(this)
         AppSettings.init(this)
-        // After AppSettings: a device with Atmos switched off retires the
-        // spatial audio preference on the spot, and that needs prefs open.
+        TrackLanguageResolver.init(this)
+        com.music.orb.data.lyrics.LyricsDiskCache.init(this)
+        ArtistCreditResolver.init(this)
+        ArtistRankingHistoryStore.init(this)
+        ArtistGenreStore.init(this)
+        ArtistPreferenceStore.init(this)
+        LikeStatusStore.init(this)
+        StatsSnapshotStore.init(this)
+        ProfileSnapshotStore.init(this)
+        // Update discovery metadata is durable, but the APK itself is never
+        // downloaded in the background. Restore both an available notice and
+        // any user-initiated ready APK before rebuilding the scheduler.
+        UpdateAvailableStore.restore(this)
+        UpdateReadyStore.restore(this)
+        // The selected update channel is a persisted user preference, while
+        // WorkManager jobs are disposable infrastructure. Reconcile them on
+        // every process start so Beta/Stable watching cannot silently vanish
+        // after an app update, restore or scheduler database cleanup.
+        BetaUpdateScheduler.restoreSelectedChannel(this)
+        // Track genuine device/system Dolby Atmos independently from Orb's
+        // own 360 Audio DSP. The status feeds Settings but never mutates the
+        // user's 360 Audio preference.
         DolbyAtmos.init(this)
         // Before LastPlayed: a restored queue can contain source-backed tracks,
         // and turning one of those back into a playable item needs the registry
         // that knows which source it belongs to.
         SourceRegistry.init(this)
         SearchHistory.init(this)
+        PlaylistListeningStore.init(this)
+        ProfilePrivacyStore.init(this)
+        RecentPlaybackStore.init(this)
+        HomeSuggestionStore.init(this)
         LastPlayed.init(this)
         // What's already saved to Downloads, so the song menu can say so
         // without a media-store query per row.
@@ -47,16 +102,13 @@ class BitChordApplication : Application(), SingletonImageLoader.Factory {
         // PlaybackService shares this one — so it's opened here, not there.
         AudioCache.init(this)
         // A sideloaded update is just a new APK over the old one, so app data —
-        // including whatever the old build left in these caches — survives it
-        // untouched. Wipe both on the first launch of a higher versionCode so a
+        // including whatever the old build left in the audio cache — survives it
+        // untouched. Wipe audio on the first launch of a higher versionCode so a
         // format or key change between builds can't serve stale or mismatched
         // bytes from a cache the new code didn't write.
         if (AppSettings.consumeVersionUpdate(BuildConfig.VERSION_CODE)) {
             AudioCache.clear()
-            SingletonImageLoader.get(this).let { loader ->
-                loader.memoryCache?.clear()
-                loader.diskCache?.clear()
-            }
+            // Artwork remains valid across app updates; keep its disk cache.
         }
         // Initialize LastFM with saved settings if available
         initLastfm()
@@ -75,13 +127,16 @@ class BitChordApplication : Application(), SingletonImageLoader.Factory {
         ImageLoader.Builder(context)
             .memoryCache {
                 MemoryCache.Builder()
-                    .maxSizePercent(context, 0.20)
+                    .maxSizeBytes(
+                        (((getSystemService(ActivityManager::class.java)?.memoryClass ?: 128).toLong() *
+                            1024 * 1024) / 12).coerceIn(8L * 1024 * 1024, 32L * 1024 * 1024)
+                    )
                     .build()
             }
             .diskCache {
                 DiskCache.Builder()
                     .directory(cacheDir.resolve("image_cache"))
-                    .maxSizeBytes(100L * 1024 * 1024)
+                    .maxSizeBytes(192L * 1024 * 1024)
                     .build()
             }
             // Covers arriving with a hard cut read as the list flickering as

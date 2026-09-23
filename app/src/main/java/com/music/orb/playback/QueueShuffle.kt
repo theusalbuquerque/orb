@@ -34,7 +34,16 @@ object QueueShuffle {
     /** Media ids in their pre-shuffle order. Empty while shuffle is off. */
     private var original: List<String> = emptyList()
 
+    /**
+     * One-shot intent used only when a NEW queue is about to be created from an
+     * album/playlist Shuffle button. The live [enabled] state must not double as
+     * this intent: otherwise Shuffle from the previous queue leaks into a later
+     * album/playlist started with its normal Play button.
+     */
+    private var shuffleNextQueue = false
+
     fun toggle(player: Player) {
+        shuffleNextQueue = false
         if (_enabled.value) restore(player) else shuffle(player)
     }
 
@@ -45,24 +54,54 @@ object QueueShuffle {
      */
     fun enableForNextQueue() {
         original = emptyList()
+        shuffleNextQueue = true
+        // Reflect the button press immediately in Now Playing while the new
+        // queue is resolving. playSongs() will consume the one-shot request.
         _enabled.value = true
     }
 
-    fun consumeForNewQueue(): Boolean = _enabled.value
+    /** Whether the next replacement queue was explicitly launched through Shuffle. */
+    fun isNextQueueShuffleRequested(): Boolean = shuffleNextQueue
 
+    /**
+     * Reasserts the visible Shuffle state after a replacement shuffled queue has
+     * actually been installed in Media3. The queue itself is already physically
+     * shuffled; this flag exists so Now Playing mirrors how the current session
+     * was launched instead of relying on ExoPlayer's native shuffle mode (which
+     * intentionally stays disabled).
+     */
     fun confirmActiveQueueShuffled() {
+        shuffleNextQueue = false
         _enabled.value = true
     }
 
+    /**
+     * Consumes the one-shot Shuffle request for a replacement queue.
+     *
+     * No request means the new queue was started through ordinary Play, so its
+     * Shuffle state is reset even if the queue that is being replaced happened
+     * to be shuffled. This is intentionally different from toggling Shuffle on
+     * the CURRENT queue, where [enabled] continues to describe that live queue.
+     */
+    fun consumeForNewQueue(): Boolean {
+        val requested = shuffleNextQueue
+        shuffleNextQueue = false
+        original = emptyList()
+        _enabled.value = requested
+        return requested
+    }
+
+    /** Clearing the queue leaves one current item, so there is no shuffled order left to own. */
     fun onQueueCleared() {
         original = emptyList()
+        shuffleNextQueue = false
         _enabled.value = false
     }
 
     /**
-     * The order a queue should go in when it is started while shuffle is on:
-     * the track the user picked leads, the rest follow at random. The order it
-     * arrived in is remembered, so turning shuffle off restores it.
+     * Order for a queue started while Shuffle is on. The picked track leads
+     * that the opening preflight may replace with a better first track. The
+     * original list is remembered so turning Shuffle off can restore it.
      */
     fun startingOrder(songs: List<Song>, startIndex: Int): List<Song> {
         original = songs.map { it.videoId }

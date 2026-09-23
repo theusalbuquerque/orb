@@ -212,7 +212,7 @@ object AudioDecoder {
                         outputRate = newFormat.intOrNull(MediaFormat.KEY_SAMPLE_RATE) ?: outputRate
                         outputChannels = newFormat.intOrNull(MediaFormat.KEY_CHANNEL_COUNT) ?: outputChannels
                     }
-                    MediaCodec.INFO_TRY_AGAIN_LATER, MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> Unit
+                    MediaCodec.INFO_TRY_AGAIN_LATER -> Unit
                     else -> if (outputIndex >= 0) {
                         if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
                             outputDone = true

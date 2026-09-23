@@ -28,7 +28,10 @@ object LastPlayed {
     }
 
     fun save(songs: List<Song>, index: Int, positionMs: Long) {
-        if (songs.isEmpty()) return
+        if (songs.isEmpty()) {
+            clear()
+            return
+        }
         // AutoPlay keeps extending the queue, so it can run to hundreds of
         // tracks by the end of an evening. Store a window around where we are
         // instead of the lot — the current track has to be inside it, and what
@@ -46,6 +49,10 @@ object LastPlayed {
                     it.localUri,
                     it.localPath,
                     it.durationText,
+                    it.isExplicit,
+                    it.sourcePlaylistId,
+                    it.sourcePlaylistTitle,
+                    it.sourcePlaylistArtworkUrl,
                 )
             },
             index = (index - start).coerceIn(0, window.lastIndex),
@@ -57,6 +64,12 @@ object LastPlayed {
                 runCatching { json.encodeToString(StoredQueue.serializer(), stored) }.getOrNull(),
             )
             .apply()
+    }
+
+    /** Explicitly records that the player has no resumable queue. */
+    fun clear() {
+        if (!::prefs.isInitialized) return
+        prefs.edit().remove(KEY_QUEUE).apply()
     }
 
     fun load(): Snapshot? {
@@ -71,9 +84,13 @@ object LastPlayed {
                     it.artist,
                     it.artwork,
                     durationText = it.duration,
+                    isExplicit = it.explicit,
                     fromAutoplay = it.auto,
                     localUri = it.local,
                     localPath = it.path,
+                    sourcePlaylistId = it.sourcePlaylistId,
+                    sourcePlaylistTitle = it.sourcePlaylistTitle,
+                    sourcePlaylistArtworkUrl = it.sourcePlaylistArtworkUrl,
                 )
             },
             index = stored.index.coerceIn(0, stored.tracks.lastIndex),
@@ -113,6 +130,11 @@ object LastPlayed {
          * ago the app was opened.
          */
         val duration: String? = null,
+        /** Explicit/clean identity must survive a restored queue too. */
+        val explicit: Boolean = false,
+        val sourcePlaylistId: String? = null,
+        val sourcePlaylistTitle: String? = null,
+        val sourcePlaylistArtworkUrl: String? = null,
     )
 
     @Serializable
@@ -128,8 +150,4 @@ object LastPlayed {
     private const val MAX_TRACKS = 60
 
     private const val KEY_QUEUE = "queue"
-    fun clear() {
-        prefs.edit().clear().apply()
-    }
-
 }

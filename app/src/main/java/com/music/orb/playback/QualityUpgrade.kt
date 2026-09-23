@@ -3,6 +3,7 @@ package com.music.orb.playback
 import android.net.Uri
 import com.music.orb.data.TrackLog
 import com.music.orb.data.NerdStats
+import com.music.orb.data.innertube.StreamResolver
 import com.music.orb.data.sources.SourceResolver
 import com.music.orb.data.sources.SourceStream
 import com.music.orb.data.sources.StreamFormat
@@ -174,8 +175,7 @@ object QualityUpgrade {
     ): Boolean {
         if (target.title.isBlank() ||
             mediaId in refused ||
-            SourceResolver.requestForNow() !is StreamRequest.Lossless ||
-            !SourceResolver.canSubstituteForYouTube()
+            !SourceResolver.requestCouldImprove(playing)
         ) {
             inFlight?.cancel()
             return false
@@ -196,6 +196,25 @@ object QualityUpgrade {
 
     /** Whether [mediaId] is worth a second look — and hasn't already had one. */
     fun isPending(mediaId: String?) = mediaId != null && pending.containsKey(mediaId)
+
+    /**
+     * A crossfade starts B on the standby player before B becomes the session's
+     * current item. Any quality verdict reached while B was merely a prepared
+     * successor must not become a permanent “already asked” verdict once B is
+     * actually audible: its carrier may be the warmed Opus/AAC route, network
+     * conditions may have changed, and Maximum may still owe it Lossless.
+     *
+     * Re-arm only the negative/finished verdict. A live pending lookup, a
+     * shelved proven stream, or a refusal caused by a broken upgrade is left
+     * intact. This makes the handoff a fresh current-track quality window
+     * without creating duplicate concurrent searches.
+     */
+    fun rearmAfterHandoff(mediaId: String) {
+        if (mediaId in refused || pending.containsKey(mediaId) || shelved.containsKey(mediaId)) return
+        if (asked.remove(mediaId)) {
+            TrackLog.d(TAG, "$mediaId became current after a mix; reopening its live quality window", about = mediaId)
+        }
+    }
 
     /**
      * Tracks whose upgrade broke the playback it was supposed to improve.
@@ -248,8 +267,7 @@ object QualityUpgrade {
         // Already upgraded: this *is* the better copy.
         if (uri.getQueryParameter(MARKER) != null) return false
         if (mediaId in asked || mediaId in refused || pending.containsKey(mediaId)) return false
-        return SourceResolver.requestForNow() is StreamRequest.Lossless &&
-            SourceResolver.canSubstituteForYouTube()
+        return SourceResolver.requestAllowsLiveUpgrade()
     }
 
     /**
@@ -335,6 +353,15 @@ object QualityUpgrade {
             asked += mediaId
             return false
         }
+        if (!SourceResolver.requestCouldImprove(playing)) {
+            asked += mediaId
+            TrackLog.d(
+                TAG,
+                "'${target.title}' is already at the requested quality ceiling; no second look needed",
+                about = mediaId,
+            )
+            return false
+        }
         pending[mediaId] = Pending(target, inFlight = null, playing = playing)
         NerdStats.onLosslessRaceStart(mediaId)
         TrackLog.d(
@@ -394,9 +421,13 @@ object QualityUpgrade {
             // against the length the decoder is reporting. Measured here, the
             // difference was a 189-second cut swapped into a 163-second song,
             // which played for five seconds of silence and was then put back.
+            val request = SourceResolver.requestForNow()
             waiting.inFlight?.let { lookup ->
                 val late = runCatching { lookup.await() }.getOrNull()
+                val satisfiesCurrentStage =
+                    request !is StreamRequest.Lossless || late?.format?.isLossless == true
                 if (late != null &&
+                    satisfiesCurrentStage &&
                     SourceResolver.worthSwapping(late.format, waiting.playing) &&
                     SourceResolver.sameRecordingAs(late.durationSec, playingDurationSec)
                 ) {
@@ -408,10 +439,30 @@ object QualityUpgrade {
             // It finished with nothing better, so the question gets asked
             // again from scratch — this time waiting on every module, which is
             // what the live path could not afford to do.
-            SourceResolver.upgradeFor(
-                waiting.target.copy(durationSec = playingDurationSec ?: waiting.target.durationSec),
-                playing = waiting.playing,
-            ).also {
+            val target = waiting.target.copy(
+                durationSec = playingDurationSec ?: waiting.target.durationSec,
+            )
+
+            val better = when (request) {
+                is StreamRequest.Aac, StreamRequest.Best -> {
+                    // On mobile data this is the important path: if first note
+                    // had to fall back to Opus/AAC-128, try YouTube again for a
+                    // verified AAC >=250 kbps before giving up. This lookup is
+                    // intentionally fresh and cannot return Lossless.
+                    StreamResolver.resolveHiQualityUpgrade(mediaId)
+                        ?.takeIf { SourceResolver.worthSwapping(it.format, waiting.playing) }
+                        ?: SourceResolver.upgradeFor(target, playing = waiting.playing)
+                }
+                StreamRequest.Lossless -> {
+                    // Wi-Fi Maximum keeps Lossless first. Hi-Q remains the safe
+                    // fallback when no Lossless/Hi-Res candidate can be proven.
+                    SourceResolver.upgradeFor(target, playing = waiting.playing)
+                        ?: StreamResolver.resolveHiQualityUpgrade(mediaId)
+                            ?.takeIf { SourceResolver.worthSwapping(it.format, waiting.playing) }
+                }
+                is StreamRequest.Capped -> SourceResolver.upgradeFor(target, playing = waiting.playing)
+            }
+            better.also {
                 found = it
                 answered = true
             }
@@ -449,22 +500,26 @@ object QualityUpgrade {
         }
     }
 
-    fun rearmAfterHandoff(mediaId: String) {
-        asked.remove(mediaId)
-        refused.remove(mediaId)
-    }
-
-    fun settlePreparedQueueTrack(mediaId: String) {
-        pending.remove(mediaId)?.inFlight?.cancel()
-        NerdStats.onLosslessRaceEnd(mediaId)
-    }
-
     /** Abandons the second look for [mediaId] — the queue has moved on. */
     fun forget(mediaId: String) {
         pending.remove(mediaId)?.inFlight?.cancel()
         forced.remove(mediaId)
         shelved.remove(mediaId)
         auditioning -= mediaId
+        NerdStats.onLosslessRaceEnd(mediaId)
+    }
+
+    /**
+     * A queue-prepared track has already spent its quality-search budget before
+     * playback. Freeze that decision for this play so the player does not cut
+     * audio later to swap streams mid-song.
+     */
+    fun settlePreparedQueueTrack(mediaId: String) {
+        pending.remove(mediaId)?.inFlight?.cancel()
+        forced.remove(mediaId)
+        shelved.remove(mediaId)
+        auditioning -= mediaId
+        asked += mediaId
         NerdStats.onLosslessRaceEnd(mediaId)
     }
 

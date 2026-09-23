@@ -2,6 +2,7 @@ package com.music.orb.data.sources
 
 import com.music.orb.data.model.Song
 import kotlin.math.abs
+import java.text.Normalizer
 
 /**
  * Decides whether one catalogue's track is the same recording as another's,
@@ -44,9 +45,25 @@ object TrackMatcher {
         val artist: String = "",
         /** Runtime in whole seconds; null when the queue row never carried one. */
         val durationSec: Int? = null,
+        /** Explicit and clean masters are not interchangeable recordings. */
+        val isExplicit: Boolean? = null,
+        /** Release title claimed by the catalogue row, when known. */
+        val albumName: String? = null,
+        /** Original release year, when a trustworthy catalogue states it. */
+        val releaseYear: Int? = null,
+        /** YouTube id used only to enrich missing identity metadata in background. */
+        val sourceVideoId: String? = null,
     )
 
-    fun targetOf(song: Song) = Target(song.title, song.artist, secondsOf(song.durationText))
+    fun targetOf(song: Song) = Target(
+        title = song.title,
+        artist = song.artist,
+        durationSec = secondsOf(song.durationText),
+        isExplicit = song.isExplicit,
+        albumName = song.albumName,
+        releaseYear = song.releaseYear,
+        sourceVideoId = song.videoId.takeIf { SourceRegistry.parseTrackKey(it) == null },
+    )
 
     // ── Asking ──────────────────────────────────────────────────────────────
 
@@ -68,8 +85,28 @@ object TrackMatcher {
         val title = searchableTitle(target.title, target.artist)
         if (title.isBlank()) return emptyList()
         val artist = primaryArtist(target.artist)
-        if (artist.isBlank()) return listOf(title)
-        return listOf("$title $artist", title)
+        val album = target.albumName?.trim().orEmpty()
+        val normal = buildList {
+            // Album-aware lookup first. Search engines are allowed to return
+            // covers and alternate releases; giving them the requested release
+            // helps discovery before identity checks even begin.
+            if (artist.isNotBlank() && album.isNotBlank()) add("$title $artist $album")
+            if (artist.isNotBlank()) add("$title $artist")
+            add(title)
+        }.distinct()
+
+        // Some catalogues expose clean and explicit as separate rows with the
+        // same title. Ask for the explicit edition first when that is what was
+        // selected, then fall back to the ordinary query and let score() enforce
+        // the badge identity. This improves discovery without ever substituting
+        // a clean master for an explicit one.
+        if (target.isExplicit != true) return normal
+        val hinted = if (artist.isBlank()) {
+            listOf("$title explicit")
+        } else {
+            listOf("$title $artist explicit", "$title explicit")
+        }
+        return (hinted + normal).distinct()
     }
 
     /** The title with the packaging taken off, version markers kept. */
@@ -121,36 +158,54 @@ object TrackMatcher {
         val got = parseTitle(candidate.title, candidate.artist)
         if (wanted.core.isEmpty() || got.core.isEmpty()) return null
         if (wanted.core != got.core) return null
+        // Explicit and clean versions can have identical title, artist and
+        // duration. Once the catalogue told us which one was selected, that
+        // distinction is a hard identity check just like remix/live markers.
+        if (target.isExplicit != null && candidate.sourceExplicitKnown && candidate.isExplicit != target.isExplicit) return null
         // Direction matters both ways round: asking for the album cut must not
         // land on the live take, and asking for the live take must not land on
         // the album cut.
-        if (wanted.versions != got.versions) return null
+        //
+        // Some catalogues (notably TIDAL) may hide the take descriptor outside
+        // the track title. TIDAL has a dedicated `version` field (folded into
+        // candidate.title by TidalSource), and some releases still expose it
+        // only in the album/single title (e.g. "Escapism. (Sped Up)"). A plain
+        // target must never match one of those rows merely because its visible
+        // track title is still "Escapism.".
+        val gotVersions = got.versions + candidateAlbumVersions(candidate)
+        if (wanted.versions != gotVersions) return null
 
         val duration = durationScore(target.durationSec, secondsOf(candidate.durationText))
             ?: return null
-        val artist = artistScore(target.artist, candidate.artist)
-            // The credits don't merely differ in spelling, they name different
-            // people — and sometimes that is because they are describing the
-            // same recording from different ends of it. Film catalogues are
-            // full of this: YouTube Music files "Jhak Maar Ke" under Pritam,
-            // who *wrote* it, while every store files it under Neeraj
-            // Shridhar, who *sang* it. Neither is wrong and nothing in either
-            // credit hints at the other, so a matcher that insists on an
-            // overlap refuses the correct track every time.
-            //
-            // What breaks the tie is length. Two recordings that share an
-            // exact title and agree on their runtime to the second are the
-            // same master; a cover, a remix or a re-recording essentially
-            // never lands there — of the four candidates for that track, the
-            // remix ran 241s and the acoustic cover 66s against the 233s being
-            // played. So an exact runtime is allowed to stand in for a shared
-            // credit, and *only* an exact one: with no runtime on either side
-            // there is nothing corroborating anything, and the strict refusal
-            // stands. The match still scores below a genuine credit match, so
-            // it never wins where a properly-credited copy exists.
-            ?: CREDITS_DISAGREE.takeIf { withinSeconds(candidate, target, CREDIT_OVERRIDE_SEC) }
-            ?: return null
-        return BASE + artist + duration + contextScore(wanted, got)
+
+        // A cover with the same title and nearly the same runtime is still a
+        // cover. Runtime is corroboration, never permission to waive a named
+        // artist. Every artist explicitly present in the requested credit —
+        // including featured artists — must be represented by the candidate.
+        val artist = artistScore(target.artist, candidate.artist) ?: return null
+
+        // Release metadata is recording identity too. We only veto on fields
+        // both catalogues actually state; SourceResolver enriches both sides
+        // before a lossless upgrade so album/year are normally available there.
+        val release = releaseScore(target, candidate) ?: return null
+
+        return BASE + artist + duration + release + contextScore(wanted, got)
+    }
+
+
+    /**
+     * Version markers hidden in the release title rather than the track title.
+     *
+     * This is deliberately a veto, not a scoring hint. Playing YouTube's
+     * official/album recording is always preferable to substituting a lossless
+     * remix under the official metadata. Neutral labels such as "Album
+     * Version", "Radio Edit" and "Original Mix" are already removed by
+     * [classify], so only genuinely different takes survive here.
+     */
+    private fun candidateAlbumVersions(candidate: Song): Set<String> {
+        val album = candidate.albumName?.trim().orEmpty()
+        if (album.isBlank()) return emptySet()
+        return parseTitle(album, candidate.artist).versions
     }
 
     /**
@@ -167,6 +222,69 @@ object TrackMatcher {
         val wanted = target.durationSec ?: return false
         val got = secondsOf(candidate.durationText) ?: return false
         return abs(wanted - got) <= seconds
+    }
+
+    /**
+     * Final cross-source identity check used before Lossless is allowed to
+     * replace YouTube. Unlike the broad catalogue scorer, this requires the
+     * release itself to be stated. When both catalogues know the year it must
+     * agree; an omitted TIDAL year is unknown metadata, not a different release.
+     */
+    internal fun verifiedForLossless(candidate: Song, target: Target): Boolean {
+        if (score(candidate, target) == null) return false
+        if (target.artist.isBlank() || candidate.artist.isBlank()) return false
+        val wantedAlbum = target.albumName?.takeIf { it.isNotBlank() } ?: return false
+        val gotAlbum = candidate.albumName?.takeIf { it.isNotBlank() } ?: return false
+        if (releaseCore(wantedAlbum) != releaseCore(gotAlbum)) return false
+        if (target.releaseYear != null && candidate.releaseYear != null && candidate.releaseYear != target.releaseYear) return false
+        if (!withinSeconds(candidate, target, LOSSLESS_IDENTITY_DURATION_SEC)) return false
+        return true
+    }
+
+
+    /**
+     * Strict identity gate for replacing an authoritative YouTube Music track
+     * with bytes from another catalogue.
+     *
+     * General search matching intentionally tolerates incomplete metadata so a
+     * user can still find obscure recordings. Playback substitution cannot be
+     * that permissive: the UI keeps the original song title/artwork while only
+     * the audio bytes change, so a false positive sounds exactly like Orb is
+     * presenting a cover as the official recording.
+     *
+     * When the original release is known, the external candidate must state a
+     * compatible release too. A common deluxe/expanded reissue is accepted as
+     * the same release family; an unrelated tribute/cover compilation is not.
+     */
+    internal fun verifiedForSubstitution(candidate: Song, target: Target): Boolean {
+        // Do the title/artist/version/duration check first without release veto;
+        // release-family compatibility is handled below so a legitimate deluxe
+        // reissue can still satisfy an original-album request.
+        if (score(candidate, target.copy(albumName = null, releaseYear = null)) == null) return false
+        if (target.artist.isBlank() || candidate.artist.isBlank()) return false
+
+        if (target.durationSec != null && !withinSeconds(candidate, target, LOSSLESS_IDENTITY_DURATION_SEC)) {
+            return false
+        }
+
+        if (looksLikeCover(candidate.title, candidate.albumName) &&
+            !looksLikeCover(target.title, target.albumName)
+        ) {
+            return false
+        }
+
+        val wantedAlbum = target.albumName?.takeIf { it.isNotBlank() }
+        if (wantedAlbum != null) {
+            val gotAlbum = candidate.albumName?.takeIf { it.isNotBlank() } ?: return false
+            if (!sameReleaseFamily(wantedAlbum, gotAlbum)) return false
+        }
+
+        if (target.releaseYear != null && candidate.releaseYear != null &&
+            candidate.releaseYear != target.releaseYear
+        ) {
+            return false
+        }
+        return true
     }
 
     /**
@@ -312,10 +430,25 @@ object TrackMatcher {
     private fun artistScore(wanted: String, got: String): Int? {
         val want = artistNames(wanted)
         val have = artistNames(got)
-        if (want.isEmpty() || have.isEmpty()) return 0
-        val shared = want.any { w -> have.any { h -> sameArtist(w, h) } }
-        if (!shared) return null
-        return if (want == have) ARTIST_EXACT else ARTIST_SHARED
+        if (want.isEmpty()) return 0
+        if (have.isEmpty()) return null
+
+        // Shared-main-artist alone is not enough. If YouTube says
+        // "Mark Ronson feat. Bruno Mars", a TIDAL row naming only Mark Ronson
+        // is incomplete identity; likewise a cover artist cannot pass merely
+        // because the title and duration happen to align.
+        val allRequestedCreditsPresent = want.all { requested ->
+            have.any { candidate -> sameArtist(requested, candidate) }
+        }
+        if (!allRequestedCreditsPresent) return null
+
+        return if (want.size == have.size && have.all { candidate ->
+                want.any { requested -> sameArtist(requested, candidate) }
+            }) {
+            ARTIST_EXACT
+        } else {
+            ARTIST_REQUESTED_COMPLETE
+        }
     }
 
     /**
@@ -346,6 +479,66 @@ object TrackMatcher {
         return (0..outer.size - inner.size).any { at ->
             outer.subList(at, at + inner.size) == inner
         }
+    }
+
+    // ── Release identity ───────────────────────────────────────────────────
+
+    /**
+     * Album/single and year agreement. Different releases can carry the same
+     * title, artists and runtime — and covers routinely do — so a stated
+     * mismatch is a hard veto. Missing metadata is neutral here; lossless
+     * playback asks SourceResolver to enrich it before the final decision.
+     */
+    private fun releaseScore(target: Target, candidate: Song): Int? {
+        var score = 0
+        val wantedAlbum = target.albumName?.takeIf { it.isNotBlank() }
+        val gotAlbum = candidate.albumName?.takeIf { it.isNotBlank() }
+        if (wantedAlbum != null && gotAlbum != null) {
+            if (releaseCore(wantedAlbum) != releaseCore(gotAlbum)) return null
+            score += ALBUM_EXACT
+        }
+
+        val wantedYear = target.releaseYear
+        val gotYear = candidate.releaseYear
+        if (wantedYear != null && gotYear != null) {
+            if (wantedYear != gotYear) return null
+            score += YEAR_EXACT
+        }
+        return score
+    }
+
+    /** Case/punctuation/diacritic-insensitive release identity; edition words stay. */
+    private fun releaseCore(value: String): String = Normalizer
+        .normalize(value.lowercase(), Normalizer.Form.NFD)
+        .replace(DIACRITICS, "")
+        .replace(RELEASE_NON_ALNUM, "")
+
+    /**
+     * Release-family identity used only by the strict playback-substitution
+     * gate. It treats common deluxe/expanded/remastered packages as the same
+     * underlying album while keeping genuinely different releases separate.
+     */
+    private fun sameReleaseFamily(first: String, second: String): Boolean {
+        val a = releaseFamilyCore(first)
+        val b = releaseFamilyCore(second)
+        return a.isNotBlank() && a == b
+    }
+
+    private fun releaseFamilyCore(value: String): String {
+        val normalized = Normalizer.normalize(value.lowercase(), Normalizer.Form.NFD)
+            .replace(DIACRITICS, "")
+            .replace(Regex("[^a-z0-9]+"), " ")
+            .trim()
+        if (normalized.isBlank()) return ""
+        val words = normalized.split(Regex("\\s+"))
+        val editionAt = words.indexOfFirst { it in RELEASE_EDITION_MARKERS }
+        val base = if (editionAt >= 0) words.take(editionAt) else words
+        return base.dropLastWhile { it in RELEASE_TRAILING_ARTICLES }.joinToString("")
+    }
+
+    private fun looksLikeCover(title: String, album: String?): Boolean {
+        val haystack = "$title ${album.orEmpty()}".lowercase()
+        return COVER_MARKERS.any { it.containsMatchIn(haystack) }
     }
 
     // ── Duration ────────────────────────────────────────────────────────────
@@ -386,23 +579,10 @@ object TrackMatcher {
 
     /** Everything that reaches scoring has already matched on title and version. */
     private const val BASE = 100
-    private const val ARTIST_EXACT = 25
-    private const val ARTIST_SHARED = 10
-
-    /**
-     * Carried by a match the runtime vouched for rather than the credit. A
-     * penalty, not a pass: any candidate whose credit genuinely agrees beats
-     * it by at least 25, so this only ever decides what plays when nothing
-     * properly credited exists.
-     */
-    private const val CREDITS_DISAGREE = -15
-
-    /**
-     * How exactly two runtimes must agree before that is allowed to stand in
-     * for a shared credit. To the second, near enough — this is the only
-     * evidence there is in that case, so it has to be the strong kind.
-     */
-    private const val CREDIT_OVERRIDE_SEC = 2
+    private const val ARTIST_EXACT = 30
+    private const val ARTIST_REQUESTED_COMPLETE = 18
+    private const val ALBUM_EXACT = 35
+    private const val YEAR_EXACT = 20
     private const val DURATION_TIGHT = 40
     private const val DURATION_LOOSE = 15
     private const val CONTEXT_SHARED = 20
@@ -416,6 +596,7 @@ object TrackMatcher {
      * enough to rule out an extended cut or a full-album upload.
      */
     private const val DURATION_LIMIT_SEC = 30
+    private const val LOSSLESS_IDENTITY_DURATION_SEC = 3
 
     private const val BRACKET_PASSES = 3
     private const val DASH_PASSES = 3
@@ -425,8 +606,25 @@ object TrackMatcher {
     private val FEATURING = Regex("""\b(feat|ft|featuring|with)\b.*""")
     private val WORD_SPLIT = Regex("""[\s.·]+""")
     private val NON_ALNUM = Regex("""[^a-z0-9]""")
+    private val DIACRITICS = Regex("""\p{M}+""")
+    private val RELEASE_NON_ALNUM = Regex("""[^a-z0-9]""")
     private val ARTIST_SEPARATORS =
         Regex("""\s*(?:[,&/;·|]|\band\b|\bx\b|\bvs\.?\b|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b|\bwith\b)\s*""")
+
+    private val RELEASE_EDITION_MARKERS = setOf(
+        "deluxe", "expanded", "anniversary", "edition", "complete", "special",
+        "bonus", "legacy", "collector", "collectors", "platinum", "remaster", "remastered",
+    )
+    private val RELEASE_TRAILING_ARTICLES = setOf("the", "a", "an")
+    private val COVER_MARKERS = listOf(
+        Regex("\\bcover\\b"),
+        Regex("\\btribute\\b"),
+        Regex("\\bkaraoke\\b"),
+        Regex("\\bsound[ -]?alike\\b"),
+        Regex("\\bin the style of\\b"),
+        Regex("\\bmade famous by\\b"),
+        Regex("\\bbacking track\\b"),
+    )
 
     /**
      * What makes a listing a different recording rather than a different
@@ -440,7 +638,10 @@ object TrackMatcher {
         // and friends carry the right title and the right artist and are not
         // remotely the recording anybody asked for.
         "vocals", "vocal", "acapella", "acappella", "backing", "stems", "stem",
-        "cover", "demo", "reprise", "remake", "rework", "extended", "edit",
+        // "cover" is intentionally not a global veto. Covers remain valid
+        // catalogue recordings when the user actually selected that artist/
+        // release; artist + album + year decide whether it is the requested one.
+        "demo", "reprise", "remake", "rework", "extended", "edit",
         "version", "mix", "dub", "vip", "session", "sessions",
         "sped", "slowed", "reverb", "nightcore", "lofi", "orchestral", "symphonic",
         "part", "pt", "chapter",

@@ -85,7 +85,9 @@ class ChunkedDataSource(
                     // `host` is null exactly when the URL was too broken to
                     // parse, which is the case most in need of naming — so fall
                     // back to the string itself rather than logging "null".
-                    val who = dataSpec.uri.host ?: dataSpec.uri.toString().take(120)
+                    val who = dataSpec.uri.host
+                        ?.takeIf { it.isNotBlank() }
+                        ?: dataSpec.uri.toString().take(120).ifBlank { "<empty-uri>" }
                     TrackLog.w(TAG, "$who refused the stream: ${e.message}")
                     report(dataSpec, e)
                 }

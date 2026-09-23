@@ -1,7 +1,9 @@
 package com.music.orb.data.innertube
 
+import com.music.orb.data.ArtistCreditResolver
 import com.music.orb.data.model.Account
 import com.music.orb.data.model.ArtistPage
+import com.music.orb.data.model.ArtistLink
 import com.music.orb.data.model.BrowseItem
 import com.music.orb.data.model.BrowseType
 import com.music.orb.data.model.HomeShelf
@@ -10,8 +12,11 @@ import com.music.orb.data.model.LikeStatus
 import com.music.orb.data.model.SearchResult
 import com.music.orb.data.model.ShelfItem
 import com.music.orb.data.model.Song
+import com.music.orb.data.model.SongCreditSection
+import com.music.orb.data.model.SongCredits
 import com.music.orb.data.model.SongMenu
 import com.music.orb.data.model.UserPlaylist
+import com.music.orb.data.model.YouTubeAccountIdentity
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -117,6 +122,15 @@ object InnertubeParser {
 
         val subtitle = columns.getOrNull(1)
             .o("musicResponsiveListItemFlexColumnRenderer").o("text").runs()
+        // Orb is intentionally music-only. YouTube Music can mix podcast
+        // shows/episodes into search, Home and library responses even when
+        // the UI never exposes a Podcasts filter. Reject those browse targets
+        // at the parser boundary so they cannot leak into any screen.
+        if (isNonMusicAudioPage(pageType, browseId) ||
+            NON_MUSIC_AUDIO_WORD.containsMatchIn(subtitle)
+        ) {
+            return null
+        }
         // A playlist/album billed as a video chart/compilation — "N videos"
         // in the subtitle, or "video" right in the title, e.g. "Daily Top
         // Music Videos" — would have every row dropped by
@@ -131,15 +145,93 @@ object InnertubeParser {
             thumbnailUrl = renderer.o("thumbnail").o("musicThumbnailRenderer")
                 .o("thumbnail").a("thumbnails").best(),
             type = when {
-                "ALBUM" in pageType -> BrowseType.ALBUM
+                "ALBUM" in pageType || browseId.startsWith("MPRE") -> BrowseType.ALBUM
                 "ARTIST" in pageType -> BrowseType.ARTIST
-                "PLAYLIST" in pageType -> BrowseType.PLAYLIST
+                "PLAYLIST" in pageType || browseId.startsWith("VL") -> BrowseType.PLAYLIST
                 else -> BrowseType.OTHER
             },
+            isExplicit = renderer.hasExplicitBadge() || title.hasExplicitVersionLabel(),
         )
     }
 
     // ---- Home feed ----------------------------------------------------------
+
+    /**
+     * Playlist carousels exposed by FEmusic_charts. YouTube A/B-tests this
+     * surface heavily, but the chart playlist cards themselves are stable:
+     * their two-row renderer navigates to a `VL...` browse id. We intentionally
+     * parse them separately from normal Home cards because chart titles often
+     * contain the word "video", which the music-only Home parser correctly
+     * rejects everywhere else.
+     *
+     * The returned outer list preserves carousel order. For authenticated
+     * accounts YouTube currently serves Daily then Weekly chart carousels;
+     * callers should still tolerate one of them being absent.
+     */
+    fun parseChartPlaylistCarousels(response: JsonObject): List<List<ShelfItem>> {
+        val sections = response.o("contents")
+            .o("singleColumnBrowseResultsRenderer").a("tabs")?.firstOrNull()
+            .o("tabRenderer").o("content").o("sectionListRenderer").a("contents")
+            .orEmpty()
+
+        return sections.mapNotNull sectionLoop@ { section ->
+            val carousel = section.o("musicCarouselShelfRenderer") ?: return@sectionLoop null
+            val items = carousel.a("contents").orEmpty().mapNotNull itemLoop@ { node ->
+                val renderer = node.o("musicTwoRowItemRenderer") ?: return@itemLoop null
+                val title = renderer.o("title").runs()
+                if (title.isBlank()) return@itemLoop null
+                val endpoint = renderer.o("navigationEndpoint").o("browseEndpoint")
+                val browseId = endpoint.s("browseId") ?: return@itemLoop null
+                if (!browseId.startsWith("VL")) return@itemLoop null
+                val subtitle = renderer.o("subtitle").runs()
+                val thumbnails = renderer.o("thumbnailRenderer")
+                    .o("musicThumbnailRenderer").o("thumbnail").a("thumbnails")
+                ShelfItem(
+                    title = title,
+                    subtitle = subtitle,
+                    thumbnailUrl = thumbnails.best(),
+                    videoId = null,
+                    browseId = browseId,
+                    type = BrowseType.PLAYLIST,
+                )
+            }.distinctBy { it.browseId }
+            items.takeIf { it.isNotEmpty() }
+        }
+    }
+
+
+    /**
+     * Ranked *song* rows exposed directly by FEmusic_charts.
+     *
+     * This must not be confused with [parseChartPlaylistCarousels]: those
+     * carousels are YouTube's Daily/Weekly **music-video** playlists. The Top
+     * Songs chart is delivered as one or more musicShelfRenderer lists with
+     * playable responsive rows. Parse those rows directly and reject every
+     * row the normal music parser identifies as a video (OMV/UGC/widescreen).
+     *
+     * The response is A/B tested, so do not depend on a localized shelf title.
+     * A playable responsive row is the stable signal; artist/album chart rows
+     * have browse destinations instead of a song video id and therefore never
+     * survive [parseResponsiveListItem].
+     */
+    fun parseChartSongs(response: JsonObject): List<Song> {
+        // Recursive lookup keeps this working when YouTube moves a chart shelf
+        // between section-list wrappers during an A/B test. Only actual
+        // musicShelfRenderer rows are considered; the Daily/Weekly video
+        // carousels use musicTwoRowItemRenderer and never enter this path.
+        val shelves = collectRenderers(response, "musicShelfRenderer")
+        val seen = HashSet<String>()
+        return buildList {
+            shelves.forEach shelfLoop@ { shelf ->
+                shelf.a("contents").orEmpty().forEach rowLoop@ { node ->
+                    val song = parseResponsiveListItem(
+                        node.o("musicResponsiveListItemRenderer"),
+                    ) ?: return@rowLoop
+                    if (!song.isVideo && seen.add(song.videoId)) add(song)
+                }
+            }
+        }
+    }
 
     fun parseHome(response: JsonObject): List<HomeShelf> {
         val sections = response.o("contents")
@@ -185,28 +277,73 @@ object InnertubeParser {
         val header = carousel.o("header").o("musicCarouselShelfBasicHeaderRenderer")
         val title = header.o("title").runs()
         val strapline = header.o("strapline").runs()
+        val browseEndpoint = shelfHeaderBrowseEndpoint(header)
+        val browseId = browseEndpoint?.s("browseId")
+        val browseParams = browseEndpoint?.s("params")
         // Whole shelves like "Video charts" carry nothing but video
         // compilations — each card would fail its own video check on the
         // way to a dead-end page, so the shelf is dropped outright.
-        if (VIDEO_WORD.containsMatchIn(title)) return null
+        // Podcast surfaces ("Your shows", "Shows for you", etc.) are removed
+        // here as well; Orb's Home is deliberately music-only.
+        if (VIDEO_WORD.containsMatchIn(title) || isNonMusicAudioShelf(title)) return null
         val items = carousel.a("contents").orEmpty().mapNotNull { item ->
             parseTwoRowItem(item.o("musicTwoRowItemRenderer"))
                 ?: parseResponsiveListItem(item.o("musicResponsiveListItemRenderer"))
                     ?.takeUnless { it.isVideo }
                     ?.let { song ->
-                        ShelfItem(song.title, song.artist, song.thumbnailUrl, song.videoId, null)
+                        ShelfItem(
+                            song.title,
+                            song.artist,
+                            song.thumbnailUrl,
+                            song.videoId,
+                            null,
+                            isExplicit = song.isExplicit,
+                        )
                     }
         }
-        return if (items.isEmpty()) null else HomeShelf(title.ifBlank { "For you" }, items, strapline)
+        return if (items.isEmpty()) null else HomeShelf(
+            title = title.ifBlank { "For you" },
+            items = items,
+            subtitle = strapline,
+            browseId = browseId,
+            browseParams = browseParams,
+        )
+    }
+
+    /**
+     * Browse destination behind a carousel header. YouTube has used both a
+     * tappable title run and a dedicated `moreContentButton`; accept either so
+     * artist release shelves can be expanded regardless of the current layout.
+     */
+    private fun shelfHeaderBrowseEndpoint(header: JsonObject?): JsonObject? {
+        if (header == null) return null
+        header.o("title").a("runs").orEmpty().forEach { run ->
+            val endpoint = run.o("navigationEndpoint").o("browseEndpoint")
+            if (!endpoint.s("browseId").isNullOrBlank()) return endpoint
+        }
+        val more = header.o("moreContentButton").o("buttonRenderer")
+            .o("navigationEndpoint").o("browseEndpoint")
+        if (!more.s("browseId").isNullOrBlank()) return more
+        return collectRenderers(header, "browseEndpoint")
+            .firstOrNull { !it.s("browseId").isNullOrBlank() }
     }
 
     private fun plainShelf(shelf: JsonObject): HomeShelf? {
         val title = shelf.o("title").runs()
-        if (VIDEO_WORD.containsMatchIn(title)) return null
+        if (VIDEO_WORD.containsMatchIn(title) || isNonMusicAudioShelf(title)) return null
         val items = shelf.a("contents").orEmpty().mapNotNull {
             parseResponsiveListItem(it.o("musicResponsiveListItemRenderer"))
         }.filterNot { it.isVideo }
-            .map { ShelfItem(it.title, it.artist, it.thumbnailUrl, it.videoId, null) }
+            .map {
+                ShelfItem(
+                    it.title,
+                    it.artist,
+                    it.thumbnailUrl,
+                    it.videoId,
+                    null,
+                    isExplicit = it.isExplicit,
+                )
+            }
         return if (items.isEmpty()) null else HomeShelf(title.ifBlank { "For you" }, items)
     }
 
@@ -248,7 +385,13 @@ object InnertubeParser {
                     parseTwoRowItem(it.o("musicTwoRowItemRenderer"))
                 }.filter { it.browseId != null }
                 if (title.isNotBlank() && items.isNotEmpty()) {
-                    shelves += HomeShelf(title, items)
+                    val browseEndpoint = shelfHeaderBrowseEndpoint(header)
+                    shelves += HomeShelf(
+                        title = title,
+                        items = items,
+                        browseId = browseEndpoint?.s("browseId"),
+                        browseParams = browseEndpoint?.s("params"),
+                    )
                 }
             }
         }
@@ -256,7 +399,74 @@ object InnertubeParser {
             songs, moreSongs, shelves,
             thumbnailUrl = artistThumbnail(header),
             name = credit.artistName,
+            monthlyAudience = artistMonthlyAudience(header),
         )
+    }
+
+    /**
+     * Alternate editions linked from an album page (standard, deluxe, expanded, etc.).
+     * YouTube exposes these in a dedicated "Other versions" carousel. Keep this
+     * separate from generic recommendations so artist/detail pages can surface every
+     * edition without also importing unrelated albums.
+     */
+    fun parseOtherVersionsShelf(response: JsonObject): HomeShelf? {
+        return collectRenderers(response, "musicCarouselShelfRenderer")
+            .mapNotNull { carousel ->
+                val header = carousel.o("header").o("musicCarouselShelfBasicHeaderRenderer")
+                val title = header.o("title").runs().trim()
+                val normalized = title.lowercase()
+                val isOtherVersions =
+                    normalized == "other versions" ||
+                        normalized == "outras versões" ||
+                        normalized == "otras versiones" ||
+                        normalized.contains("other version") ||
+                        normalized.contains("outras vers") ||
+                        normalized.contains("otras version")
+                if (!isOtherVersions) return@mapNotNull null
+
+                val items = carousel.a("contents").orEmpty()
+                    .mapNotNull { parseTwoRowItem(it.o("musicTwoRowItemRenderer")) }
+                    .filter { it.type == BrowseType.ALBUM && !it.browseId.isNullOrBlank() }
+                    .distinctBy { it.browseId }
+                if (items.isEmpty()) null else HomeShelf(title.ifBlank { "Other versions" }, items)
+            }
+            .firstOrNull()
+    }
+
+    /**
+     * Monthly audience exposed by current YouTube Music artist headers.
+     *
+     * The field is intentionally kept as the full backend phrase (for example
+     * "29.1M monthly audience") so the UI can localize only the interface
+     * words while preserving YouTube's compact number formatting.
+     */
+    private fun artistMonthlyAudience(header: JsonElement?): String? {
+        val renderer = header.o("musicImmersiveHeaderRenderer")
+            ?: header.o("musicVisualHeaderRenderer")
+            ?: return null
+
+        renderer.o("monthlyListenerCount").runs()
+            .trim()
+            .takeIf { it.isNotBlank() }
+            ?.let { return it }
+
+        // Defensive fallback for header variants that move the same text to a
+        // different child while keeping the human-readable label. Search only
+        // inside the artist header so a lower "Monthly audience" shelf title
+        // can never be mistaken for the artist's count.
+        fun find(node: JsonElement?): String? = when (node) {
+            is JsonObject -> {
+                val direct = (node["text"] as? JsonPrimitive)?.contentOrNull
+                    ?.trim()
+                    ?.takeIf { text ->
+                        MONTHLY_AUDIENCE_VALUE.matches(text)
+                    }
+                direct ?: node.values.firstNotNullOfOrNull(::find)
+            }
+            is JsonArray -> node.firstNotNullOfOrNull(::find)
+            else -> null
+        }
+        return find(renderer)
     }
 
     /**
@@ -283,12 +493,12 @@ object InnertubeParser {
         val immersive = header.o("musicImmersiveHeaderRenderer")
         val visual = header.o("musicVisualHeaderRenderer")
         val renderer = (
-            immersive.o("thumbnail")
-                ?: visual.o("foregroundThumbnail")
-                ?: visual.o("thumbnail")
-            ).o("musicThumbnailRenderer")
-            // Header shapes drift; fall back to the first image anywhere under
-            // the header rather than to the caller's album art.
+                immersive.o("thumbnail")
+                    ?: visual.o("foregroundThumbnail")
+                    ?: visual.o("thumbnail")
+                ).o("musicThumbnailRenderer")
+        // Header shapes drift; fall back to the first image anywhere under
+        // the header rather than to the caller's album art.
             ?: collectRenderers(header, "musicThumbnailRenderer").firstOrNull()
         return renderer.o("thumbnail").a("thumbnails").best()
     }
@@ -353,8 +563,8 @@ object InnertubeParser {
             ?: root.o("contents").o("twoColumnBrowseResultsRenderer").o("secondaryContents")
             ?: return null
         val looksLikePlaylist = collectRenderers(scope, "musicPlaylistShelfRenderer").isNotEmpty() ||
-            scope.o("musicPlaylistShelfContinuation") != null ||
-            collectRenderers(scope, "musicShelfRenderer").any { it.o("title").runs() == "Suggestions" }
+                scope.o("musicPlaylistShelfContinuation") != null ||
+                collectRenderers(scope, "musicShelfRenderer").any { it.o("title").runs() == "Suggestions" }
         if (!looksLikePlaylist) return null
 
         val pageCredit = pageCredit(root)
@@ -373,7 +583,7 @@ object InnertubeParser {
     }
 
     /**
-     * The cards on a library feed — saved playlists, albums, artists, podcasts.
+     * The cards on a library feed — saved playlists, albums and artists.
      *
      * Library pages remember whether the account last used the grid or the list
      * view, and serve `musicTwoRowItemRenderer` cards for one and
@@ -389,7 +599,15 @@ object InnertubeParser {
             val item = parseBrowseItem(renderer) ?: return@forEach
             out.putIfAbsent(
                 item.browseId,
-                ShelfItem(item.title, item.subtitle, item.thumbnailUrl, null, item.browseId),
+                ShelfItem(
+                    item.title,
+                    item.subtitle,
+                    item.thumbnailUrl,
+                    null,
+                    item.browseId,
+                    isExplicit = item.isExplicit,
+                    type = item.type,
+                ),
             )
         }
         return out.values.toList()
@@ -432,11 +650,22 @@ object InnertubeParser {
 
         val subtitle = columns.getOrNull(1)
             .o("musicResponsiveListItemFlexColumnRenderer").o("text").runs()
+        if (NON_MUSIC_AUDIO_WORD.containsMatchIn(subtitle)) return null
         val parts = subtitle.split(" • ").filter { it.isNotBlank() }
+        // Album and playlist rows often put duration in fixedColumns instead
+        // of the subtitle. Read both layouts so DetailScreen can always show
+        // the track length when YouTube supplied it.
+        val fixedColumnTexts = renderer.a("fixedColumns").orEmpty()
+            .mapNotNull { column ->
+                column.o("musicResponsiveListItemFixedColumnRenderer")
+                    .o("text").runs().takeIf { it.isNotBlank() }
+            }
         val duration = parts.lastOrNull()?.takeIf { it.matches(DURATION) }
+            ?: fixedColumnTexts.firstOrNull { it.matches(DURATION) }
         // On the "All" tab the first segment is the row type ("Song", "Video"),
         // not the artist — skip those so the subtitle reads like a credit.
         val rowType = parts.firstOrNull { it.lowercase() in TYPE_WORDS }?.lowercase()
+        if (rowType in NON_MUSIC_AUDIO_TYPES) return null
         // A track row on an album lists its play count where a search row
         // lists the artist, so a segment that reads as a tally is no credit.
         val artist = parts.firstOrNull {
@@ -461,13 +690,20 @@ object InnertubeParser {
             // credit; the "All" tab often lists only "Song • 4:30" otherwise,
             // and an album's own rows carry no credit at all — the release is
             // billed once, in the header the row hangs under.
-            artist = credits.artistName?.takeIf { it.isNotBlank() }
-                ?: artist
+            // Prefer the complete visible artist segment. YouTube often links
+            // only the primary artist even when the displayed credit is
+            // "Rihanna feat. Alok" / "Artist A & Artist B"; choosing the first
+            // linked run used to silently drop every featured artist. The full
+            // subtitle segment preserves YouTube Music's own credit formatting,
+            // while the linked primary artist id remains available for navigation.
+            artist = artist?.takeIf { it.isNotBlank() }
+                ?: credits.artistName?.takeIf { it.isNotBlank() }
                 ?: fallback.artistName
                 ?: "Unknown artist",
             thumbnailUrl = thumbnails.best(),
             durationText = duration,
             artistId = credits.artistId ?: fallback.artistId,
+            artistLinks = credits.artistLinks.ifEmpty { fallback.artistLinks },
             albumId = credits.albumId ?: fallback.albumId,
             albumName = credits.albumName ?: fallback.albumName,
             // Only playlist rows carry one; on an album or a search hit this
@@ -478,6 +714,7 @@ object InnertubeParser {
             // otherwise a music-video upload gives itself away with widescreen
             // art where a catalogue track has square album cover art.
             isVideo = rowType == "video" || thumbnails.isNotSquare(),
+            isExplicit = renderer.hasExplicitBadge() || title.hasExplicitVersionLabel(),
         )
     }
 
@@ -485,6 +722,7 @@ object InnertubeParser {
     private data class Credits(
         val artistId: String? = null,
         val artistName: String? = null,
+        val artistLinks: List<ArtistLink> = emptyList(),
         val albumId: String? = null,
         val albumName: String? = null,
     )
@@ -497,14 +735,141 @@ object InnertubeParser {
             val pageType = browse.o("browseEndpointContextSupportedConfigs")
                 .o("browseEndpointContextMusicConfig").s("pageType").orEmpty()
             credits = when {
-                "ARTIST" in pageType && credits.artistId == null ->
-                    credits.copy(artistId = id, artistName = run.s("text"))
+                "ARTIST" in pageType -> {
+                    // Preserve every explicit artist endpoint. The first one stays
+                    // in artistId for old call sites; artistLinks is the canonical
+                    // navigation credit for collaborations.
+                    val name = run.s("text")?.trim().orEmpty()
+                    ArtistCreditResolver.registerVerifiedArtist(name)
+                    val link = ArtistLink(id, name)
+                    val links = if (name.isNotBlank() && credits.artistLinks.none {
+                            it.artistId == id || it.name.equals(name, ignoreCase = true)
+                        }) {
+                        credits.artistLinks + link
+                    } else {
+                        credits.artistLinks
+                    }
+                    credits.copy(
+                        artistId = credits.artistId ?: id,
+                        artistName = credits.artistName ?: name.takeIf { it.isNotBlank() },
+                        artistLinks = links,
+                    )
+                }
                 "ALBUM" in pageType && credits.albumId == null ->
                     credits.copy(albumId = id, albumName = run.s("text"))
                 else -> credits
             }
         }
         return credits
+    }
+
+    /**
+     * Artists that the page header itself links to.
+     *
+     * This is intentionally header-scoped. A playlist creator is not inferred
+     * from the first song, and a plain user/channel name stays plain text. If
+     * YouTube explicitly links one or more names as artist pages, those exact
+     * names become the only clickable credits in DetailScreen.
+     */
+    fun parseHeaderArtists(root: JsonElement): List<ArtistLink> {
+        val header = HEADER_RENDERERS.firstNotNullOfOrNull {
+            collectRenderers(root, it).firstOrNull()
+        } ?: return emptyList()
+
+        return HEADER_CREDIT_LINES
+            .flatMap { header.o(it).a("runs").orEmpty() }
+            .mapNotNull { run ->
+                val browse = run.o("navigationEndpoint").o("browseEndpoint")
+                val id = browse.s("browseId") ?: return@mapNotNull null
+                val pageType = browse.o("browseEndpointContextSupportedConfigs")
+                    .o("browseEndpointContextMusicConfig").s("pageType").orEmpty()
+                if ("ARTIST" !in pageType) return@mapNotNull null
+                val name = run.s("text")?.trim().orEmpty()
+                if (name.isBlank()) {
+                    null
+                } else {
+                    ArtistCreditResolver.registerVerifiedArtist(name)
+                    ArtistLink(id, name)
+                }
+            }
+            .distinctBy { it.artistId to it.name.lowercase() }
+    }
+
+    /**
+     * Canonical artwork from an album/playlist page header.
+     *
+     * YouTube Music currently uses both `musicResponsiveHeaderRenderer` and
+     * `musicDetailHeaderRenderer`, and the cover itself may sit under either a
+     * `musicThumbnailRenderer` or `croppedSquareThumbnailRenderer`. Keeping the
+     * lookup header-scoped avoids accidentally returning a track thumbnail from
+     * the first row of a playlist.
+     */
+    fun parsePageThumbnail(root: JsonElement): String? {
+        val header = PAGE_ARTWORK_HEADER_RENDERERS.firstNotNullOfOrNull {
+            collectRenderers(root, it).firstOrNull()
+        } ?: return null
+
+        fun fromMusicThumbnail(node: JsonElement?): String? =
+            node.o("musicThumbnailRenderer").o("thumbnail").a("thumbnails").best()
+
+        fun fromCropped(node: JsonElement?): String? =
+            node.o("croppedSquareThumbnailRenderer").o("thumbnail").a("thumbnails").best()
+
+        val direct = sequenceOf(
+            fromMusicThumbnail(header.o("thumbnail")),
+            fromCropped(header.o("thumbnail")),
+            fromMusicThumbnail(header.o("foregroundThumbnail")),
+            fromCropped(header.o("foregroundThumbnail")),
+        ).firstOrNull { !it.isNullOrBlank() }
+        if (!direct.isNullOrBlank()) return direct
+
+        return collectRenderers(header, "musicThumbnailRenderer")
+            .firstNotNullOfOrNull { renderer ->
+                renderer.o("thumbnail").a("thumbnails").best()?.takeIf(String::isNotBlank)
+            }
+            ?: collectRenderers(header, "croppedSquareThumbnailRenderer")
+                .firstNotNullOfOrNull { renderer ->
+                    renderer.o("thumbnail").a("thumbnails").best()?.takeIf(String::isNotBlank)
+                }
+    }
+
+    /**
+     * Canonical release metadata from an album/single/EP page header.
+     *
+     * Current YouTube Music headers split this across two lines (artist in
+     * `straplineTextOne`, kind/year in `subtitle`), while older headers pack
+     * everything into one subtitle such as "Single • Artist • 2024". Keep the
+     * three semantic pieces and normalize them into the representation the
+     * detail screen already understands.
+     */
+    fun parseReleaseSubtitle(root: JsonElement): String? {
+        val header = HEADER_RENDERERS.firstNotNullOfOrNull {
+            collectRenderers(root, it).firstOrNull()
+        } ?: return null
+
+        val lines = HEADER_CREDIT_LINES.map { header.o(it).a("runs").orEmpty() }
+        val parts = lines.flatMap { line ->
+            line.joinToString("") { it.s("text").orEmpty() }
+                .split(" • ", " · ")
+                .map(String::trim)
+                .filter(String::isNotBlank)
+        }
+        val kind = parts.firstOrNull { it.lowercase() in RELEASE_WORDS } ?: return null
+        val year = parts.firstOrNull { it.matches(YEAR) }
+
+        // Prefer the linked artist credit because it avoids mistaking another
+        // free-text header fragment for a name. Fall back to the same safe
+        // heuristic pageCredit() uses for artists without a YouTube page.
+        val credit = creditsOf(lines.flatten()).artistName?.takeIf { it.isNotBlank() }
+            ?: parts.firstOrNull {
+                it.isNotBlank() && it.lowercase() !in TYPE_WORDS &&
+                        !it.matches(TALLY) && !it.matches(YEAR) && !it.matches(DURATION)
+            }
+
+        return listOfNotNull(kind, credit, year)
+            .distinct()
+            .joinToString(" • ")
+            .takeIf { it.isNotBlank() }
     }
 
     /**
@@ -541,7 +906,7 @@ object InnertubeParser {
         // a link to follow, leaving the name as the only thing to go on.
         val name = parts.firstOrNull {
             it.isNotBlank() && it.lowercase() !in TYPE_WORDS && !it.matches(TALLY) &&
-                !it.matches(YEAR) && !it.matches(DURATION)
+                    !it.matches(YEAR) && !it.matches(DURATION)
         }
         return credits.copy(artistName = name)
     }
@@ -556,14 +921,95 @@ object InnertubeParser {
             ?: return null
         val name = header.o("accountName").runs()
         if (name.isBlank()) return null
+        val handle = header.o("channelHandle").runs()
+            .ifBlank { header.o("channelHandle").s("simpleText").orEmpty() }
         val email = header.o("email").runs()
             .ifBlank { header.o("email").s("simpleText").orEmpty() }
-            .ifBlank { header.o("channelHandle").runs() }
+            .ifBlank { handle }
         return Account(
             name = name,
             email = email,
             thumbnailUrl = header.o("accountPhoto").a("thumbnails").best(),
+            handle = handle,
         )
+    }
+
+
+    /**
+     * Accounts listed by YouTube Music for the current Google login. This is
+     * the source of Brand/delegated page ids used to keep the chosen YouTube
+     * channel stable across app restarts. The response shape has moved several
+     * times, so candidates are recognized by their accountName field rather
+     * than a brittle absolute path.
+     */
+    fun parseAccountIdentities(response: JsonElement): List<YouTubeAccountIdentity> {
+        val candidates = mutableListOf<JsonObject>()
+
+        fun walk(node: JsonElement) {
+            when (node) {
+                is JsonObject -> {
+                    if (node["accountName"] != null && (
+                            node["serviceEndpoint"] != null ||
+                                node["channelHandle"] != null ||
+                                node["accountPhoto"] != null
+                            )
+                    ) {
+                        candidates += node
+                    }
+                    node.values.forEach(::walk)
+                }
+                is JsonArray -> node.forEach(::walk)
+                else -> Unit
+            }
+        }
+
+        fun firstString(node: JsonElement?, key: String): String? {
+            if (node == null) return null
+            return when (node) {
+                is JsonObject -> {
+                    (node[key] as? JsonPrimitive)?.contentOrNull
+                        ?: node.values.firstNotNullOfOrNull { firstString(it, key) }
+                }
+                is JsonArray -> node.firstNotNullOfOrNull { firstString(it, key) }
+                else -> null
+            }
+        }
+
+        fun firstBoolean(node: JsonElement?, key: String): Boolean? {
+            if (node == null) return null
+            return when (node) {
+                is JsonObject -> {
+                    (node[key] as? JsonPrimitive)?.contentOrNull?.toBooleanStrictOrNull()
+                        ?: node.values.firstNotNullOfOrNull { firstBoolean(it, key) }
+                }
+                is JsonArray -> node.firstNotNullOfOrNull { firstBoolean(it, key) }
+                else -> null
+            }
+        }
+
+        val seen = HashSet<String>()
+        return candidates.mapNotNull { item ->
+            val name = item.o("accountName").runs()
+                .ifBlank { item.o("accountName").s("simpleText").orEmpty() }
+            if (name.isBlank()) return@mapNotNull null
+
+            val handle = item.o("channelHandle").runs()
+                .ifBlank { item.o("channelHandle").s("simpleText").orEmpty() }
+            val pageId = firstString(item["serviceEndpoint"], "pageId")
+                ?.takeIf { it.isNotBlank() }
+            val selected = firstBoolean(item, "isSelected")
+                ?: firstBoolean(item, "selected")
+                ?: false
+            val identity = YouTubeAccountIdentity(
+                name = name,
+                handle = handle,
+                thumbnailUrl = item.o("accountPhoto").a("thumbnails").best(),
+                pageId = pageId,
+                isSelected = selected,
+            )
+            val key = pageId ?: "primary:$name:$handle"
+            identity.takeIf { seen.add(key) }
+        }
     }
 
     /** Tracks of a watch queue (`next` response) — the AutoPlay radio mix. */
@@ -588,29 +1034,73 @@ object InnertubeParser {
                 thumbnailUrl = renderer.o("thumbnail").a("thumbnails").best(),
                 durationText = renderer.o("lengthText").runs().takeIf { it.isNotBlank() },
                 artistId = credits.artistId,
+                artistLinks = credits.artistLinks,
                 albumId = credits.albumId,
                 albumName = credits.albumName,
+                // The watch queue frequently carries the release year in the same
+                // byline as Artist • Album • Year. Preserve it so opening the menu
+                // from Now Playing can show the same year as the album page.
+                releaseYear = byline.firstNotNullOfOrNull { part ->
+                    YEAR.find(part)?.value?.toIntOrNull()
+                },
                 // A catalogue track is credited "Artist • Album • Year"; the
                 // matching music video is "Artist • 417M views • 2.4M likes".
                 isVideo = byline.any { it.contains("views", ignoreCase = true) },
+                isExplicit = renderer.hasExplicitBadge() || title.hasExplicitVersionLabel(),
             )
         }
         return out.values.toList()
     }
 
     /**
+     * Browse id behind YouTube Music's “View song credits” action. The menu
+     * label is localized, so identify the action by the stable page type.
+     */
+    fun parseSongCreditsBrowseId(root: JsonElement, videoId: String): String? {
+        val row = collectRenderers(root, "playlistPanelVideoRenderer")
+            .firstOrNull { it.s("videoId") == videoId }
+            ?: return null
+
+        return collectRenderers(row, "menuNavigationItemRenderer")
+            .firstNotNullOfOrNull { renderer ->
+                val browse = renderer.o("navigationEndpoint").o("browseEndpoint")
+                    ?: return@firstNotNullOfOrNull null
+                val pageType = browse.o("browseEndpointContextSupportedConfigs")
+                    .o("browseEndpointContextMusicConfig").s("pageType").orEmpty()
+                val browseId = browse.s("browseId") ?: return@firstNotNullOfOrNull null
+                browseId.takeIf { "TRACK_CREDITS" in pageType || it.startsWith("MPTC") }
+            }
+    }
+
+    /**
+     * Parses the dedicated TRACK_CREDITS browse page. YouTube supplies these
+     * sections from label/distributor metadata. Section names are intentionally
+     * kept localized and unmodified (Performed by, Written by, Produced by,
+     * Music metadata provided by, plus any instrument-specific sections).
+     */
+    fun parseSongCredits(root: JsonElement): SongCredits? {
+        val sections = collectRenderers(root, "dismissableDialogContentSectionRenderer")
+            .mapNotNull { renderer ->
+                val title = renderer.o("title").runs().trim()
+                if (title.isBlank()) return@mapNotNull null
+
+                val names = renderer.o("subtitle").a("runs").orEmpty()
+                    .mapNotNull { run -> run.s("text")?.trim() }
+                    .filter { value ->
+                        value.isNotBlank() && value !in setOf("•", "·", "∙", "▪", "|")
+                    }
+                    .distinct()
+                if (names.isEmpty()) return@mapNotNull null
+                SongCreditSection(title = title, names = names)
+            }
+
+        return SongCredits(sections).takeIf { it.sections.isNotEmpty() }
+    }
+
+    /**
      * The account's own state for one track, read off the watch queue's row
      * menu: the thumbs rating, and the tokens that toggle library membership.
-     *
-     * Read from `next` rather than from anywhere cheaper because there is
-     * nowhere cheaper — no endpoint answers "is this liked" on its own, and
-     * library membership is only ever expressed as a pair of opaque tokens
-     * attached to a rendered row. The queue's own entry for the track carries
-     * both, so one call answers the whole menu.
-     *
-     * Scoped to [videoId]'s row: a watch queue is a list, and reading the
-     * first `likeButtonRenderer` in the response would answer for whichever
-     * track happened to be rendered first.
+     * Scoped to [videoId]'s row so another queue item's menu cannot leak state.
      */
     fun parseSongMenu(root: JsonElement, videoId: String): SongMenu? {
         val row = collectRenderers(root, "playlistPanelVideoRenderer")
@@ -724,7 +1214,7 @@ object InnertubeParser {
      */
     private val JsonElement?.isSaveToggle: Boolean
         get() = o("defaultIcon").s("iconType") == "BOOKMARK_BORDER" ||
-            o("toggledIcon").s("iconType") == "BOOKMARK"
+                o("toggledIcon").s("iconType") == "BOOKMARK"
 
     /**
      * The playlists the account can be asked to add a track to.
@@ -759,17 +1249,46 @@ object InnertubeParser {
         val title = renderer.o("title").runs()
         if (title.isBlank()) return null
         val endpoint = renderer.o("navigationEndpoint")
-        val browseId = endpoint.o("browseEndpoint").s("browseId")
-        // History/"Listen again" cards for tracks YouTube never catalogued
-        // as a proper Song carry no watchEndpoint at all — just a browseId
-        // to a "non-music audio track page" prefixed MPED<videoId>. That's
-        // the actual video id, not a real browsable page.
+        val browseEndpoint = endpoint.o("browseEndpoint")
+        val browseId = browseEndpoint.s("browseId")
+        val pageType = browseEndpoint.o("browseEndpointContextSupportedConfigs")
+            .o("browseEndpointContextMusicConfig").s("pageType").orEmpty()
+        val browseType = when {
+            "ALBUM" in pageType || browseId?.startsWith("MPRE") == true -> BrowseType.ALBUM
+            "ARTIST" in pageType -> BrowseType.ARTIST
+            "PLAYLIST" in pageType || browseId?.startsWith("VL") == true -> BrowseType.PLAYLIST
+            else -> BrowseType.OTHER
+        }
+        // MPED/MPSP are YouTube Music's non-music audio/podcast surfaces.
+        // Previous code converted MPED into a playable video id so podcast
+        // episodes could sneak into Listen Again. A music-focused Orb should
+        // discard them before they become ShelfItems.
+        if (isNonMusicAudioPage(pageType, browseId)) return null
         val videoId = endpoint.o("watchEndpoint").s("videoId")
-            ?: browseId?.takeIf { it.startsWith("MPED") }?.removePrefix("MPED")
-        val resolvedBrowseId = browseId?.takeUnless { it.startsWith("MPED") }
-        val thumbnails = renderer.o("thumbnailRenderer").o("musicThumbnailRenderer")
-            .o("thumbnail").a("thumbnails")
+        val resolvedBrowseId = browseId
+        val thumbnailRenderer = renderer.o("thumbnailRenderer").o("musicThumbnailRenderer")
+            ?: collectRenderers(renderer, "musicThumbnailRenderer").firstOrNull()
+        val thumbnails = thumbnailRenderer.o("thumbnail").a("thumbnails")
         val subtitle = renderer.o("subtitle").runs()
+        if (NON_MUSIC_AUDIO_WORD.containsMatchIn(subtitle)) return null
+        // Two-row track cards on Home/Explore use the same human-readable
+        // metadata pattern as search (e.g. "Música • Artist • Album"). Keep
+        // interface type words out of the model: if they survive here, the
+        // Now Playing artist line can literally become "Música • Artist" and
+        // Discover's heard/liked exclusion compares the wrong signature.
+        val trackSubtitle = if (browseId == null && videoId != null) {
+            subtitle.split(" • ")
+                .map { it.trim() }
+                .firstOrNull { part ->
+                    part.isNotBlank() &&
+                        part.lowercase() !in TYPE_WORDS &&
+                        !part.matches(DURATION) &&
+                        !part.matches(TALLY)
+                }
+                ?: subtitle
+        } else {
+            subtitle
+        }
         // A card with no browse target is a playable track, not an album,
         // playlist or artist; widescreen art on one of those means it's a
         // music-video upload rather than the catalogue track — drop it, same
@@ -787,10 +1306,12 @@ object InnertubeParser {
         }
         return ShelfItem(
             title = title,
-            subtitle = subtitle,
+            subtitle = trackSubtitle,
             thumbnailUrl = thumbnails.best(),
             videoId = videoId,
             browseId = resolvedBrowseId,
+            isExplicit = renderer.hasExplicitBadge() || title.hasExplicitVersionLabel(),
+            type = if (resolvedBrowseId == null) BrowseType.OTHER else browseType,
         )
     }
 
@@ -800,6 +1321,30 @@ object InnertubeParser {
      * generated radio mix, and `OLAK`/`MPRE` are albums wearing a playlist id.
      */
     private val NOT_EDITABLE = listOf("LM", "SE", "RD", "OLAK", "MPRE")
+
+    /**
+     * YouTube Music normally marks explicit rows with a musicInlineBadgeRenderer
+     * whose iconType is MUSIC_EXPLICIT_BADGE. Keep the walk defensive because
+     * the badge has moved between row/header containers over time.
+     */
+    private fun JsonElement?.hasExplicitBadge(): Boolean = when (this) {
+        is JsonObject -> {
+            val icon = (this["iconType"] as? JsonPrimitive)?.contentOrNull
+            val label = (this["label"] as? JsonPrimitive)?.contentOrNull
+            icon?.contains("EXPLICIT", ignoreCase = true) == true ||
+                    label?.trim()?.equals("Explicit", ignoreCase = true) == true ||
+                    values.any { it.hasExplicitBadge() }
+        }
+        is JsonArray -> any { it.hasExplicitBadge() }
+        else -> false
+    }
+
+    /** Fallback for uploads/releases that spell the edition in the title itself. */
+    private fun String.hasExplicitVersionLabel(): Boolean = EXPLICIT_VERSION.containsMatchIn(this)
+
+    private val EXPLICIT_VERSION = Regex(
+        """(?i)(?:^|[\s\[(\-–—])explicit(?:\s+version)?(?:$|[\s\])])""",
+    )
 
     private val DURATION = Regex("""\d+:\d{2}""")
     private val YEAR = Regex("""\d{4}""")
@@ -811,7 +1356,7 @@ object InnertubeParser {
      */
     private val TALLY = Regex(
         """[\d.,]+\s*[KMB]?\s+(plays|views|likes|songs|tracks|subscribers|""" +
-            """hours?|minutes?|seconds?)\b.*""",
+                """hours?|minutes?|seconds?)\b.*""",
         RegexOption.IGNORE_CASE,
     )
     /** Header words that mark a page as a release, whose rows share its credit. */
@@ -820,18 +1365,56 @@ object InnertubeParser {
         "musicResponsiveHeaderRenderer",
         "musicDetailHeaderRenderer",
     )
+    private val PAGE_ARTWORK_HEADER_RENDERERS = HEADER_RENDERERS + listOf(
+        // User/library playlists can use the editable detail header while newer
+        // catalogue surfaces occasionally use the visual header. Artwork
+        // extraction accepts both without changing release-credit parsing.
+        "musicEditablePlaylistDetailHeaderRenderer",
+        "musicVisualHeaderRenderer",
+    )
     /** Header lines that name the artist, in either header shape. */
     private val HEADER_CREDIT_LINES = listOf("straplineTextOne", "subtitle")
     private val TYPE_WORDS = setOf(
+        // English
         "song", "video", "album", "single", "ep", "artist",
         "playlist", "podcast", "episode",
+        // Portuguese (YouTube localizes row-type labels before Orb parses them)
+        "música", "musica", "vídeo", "video", "álbum", "artista",
+        "lista de reprodução", "playlist", "podcast", "episódio", "episodio",
+        // Spanish
+        "canción", "cancion", "vídeo", "video", "álbum", "album", "artista",
+        "lista de reproducción", "lista de reproduccion", "episodio",
     )
+    private val NON_MUSIC_AUDIO_TYPES = setOf("podcast", "episode")
+    private val NON_MUSIC_AUDIO_WORD = Regex(
+        """\b(podcasts?|episodes?|episódios?|episodios?)\b""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val NON_MUSIC_AUDIO_SHELF = Regex(
+        """\b(podcasts?|your shows|shows for you|seus programas|programas para você|""" +
+                """tus programas|programas para ti)\b""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    private fun isNonMusicAudioPage(pageType: String, browseId: String?): Boolean =
+        pageType.contains("PODCAST", ignoreCase = true) ||
+                pageType.contains("EPISODE", ignoreCase = true) ||
+                browseId?.startsWith("MPSP", ignoreCase = true) == true ||
+                browseId?.startsWith("MPED", ignoreCase = true) == true
+
+    private fun isNonMusicAudioShelf(title: String): Boolean =
+        NON_MUSIC_AUDIO_SHELF.containsMatchIn(title.trim())
+
     /**
      * Flags a browse card as video content: "50 videos" in a subtitle
      * (instead of "50 songs"), or the word right in a title like
      * "Daily Top Music Videos".
      */
     private val VIDEO_WORD = Regex("""\bvideos?\b""", RegexOption.IGNORE_CASE)
+    private val MONTHLY_AUDIENCE_VALUE = Regex(
+        """^.+?\s+monthly\s+(?:audience|listeners?)$""",
+        RegexOption.IGNORE_CASE,
+    )
 }
 
 // ---- Tiny JSON navigation helpers (null-safe, never throw) ------------------

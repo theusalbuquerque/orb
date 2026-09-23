@@ -95,7 +95,6 @@ data class PlayerState(
     val repeatMode: Int = Player.REPEAT_MODE_OFF,
     val queue: List<Song> = emptyList(),
     val queueIndex: Int = 0,
-    /** Current item belongs to an album launched in its original non-shuffled order. */
     val albumSequential: Boolean = false,
     /**
      * Whether the queue has somewhere to go either side of the current track.
@@ -149,7 +148,7 @@ fun rememberPlayerState(controller: MediaController?): PlayerState {
                 repeatMode = player.repeatMode,
                 queue = (0 until player.mediaItemCount).map { player.getMediaItemAt(it).toSong() },
                 queueIndex = player.currentMediaItemIndex,
-                albumSequential = item?.albumSequential == true,
+                albumSequential = player.currentMediaItem?.albumSequential == true && !QueueShuffle.enabled.value,
                 hasPrevious = player.hasPreviousMediaItem(),
                 hasNext = player.hasNextMediaItem(),
             )
@@ -426,26 +425,26 @@ fun Song.toMediaItem(albumSequential: Boolean = false): MediaItem {
                 // queue lost the `&d=` its matching depends on.
                 .apply {
                     if (
-                        this@toMediaItem.fromAutoplay || this@toMediaItem.queuePinned || this@toMediaItem.localUri != null ||
-                        this@toMediaItem.durationText != null || this@toMediaItem.isExplicit || this@toMediaItem.releaseYear != null || this@toMediaItem.albumId != null ||
-                        this@toMediaItem.albumName != null || albumSequential || this@toMediaItem.sourcePlaylistId != null ||
-                        this@toMediaItem.sourcePlaylistTitle != null || this@toMediaItem.sourcePlaylistArtworkUrl != null
+                        fromAutoplay || queuePinned || localUri != null ||
+                        durationText != null || isExplicit || releaseYear != null || albumId != null ||
+                        albumName != null || albumSequential || sourcePlaylistId != null ||
+                        sourcePlaylistTitle != null || sourcePlaylistArtworkUrl != null
                     ) {
                         setExtras(
                             bundleOf(
-                                EXTRA_FROM_AUTOPLAY to this@toMediaItem.fromAutoplay,
-                                EXTRA_QUEUE_PINNED to this@toMediaItem.queuePinned,
-                                EXTRA_ALBUM_ID to this@toMediaItem.albumId,
-                                EXTRA_ALBUM_NAME to this@toMediaItem.albumName,
-                                EXTRA_SOURCE_PLAYLIST_ID to this@toMediaItem.sourcePlaylistId,
-                                EXTRA_SOURCE_PLAYLIST_TITLE to this@toMediaItem.sourcePlaylistTitle,
-                                EXTRA_SOURCE_PLAYLIST_ARTWORK to this@toMediaItem.sourcePlaylistArtworkUrl,
+                                EXTRA_FROM_AUTOPLAY to fromAutoplay,
+                                EXTRA_QUEUE_PINNED to queuePinned,
+                                EXTRA_ALBUM_ID to albumId,
+                                EXTRA_ALBUM_NAME to albumName,
+                                EXTRA_SOURCE_PLAYLIST_ID to sourcePlaylistId,
+                                EXTRA_SOURCE_PLAYLIST_TITLE to sourcePlaylistTitle,
+                                EXTRA_SOURCE_PLAYLIST_ARTWORK to sourcePlaylistArtworkUrl,
                                 EXTRA_ALBUM_SEQUENTIAL to albumSequential,
-                                EXTRA_LOCAL_URI to this@toMediaItem.localUri,
-                                EXTRA_LOCAL_PATH to this@toMediaItem.localPath,
-                                EXTRA_DURATION to this@toMediaItem.durationText,
-                                EXTRA_EXPLICIT to this@toMediaItem.isExplicit,
-                                EXTRA_RELEASE_YEAR to (this@toMediaItem.releaseYear ?: 0),
+                                EXTRA_LOCAL_URI to localUri,
+                                EXTRA_LOCAL_PATH to localPath,
+                                EXTRA_DURATION to durationText,
+                                EXTRA_EXPLICIT to isExplicit,
+                                EXTRA_RELEASE_YEAR to (releaseYear ?: 0),
                             ),
                         )
                     }

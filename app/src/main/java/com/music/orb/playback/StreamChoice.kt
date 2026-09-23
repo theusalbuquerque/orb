@@ -2,6 +2,9 @@ package com.music.orb.playback
 
 import android.os.SystemClock
 import com.music.orb.data.sources.SourceStream
+import com.music.orb.data.sources.hasPlayableHttpUrl
+import com.music.orb.data.sources.streamOriginForLog
+import com.music.orb.data.TrackLog
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -64,6 +67,17 @@ object StreamChoice {
             chosen.remove(videoId)
             return null
         }
+        if (!choice.stream.hasPlayableHttpUrl()) {
+            chosen.remove(videoId)
+            PlaybackStreamStore.forget(videoId)
+            TrackLog.w(
+                "BitChord",
+                "discarded malformed remembered stream for $videoId: " +
+                    choice.stream.url.streamOriginForLog(),
+                about = videoId,
+            )
+            return null
+        }
         return choice.stream
     }
 
@@ -77,8 +91,18 @@ object StreamChoice {
      *   that fails has not.
      */
     fun remember(videoId: String, stream: SourceStream, substituted: Boolean) {
+        if (!stream.hasPlayableHttpUrl()) {
+            TrackLog.w(
+                "BitChord",
+                "refused to remember malformed stream for $videoId: " +
+                    stream.url.streamOriginForLog(),
+                about = videoId,
+            )
+            return
+        }
         if (chosen.size >= MAX_REMEMBERED) chosen.clear()
         chosen[videoId] = Choice(stream, SystemClock.elapsedRealtime(), substituted)
+        PlaybackStreamStore.remember(videoId, stream)
     }
 
     /**

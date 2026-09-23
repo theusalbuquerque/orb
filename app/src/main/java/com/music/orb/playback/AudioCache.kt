@@ -61,8 +61,8 @@ object AudioCache {
     private const val TAG = "BitChord"
 
     /**
-     * The disk budget, straight from [AppSettings] — 512MB by default, roughly
-     * 150 tracks at the highest bitrate offered, adjustable up to 10GB from
+     * The disk budget, straight from [AppSettings] — 1GB minimum/default,
+     * adjustable up to 10GB from
      * Settings. Least-recently-used entries are dropped past it, so it's a
      * ceiling rather than something the listener has to manage day to day.
      */
@@ -75,6 +75,15 @@ object AudioCache {
      * skip past.
      */
     private const val PRELOAD_BYTES = 1L * 1024 * 1024
+
+    /**
+     * Cellular keeps only a decoder-sized opening for the next track. Fetching
+     * the whole successor while A is still streaming competes with the song the
+     * listener is hearing and is exactly the wrong trade on a constrained
+     * mobile link. ~384 KiB is enough for a quick handoff without stealing the
+     * bandwidth needed to keep the current track ahead of its playhead.
+     */
+    private const val METERED_PRELOAD_BYTES = 384L * 1024L
 
     /**
      * Size of each range the whole-track fetch asks for.
@@ -109,6 +118,15 @@ object AudioCache {
     private const val MAX_ANALYSIS_HEAD_BYTES = 4L * 1024 * 1024
 
     /**
+     * Cellular analysis must establish musical structure without downloading a
+     * near-complete track beside the audio that is already playing. Two MiB of
+     * the YouTube analysis carrier covers far more than the analyzer's opening
+     * window at ordinary Opus/AAC bitrates while leaving the radio free to keep
+     * A buffered and to prepare B.
+     */
+    private const val METERED_ANALYSIS_HEAD_BYTES = 2L * 1024 * 1024
+
+    /**
      * The most [requestAnalysisHead] will pull for one track when its size *is*
      * known.
      *
@@ -138,7 +156,10 @@ object AudioCache {
      * skips into a single fetch of wherever the listener lands, and leaves the
      * player's opening burst holding the cache entry alone — see [fetchWhole].
      */
-    private const val PREFETCH_DELAY_MS = 8_000L
+    // A is already audible before this job can start. Six seconds preserves
+    // A's opening quality-priority window while still resolving B early enough
+    // that a manual skip does not pay a cold client walk.
+    private const val PREFETCH_DELAY_MS = 6_000L
 
     /** How long to leave the player alone with an entry before trying again. */
     private const val RETRY_DELAY_MS = 5_000L
@@ -341,7 +362,17 @@ object AudioCache {
             ?.let { videoId ->
                 val rendition = QualityUpgrade.cacheTag(spec.uri)
                 when {
+                    // PCM analysis is intentionally fed from official YouTube
+                    // even when playback will use a substituted Lossless copy.
+                    spec.uri.getQueryParameter("analysis") == "1" -> "$videoId#analysis"
                     rendition != null -> "$videoId#$rendition"
+                    // A queue-prepared decision is stronger than the global
+                    // "substitution possible" flag. Keep its Opus safety net
+                    // and its Lossless rendition in distinct entries so a late
+                    // quality decision can never splice two encodings together.
+                    spec.uri.getQueryParameter("qp") == "lossless" -> "$videoId#queue-lossless"
+                    spec.uri.getQueryParameter("qp") == "hiq" -> "$videoId#queue-hiq"
+                    spec.uri.getQueryParameter("qp") == "opus" -> "$videoId#queue-opus"
                     SourceResolver.canSubstituteForYouTube() -> "$videoId#alt"
                     else -> videoId
                 }
@@ -442,6 +473,14 @@ object AudioCache {
      * of skips only wherever the listener actually lands is worth chasing.
      */
     fun prefetchQueue(mediaIds: List<String>) {
+        // Read-ahead is purely an optimisation. Offline, cached/local playback
+        // should stay quiet and never spend time resolving URLs that cannot be
+        // reached. Clearing the pending signature is important: when the network
+        // returns, the exact same queue must be eligible for a fresh warm-up.
+        if (AppSettings.meteredConnection.value == null) {
+            cancel()
+            return
+        }
         if (mediaIds == pendingQueue) return
         pendingQueue = mediaIds
         job?.cancel()
@@ -475,8 +514,16 @@ object AudioCache {
                 if (cacheBytes) {
                     launch(TrackLog.about(next)) {
                         delay(PREFETCH_DELAY_MS)
-                        fetch(next, 0, PRELOAD_BYTES)
-                        fetchWhole(next)
+                        if (AppSettings.meteredConnection.value == true) {
+                            // Continuity wins on cellular: warm only enough of B
+                            // to start quickly. A keeps the rest of the radio
+                            // budget so an already-playing song never stalls just
+                            // because its successor is being prepared.
+                            fetch(next, 0, METERED_PRELOAD_BYTES)
+                        } else {
+                            fetch(next, 0, PRELOAD_BYTES)
+                            fetchWhole(next)
+                        }
                     }
                 }
                 launch {
@@ -574,9 +621,9 @@ object AudioCache {
         return "$key holds ${total / 1024}kB in ${spans.size} spans: $ranges"
     }
 
-    suspend fun warmRange(uri: Uri, position: Long, length: Long) {
+    suspend fun warmRange(uri: Uri, position: Long, length: Long): Boolean {
         val key = keyFactory.buildCacheKey(DataSpec(uri))
-        fetch(key, uri, position, length)
+        return fetch(key, uri, position, length)
     }
 
     /**
@@ -591,6 +638,8 @@ object AudioCache {
 
     /** Video ids with a head fetch in the air, so a tick cannot stack another on top. */
     private val analysisHeadsInFlight = ConcurrentHashMap.newKeySet<String>()
+    private val analysisHeadFailures = ConcurrentHashMap<String, Int>()
+    private val analysisHeadRetryAt = ConcurrentHashMap<String, Long>()
 
     /**
      * Pulls [uri]'s recording onto disk under the plain YouTube key, so Smart
@@ -651,7 +700,14 @@ object AudioCache {
     fun requestAnalysisHead(uri: Uri) {
         if (!::cache.isInitialized) return
         if (upstreamFactory == null) return
+        // Offline is not a failed analysis attempt. The analyzer has already
+        // inspected persisted results and whatever bytes are on disk before it
+        // reaches this method, so there is nothing useful to do here without an
+        // active network. Crucially, return before claiming [analysisHeads]: the
+        // same track must be eligible immediately when connectivity comes back.
+        if (AppSettings.meteredConnection.value == null) return
         val videoId = uri.getQueryParameter("v") ?: return
+        if ((analysisHeadRetryAt[videoId] ?: 0L) > SystemClock.elapsedRealtime()) return
         // One round per track per session, and it is sized correctly up front
         // rather than grown into. See [analysisHeadSize] for why growing it was
         // the wrong shape.
@@ -661,20 +717,44 @@ object AudioCache {
         // top of a fetch that is still running.
         if (!analysisHeadsInFlight.add(videoId)) return
         scope.launch {
+            var succeeded = false
             try {
                 val total = runCatching { StreamResolver.contentLength(videoId) }.getOrNull() ?: 0L
                 val want = analysisHeadSize(total)
-                if (!clearPartialHead(videoId, want)) return@launch
-                fetch(
-                    cacheKey = videoId,
-                    uri = Uri.parse("orb://watch?v=$videoId"),
-                    position = 0,
-                    length = want,
-                    pinKey = true,
-                )
+                succeeded = if (!clearPartialHead(videoId, want)) {
+                    cache.getCachedBytes(videoId, 0, want) >= want
+                } else {
+                    fetch(
+                        cacheKey = videoId,
+                        // Analyzer bytes must never participate in playback's
+                        // source election. PlaybackService recognises this marker,
+                        // resolves official YouTube directly and deliberately does
+                        // not write StreamChoice.
+                        uri = Uri.parse("orb://watch?v=$videoId&analysis=1"),
+                        position = 0,
+                        length = want,
+                        pinKey = true,
+                    )
+                }
                 if (total > 0) recordContentLength(videoId, total)
             } finally {
                 analysisHeadsInFlight.remove(videoId)
+                // Losing the network halfway through a range is different from
+                // analysing a bad/short file: no musical conclusion was reached.
+                // Re-arm the request so the planner's next tick after reconnection
+                // can fetch a clean head instead of remembering this interrupted
+                // round as completed for the entire session.
+                if (succeeded) {
+                    analysisHeadFailures.remove(videoId)
+                    analysisHeadRetryAt.remove(videoId)
+                } else {
+                    analysisHeads.remove(videoId)
+                    val failures = (analysisHeadFailures[videoId] ?: 0) + 1
+                    analysisHeadFailures[videoId] = failures
+                    val backoff = (5_000L shl (failures - 1).coerceIn(0, 5)).coerceAtMost(2 * 60_000L)
+                    analysisHeadRetryAt[videoId] = SystemClock.elapsedRealtime() + backoff
+                    TrackLog.d(TAG, "analysis head for $videoId will retry in ${backoff / 1000}s", about = videoId)
+                }
             }
         }
     }
@@ -697,8 +777,14 @@ object AudioCache {
      * One resolve, one range, one encoding. [StreamResolver] has the length
      * already, from resolving the stream, so asking first costs nothing.
      */
-    private fun analysisHeadSize(total: Long): Long =
-        if (total > 0) minOf(total, MAX_ANALYSIS_TRACK_BYTES) else MAX_ANALYSIS_HEAD_BYTES
+    private fun analysisHeadSize(total: Long): Long {
+        val cap = if (AppSettings.meteredConnection.value == true) {
+            METERED_ANALYSIS_HEAD_BYTES
+        } else {
+            MAX_ANALYSIS_TRACK_BYTES
+        }
+        return if (total > 0) minOf(total, cap) else minOf(MAX_ANALYSIS_HEAD_BYTES, cap)
+    }
 
     /**
      * Makes sure [videoId]'s entry is either empty or already covers [want]
@@ -1058,9 +1144,9 @@ object AudioCache {
         position: Long,
         length: Long,
         pinKey: Boolean = false,
-    ) {
-        val upstream = upstreamFactory ?: return
-        if (cache.getCachedBytes(cacheKey, position, length) >= length) return
+    ): Boolean {
+        val upstream = upstreamFactory ?: return false
+        if (cache.getCachedBytes(cacheKey, position, length) >= length) return true
 
         // Whose track this is, taken off the URI rather than off [cacheKey]:
         // the key splits a track's renditions apart on purpose, and reading
@@ -1085,7 +1171,7 @@ object AudioCache {
             .build()
         val writer = CacheWriter(source, spec, /* temporaryBuffer = */ null, /* listener = */ null)
 
-        runCatching {
+        val result = runCatching {
             withContext(Dispatchers.IO) {
                 // CacheWriter blocks in a read loop and checks this flag between
                 // reads; cancelling the coroutine alone would leave it running.
@@ -1107,5 +1193,6 @@ object AudioCache {
                 about = about,
             )
         }
+        return result.isSuccess && cache.getCachedBytes(cacheKey, position, length) > 0L
     }
 }

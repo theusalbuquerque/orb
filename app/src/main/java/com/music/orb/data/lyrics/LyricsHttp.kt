@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit
  */
 private const val LYRICS_TIMEOUT_SECONDS = 6L
 
-internal const val LYRICS_AGENT = "BitChord (https://github.com/bitchord)"
+internal const val LYRICS_AGENT = "Orb Music"
 
 internal val lyricsJson = Json { ignoreUnknownKeys = true; isLenient = true }
 
@@ -34,6 +34,18 @@ internal fun lyricsGet(url: String): String? = runCatching {
     val request = Request.Builder().url(url)
         .header("User-Agent", LYRICS_AGENT)
         .header("Accept", "application/json")
+        .build()
+    client.newCall(request).execute().use { response ->
+        if (response.isSuccessful) response.body?.string() else null
+    }
+}.getOrNull()
+
+/** Successful authenticated GET, used by optional provider routes. */
+internal fun lyricsGetBearer(url: String, token: String): String? = runCatching {
+    val request = Request.Builder().url(url)
+        .header("User-Agent", LYRICS_AGENT)
+        .header("Accept", "application/json")
+        .header("Authorization", "Bearer ${token.removePrefix("Bearer ").trim()}")
         .build()
     client.newCall(request).execute().use { response ->
         if (response.isSuccessful) response.body?.string() else null

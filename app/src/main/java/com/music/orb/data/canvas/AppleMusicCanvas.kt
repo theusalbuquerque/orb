@@ -43,6 +43,128 @@ object AppleMusicCanvas {
         Locale.getDefault().country.takeIf { it.length == 2 }?.lowercase(Locale.ROOT) ?: "us"
     }
 
+    /**
+     * Genre labels attached to an exact Apple Music artist match.
+     *
+     * Profile compatibility uses these broad catalog genres only as display
+     * tags. The compatibility percentage itself remains based on the user's
+     * real listening overlap, so a provider miss can never change the score.
+     */
+    fun searchArtistGenres(artistName: String): List<String> {
+        if (artistName.isBlank()) return emptyList()
+        val bearer = token() ?: return emptyList()
+        val wanted = artistName.normalizeForMatch()
+        if (wanted.isBlank()) return emptyList()
+
+        val url = "$AMP/$storefront/search".toHttpUrl().newBuilder()
+            .addQueryParameter("term", artistName)
+            .addQueryParameter("types", "artists")
+            .addQueryParameter("limit", "10")
+            .build()
+            .toString()
+        val body = get(url, bearer) ?: return emptyList()
+        val artists = runCatching {
+            json.parseToJsonElement(body).jsonObject["results"]?.jsonObject
+                ?.get("artists")?.jsonObject
+                ?.get("data")?.jsonArray
+        }.getOrNull() ?: return emptyList()
+
+        val exact = artists.mapNotNull { it as? JsonObject }.firstOrNull { artist ->
+            (artist["attributes"] as? JsonObject)
+                ?.get("name")?.jsonPrimitive?.contentOrNull
+                ?.normalizeForMatch() == wanted
+        } ?: return emptyList()
+        val attributes = exact["attributes"] as? JsonObject ?: return emptyList()
+        return attributes["genreNames"]?.jsonArray
+            ?.mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.takeIf(String::isNotBlank) }
+            ?.distinct()
+            .orEmpty()
+    }
+
+    /**
+     * Exact-name artist artwork from the Apple Music catalog.
+     *
+     * Artist results can expose either the regular artwork template or one of
+     * Apple's editorial portraits. When neither is present, the verified
+     * artist page's Open Graph image is used as the final Apple-owned source.
+     */
+    fun searchArtistArtwork(artistName: String): String? {
+        if (artistName.isBlank()) return null
+        val bearer = token() ?: return null
+        val wanted = artistName.normalizeForMatch()
+        if (wanted.isBlank()) return null
+
+        val url = "$AMP/$storefront/search".toHttpUrl().newBuilder()
+            .addQueryParameter("term", artistName)
+            .addQueryParameter("types", "artists")
+            .addQueryParameter("limit", "10")
+            .addQueryParameter("extend", "editorialArtwork")
+            .build()
+            .toString()
+        val body = get(url, bearer) ?: return null
+        val artists = runCatching {
+            json.parseToJsonElement(body).jsonObject["results"]?.jsonObject
+                ?.get("artists")?.jsonObject
+                ?.get("data")?.jsonArray
+        }.getOrNull() ?: return null
+
+        val exact = artists.mapNotNull { it as? JsonObject }.firstOrNull { artist ->
+            (artist["attributes"] as? JsonObject)
+                ?.get("name")?.jsonPrimitive?.contentOrNull
+                ?.normalizeForMatch() == wanted
+        } ?: return null
+        val attributes = exact["attributes"] as? JsonObject ?: return null
+
+        appleArtworkTemplate(attributes["artwork"] as? JsonObject)?.let { return it }
+        val editorial = attributes["editorialArtwork"] as? JsonObject
+        EDITORIAL_ARTWORK_PRIORITY.firstNotNullOfOrNull { key ->
+            appleArtworkTemplate(editorial?.get(key) as? JsonObject)
+        }?.let { return it }
+
+        val pageUrl = attributes["url"]?.jsonPrimitive?.contentOrNull
+            ?.takeIf { it.startsWith("https://music.apple.com/") }
+            ?: return null
+        return appleArtistPageArtwork(pageUrl)
+    }
+
+    private fun appleArtworkTemplate(artwork: JsonObject?): String? {
+        val template = artwork?.get("url")?.jsonPrimitive?.contentOrNull
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
+        return template
+            .replace("{w}", "800")
+            .replace("{h}", "800")
+            .replace("{f}", "jpg")
+            .replace("{c}", "bb")
+    }
+
+    private fun appleArtistPageArtwork(pageUrl: String): String? {
+        val html = canvasGet(pageUrl, mapOf("User-Agent" to CANVAS_UA)) ?: return null
+        val patterns = listOf(
+            Regex(
+                """<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']""",
+                RegexOption.IGNORE_CASE,
+            ),
+            Regex(
+                """<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']""",
+                RegexOption.IGNORE_CASE,
+            ),
+        )
+        return patterns.firstNotNullOfOrNull { pattern ->
+            pattern.find(html)?.groupValues?.getOrNull(1)
+                ?.replace("&amp;", "&")
+                ?.takeIf { it.startsWith("https://") }
+        }
+    }
+
+    private val EDITORIAL_ARTWORK_PRIORITY = listOf(
+        "subscriptionHero",
+        "centeredFullscreenBackground",
+        "superHeroWide",
+        "storeFlowcase",
+        "brandLogo",
+    )
+
     fun search(title: String, artist: String, album: String?): CanvasArtwork? {
         val bearer = token() ?: return null
 

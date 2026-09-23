@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.blur
@@ -21,11 +20,9 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.lerp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.music.orb.data.model.CARD_ART_PX
 import com.music.orb.data.model.artworkAt
-import com.music.orb.data.settings.AppSettings
 import com.music.orb.ui.theme.ArtworkPalette
 
 /**
@@ -44,8 +41,11 @@ import com.music.orb.ui.theme.ArtworkPalette
  *
  * The blur is a one-off: nothing animates it, so it is rasterised once and
  * then only composited. It still needs API 31 for `RenderEffect`; below that,
- * and when the user has asked for less dynamic blur, the flat tint carries the
- * surface on its own.
+ * the flat tint carries the surface on its own.
+ *
+ * This component now owns its blur behaviour. It no longer reads the former
+ * global reduceDynamicBlur setting, allowing Home/backdrop surfaces to be tuned
+ * independently from detail pages and Now Playing.
  */
 @Composable
 fun ArtworkBackdrop(
@@ -66,8 +66,7 @@ fun ArtworkBackdrop(
      */
     artPx: Int = CARD_ART_PX,
 ) {
-    val reduceDynamicBlur by AppSettings.reduceDynamicBlur.collectAsStateWithLifecycle()
-    val canBlur = !reduceDynamicBlur && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+    val canBlur = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
 
     Box(modifier.background(palette.background)) {
         if (canBlur && imageUrl != null) {
@@ -121,7 +120,7 @@ fun ArtworkBackdrop(
  * *also on screen* still reads as the picture, and the faces in it show through
  * the song list. Nothing here is an image, so there is nothing to recognise —
  * and no full-screen `RenderEffect` behind a scrolling list either, so it costs
- * the same on every API level and under "reduce dynamic blur".
+ * the same on every API level.
  */
 @Composable
 fun ArtworkWash(

@@ -26,6 +26,10 @@ data class ModuleSearchResult(
     @SerialName("format") val format: String = "",
     /** Tiers this row can be fetched at, for the modules that enumerate them. */
     @SerialName("availableQualities") val availableQualities: List<String> = emptyList(),
+    /** Common field names used by Convx-compatible catalogue modules. */
+    @SerialName("explicit") val explicit: Boolean? = null,
+    @SerialName("isExplicit") val isExplicit: Boolean? = null,
+    @SerialName("explicitContent") val explicitContent: Boolean? = null,
 )
 
 /** The top-level response object from `searchTracks()`. */

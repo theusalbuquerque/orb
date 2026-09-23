@@ -1,5 +1,6 @@
 package com.music.orb.ui.screens
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -7,409 +8,449 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.Extension
-import androidx.compose.material.icons.rounded.GraphicEq
-import androidx.compose.material.icons.rounded.PlayCircle
+import androidx.compose.material.icons.rounded.SignalCellularAlt
+import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
+import com.music.orb.ui.components.ExpressiveSwitch as Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.music.orb.R
 import com.music.orb.data.settings.AppSettings
 import com.music.orb.data.settings.AudioQuality
 import com.music.orb.data.sources.SourceConfig
 import com.music.orb.data.sources.SourceHealth
 import com.music.orb.data.sources.SourceKind
 import com.music.orb.data.sources.SourceRegistry
-import kotlinx.coroutines.Dispatchers
+import com.music.orb.data.sources.addon.AddonClient
+import com.music.orb.ui.components.TimedExperimentalNotice
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
-/**
- * Where the app is allowed to get audio from.
- *
- * The order is fixed rather than something to argue with: a module source,
- * when one is configured, is tried first — it's the one the user pointed at
- * on purpose — and YouTube Music is tried second, since it needs no setup and
- * has the full catalogue behind it. Nothing on this screen downloads code,
- * and nothing on it can teach the app a new way to behave after it has
- * shipped — a module supplies audio, not instructions.
- */
+/** Orb audio quality and playback-source settings. */
 @Composable
 fun SourcesScreen(
     contentPadding: PaddingValues,
     modifier: Modifier = Modifier,
+    scrollState: androidx.compose.foundation.ScrollState = rememberScrollState(),
 ) {
     val configs by SourceRegistry.configs.collectAsStateWithLifecycle()
-    val lossless by AppSettings.losslessAudio.collectAsStateWithLifecycle()
-    val wifiQuality by AppSettings.audioQualityWifi.collectAsStateWithLifecycle()
-    val cellularQuality by AppSettings.audioQualityCellular.collectAsStateWithLifecycle()
-    val metered by AppSettings.meteredConnection.collectAsStateWithLifecycle()
-
-    /** Last known reachability per source, filled in as the probes come back. */
-    val health = remember { mutableStateMapOf<String, SourceHealth>() }
-    var editing by remember { mutableStateOf<SourceConfig?>(null) }
+    val wifi by AppSettings.audioQualityWifi.collectAsStateWithLifecycle()
+    val cellular by AppSettings.audioQualityCellular.collectAsStateWithLifecycle()
+    val losslessEnabled by AppSettings.losslessAudio.collectAsStateWithLifecycle()
+    val wifiMaximum by AppSettings.audioQualityWifiMaximum.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
-
-    val module = configs.firstOrNull { it.kind == SourceKind.MODULE }
-    val youtube = configs.first { it.kind == SourceKind.YOUTUBE }
-
-    // Re-probed whenever the module config changes — which is when its
-    // answer could have changed and when the user is most likely to be
-    // looking.
-    LaunchedEffect(module?.id, module?.baseUrl) {
-        val config = module ?: return@LaunchedEffect
-        val source = SourceRegistry.instance(config.id) ?: return@LaunchedEffect
-        if (!config.isComplete) return@LaunchedEffect
-        health[config.id] = withContext(Dispatchers.IO) {
-            runCatching { source.health() }
-                .getOrElse { SourceHealth.Unreachable(it.message ?: "Failed") }
-        }
-    }
-
-    /** Whether the ceiling in force right now would cap a lossless stream anyway. */
-    val cappedByQuality = (if (metered == true) cellularQuality else wifiQuality) != AudioQuality.HIGH
-    val anyLosslessSource = module?.enabled == true && module.isComplete
+    var showAddonDialog by remember { mutableStateOf(false) }
+    var addonUrl by remember { mutableStateOf("") }
+    var addonName by remember { mutableStateOf("Private addon") }
+    var addonError by remember { mutableStateOf<String?>(null) }
+    var addonChecking by remember { mutableStateOf(false) }
+    var showLosslessNotice by remember { mutableStateOf(false) }
+    val addonDuplicateMessage = stringResource(R.string.audio_addon_duplicate)
 
     Column(
         modifier = modifier
-            .fillMaxWidth()
-            .verticalScroll(rememberScrollState())
-            .padding(contentPadding),
+            .verticalScroll(scrollState)
+            .padding(
+                top = contentPadding.calculateTopPadding(),
+                bottom = contentPadding.calculateBottomPadding() + 24.dp,
+            ),
     ) {
-        Text(
-            text = "Sources",
-            style = MaterialTheme.typography.displayLarge,
-            color = MaterialTheme.colorScheme.onBackground,
-            modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 14.dp),
+        SectionTitle(stringResource(R.string.audio_quality_header))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .clip(RoundedCornerShape(26.dp))
+                .background(MaterialTheme.colorScheme.surfaceContainer)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = stringResource(R.string.audio_lossless_title),
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.weight(1f),
+            )
+            Switch(
+                checked = losslessEnabled && wifiMaximum,
+                onCheckedChange = { enabled ->
+                    if (enabled) {
+                        // Set the Maximum ceiling first, then flip the master
+                        // Lossless flow. Playback observes the latter and will
+                        // therefore see both flags true in the same callback.
+                        AppSettings.setAudioQualityWifiMaximum(true)
+                        AppSettings.setLosslessAudio(true)
+                        showLosslessNotice = true
+                    } else {
+                        AppSettings.setAudioQualityWifiMaximum(false)
+                        AppSettings.setLosslessAudio(false)
+                    }
+                },
+            )
+        }
+        Spacer(Modifier.height(10.dp))
+        NetworkQualityCard(
+            icon = Icons.Rounded.Wifi,
+            title = stringResource(R.string.audio_wifi),
+            selected = wifi,
+            accent = MaterialTheme.colorScheme.secondary,
+            onSelect = AppSettings::setAudioQualityWifi,
+        )
+        Spacer(Modifier.height(10.dp))
+        NetworkQualityCard(
+            icon = Icons.Rounded.SignalCellularAlt,
+            title = stringResource(R.string.audio_mobile_data),
+            selected = cellular,
+            accent = MaterialTheme.colorScheme.tertiary,
+            onSelect = AppSettings::setAudioQualityCellular,
         )
 
-        SettingsGroup(
-            header = "Lossless audio",
-            // Said plainly because the alternative is a switch that appears to
-            // do something and doesn't. YouTube publishes no lossless
-            // rendition of anything, so on a stock install this toggle is
-            // inert until a module source that can serve lossless is added
-            // below.
-            footer = when {
-                !anyLosslessSource ->
-                    "Nothing enabled below can serve lossless yet. Add a module source below, " +
-                        "and tracks it holds a lossless rendition of will play as the file itself " +
-                        "rather than as a transcode."
-                cappedByQuality ->
-                    "Currently overridden: the quality ceiling for this connection is set below " +
-                        "High, and that budget wins. Tracks are being transcoded."
-                else ->
-                    "Asks the module source for the file it holds instead of a transcode of it. " +
-                        "Costs considerably more data than High, and does nothing when it has no " +
-                        "lossless rendition to give."
-            },
-        ) {
-            SettingsRow(
-                icon = Icons.Rounded.GraphicEq,
-                title = "Prefer lossless",
-                subtitle = "FLAC and ALAC straight from the source",
-                badge = "Overridden".takeIf { lossless && cappedByQuality },
-                trailing = {
-                    Switch(
-                        checked = lossless,
-                        onCheckedChange = AppSettings::setLosslessAudio,
-                        colors = SwitchDefaults.colors(
-                            checkedTrackColor = MaterialTheme.colorScheme.primary,
-                            checkedBorderColor = MaterialTheme.colorScheme.primary,
-                        ),
-                    )
-                },
-                onClick = { AppSettings.setLosslessAudio(!lossless) },
-            )
-        }
+        Text(
+            text = stringResource(R.string.audio_quality_footer),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
+        )
 
-        SettingsGroup(
-            header = "Sources — tried in this order",
-            footer = "A module source that doesn't have the track, or can't be reached, is " +
-                "stepped over rather than failing playback — YouTube Music plays it instead. " +
-                "With lossless on, the module is offered a YouTube track's recording first if " +
-                "it can serve it bit-exact.",
-        ) {
-            if (module != null) {
+        SectionTitle(stringResource(R.string.audio_sources_section))
+        configs
+            .asSequence()
+            .filterNot { it.kind == SourceKind.JIOSAAVN }
+            .sortedBy { it.kind.ordinal }
+            .forEach { config ->
                 SourceRow(
-                    position = 1,
-                    config = module,
-                    health = health[module.id],
-                    onClick = { editing = module },
-                    onToggle = { SourceRegistry.setEnabled(module.id, it) },
+                    config = config,
+                    onEnabled = { enabled ->
+                        if (config.kind != SourceKind.YOUTUBE) SourceRegistry.setEnabled(config.id, enabled)
+                    },
+                    onRemove = if (config.kind == SourceKind.ADDON) {
+                        { SourceRegistry.remove(config.id) }
+                    } else null,
                 )
-            } else {
-                SettingsRow(
-                    icon = Icons.Rounded.Add,
-                    title = "Add a module source",
-                    subtitle = SourceKind.MODULE.detail,
-                    onClick = { editing = SourceConfig(kind = SourceKind.MODULE) },
-                )
+                HorizontalDivider()
             }
-            RowDivider()
-            SourceRow(
-                position = if (module != null) 2 else 1,
-                config = youtube,
-                health = null,
-                onClick = null,
-                onToggle = { SourceRegistry.setEnabled(youtube.id, it) },
-            )
+
+        TextButton(
+            onClick = {
+                addonUrl = ""
+                addonName = "Private addon"
+                addonError = null
+                showAddonDialog = true
+            },
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+        ) {
+            Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(stringResource(R.string.audio_addon_add))
         }
 
-        Spacer(Modifier.height(32.dp))
+        Text(
+            text = stringResource(R.string.audio_sources_priority_footer),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+        )
+
+        val custom = SourceRegistry.customModule()
+        if (custom != null) {
+            Text(
+                text = stringResource(R.string.audio_custom_module_active, localizedSourceName(custom)),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+            )
+        }
     }
 
-    editing?.let { config ->
-        ServerEditorDialog(
-            config = config,
-            onDismiss = { editing = null },
-            onSave = { saved ->
-                if (SourceRegistry.config(saved.id) == null) {
-                    SourceRegistry.add(saved)
-                } else {
-                    SourceRegistry.update(saved)
+    if (showAddonDialog) {
+        AlertDialog(
+            onDismissRequest = { if (!addonChecking) showAddonDialog = false },
+            title = { Text(stringResource(R.string.audio_addon_dialog_title)) },
+            text = {
+                Column {
+                    Text(
+                        text = stringResource(R.string.audio_addon_help),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = addonUrl,
+                        onValueChange = { addonUrl = it; addonError = null },
+                        label = { Text(stringResource(R.string.audio_addon_url)) },
+                        singleLine = true,
+                        enabled = !addonChecking,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = addonName,
+                        onValueChange = { addonName = it },
+                        label = { Text(stringResource(R.string.audio_addon_name)) },
+                        singleLine = true,
+                        enabled = !addonChecking,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    addonError?.let { error ->
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = error,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
                 }
-                editing = null
             },
-            onDelete = {
-                SourceRegistry.remove(config.id)
-                health.remove(config.id)
-                editing = null
-            },
-            probe = { candidate ->
-                // Probed through a throwaway instance rather than the stored
-                // one: the point of Test is to check what has been *typed*,
-                // which is not yet what is saved, and testing the saved copy
-                // would cheerfully report success for the old URL.
-                withContext(Dispatchers.IO) {
-                    runCatching { SourceRegistry.probeCandidate(candidate) }
-                        .getOrElse { SourceHealth.Unreachable(it.message ?: "Failed") }
+            confirmButton = {
+                TextButton(
+                    enabled = addonUrl.isNotBlank() && !addonChecking,
+                    onClick = {
+                        val normalized = AddonClient.normalizeBase(addonUrl)
+                        if (configs.any {
+                                it.kind == SourceKind.ADDON &&
+                                    AddonClient.normalizeBase(it.baseUrl).equals(normalized, ignoreCase = true)
+                            }) {
+                            addonError = addonDuplicateMessage
+                            return@TextButton
+                        }
+                        addonChecking = true
+                        addonError = null
+                        scope.launch {
+                            try {
+                                val candidate = SourceConfig(
+                                    kind = SourceKind.ADDON,
+                                    label = addonName.trim(),
+                                    baseUrl = normalized,
+                                    enabled = true,
+                                )
+                                when (val health = SourceRegistry.probeCandidate(candidate)) {
+                                    is SourceHealth.Ok -> {
+                                        SourceRegistry.add(candidate)
+                                        showAddonDialog = false
+                                        addonUrl = ""
+                                    }
+                                    is SourceHealth.Rejected -> addonError = health.reason
+                                    is SourceHealth.Unreachable -> addonError = health.reason
+                                }
+                            } catch (failure: Exception) {
+                                addonError = failure.message ?: "Could not validate addon"
+                            } finally {
+                                addonChecking = false
+                            }
+                        }
+                    },
+                ) {
+                    Text(if (addonChecking) stringResource(R.string.source_checking) else stringResource(R.string.audio_addon_save))
                 }
             },
-            scope = scope,
+            dismissButton = {
+                TextButton(
+                    enabled = !addonChecking,
+                    onClick = { showAddonDialog = false },
+                ) { Text(stringResource(R.string.audio_addon_cancel)) }
+            },
+        )
+    }
+
+    if (showLosslessNotice) {
+        TimedExperimentalNotice(
+            title = stringResource(R.string.audio_lossless_experimental_title),
+            message = stringResource(R.string.audio_lossless_experimental_message),
+            confirmLabel = stringResource(R.string.experimental_feature_confirm),
+            onConfirmed = { showLosslessNotice = false },
+            unlockAfterMs = 6_000L,
+        )
+    }
+}
+
+@Composable
+private fun SectionTitle(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.titleMedium,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 22.dp, bottom = 10.dp),
+    )
+}
+
+@Composable
+private fun NetworkQualityCard(
+    icon: ImageVector,
+    title: String,
+    selected: AudioQuality,
+    accent: Color,
+    onSelect: (AudioQuality) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .clip(RoundedCornerShape(26.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainer)
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = accent,
+            modifier = Modifier
+                .padding(top = 14.dp)
+                .size(24.dp),
+        )
+        Spacer(Modifier.width(12.dp))
+        QualityRow(
+            title = title,
+            selected = selected,
+            onSelect = onSelect,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@Composable
+private fun QualityRow(
+    title: String,
+    selected: AudioQuality,
+    onSelect: (AudioQuality) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val displayedSelection = if (selected == AudioQuality.AAC) AudioQuality.HIGH else selected
+    Column(modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        Spacer(Modifier.width(4.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            listOf(AudioQuality.LOW, AudioQuality.MEDIUM, AudioQuality.HIGH).forEach { quality ->
+                val chosen = quality == displayedSelection
+                Text(
+                    text = if (chosen) "✓ ${localizedQualityName(quality)}" else localizedQualityName(quality),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (chosen) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    modifier = Modifier
+                        .clickable {
+                            // The visible High tier is Orb's Hi-Quality Audio
+                            // preset. Persist AAC explicitly so playback keeps
+                            // the AAC 320 -> AAC 250 -> Opus 128 -> AAC 128
+                            // hierarchy instead of treating HIGH as a generic
+                            // best-lossy request.
+                            onSelect(if (quality == AudioQuality.HIGH) AudioQuality.AAC else quality)
+                        }
+                        .padding(end = 18.dp, top = 8.dp, bottom = 8.dp),
+                )
+            }
+        }
+        Text(
+            text = localizedQualityDetail(displayedSelection),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }
 
 @Composable
 private fun SourceRow(
-    position: Int,
     config: SourceConfig,
-    health: SourceHealth?,
-    onClick: (() -> Unit)?,
-    onToggle: (Boolean) -> Unit,
+    onEnabled: (Boolean) -> Unit,
+    onRemove: (() -> Unit)? = null,
 ) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(enabled = onClick != null) { onClick?.invoke() }
-            .heightIn(min = 60.dp)
-            .padding(horizontal = ROW_INSET, vertical = 10.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            text = "$position",
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier
-                .width(18.dp)
-                .alpha(if (config.enabled) 1f else 0.4f),
-        )
-        Spacer(Modifier.width(6.dp))
-        Icon(
-            imageVector = when (config.kind) {
-                SourceKind.MODULE -> Icons.Rounded.Extension
-                SourceKind.YOUTUBE -> Icons.Rounded.PlayCircle
-            },
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onBackground,
-            modifier = Modifier
-                .size(ICON_SIZE)
-                .alpha(if (config.enabled) 1f else 0.4f),
-        )
-        Spacer(Modifier.width(ICON_GAP))
-        Column(
-            Modifier
-                .weight(1f)
-                .alpha(if (config.enabled) 1f else 0.4f),
-        ) {
+        Column(Modifier.weight(1f)) {
+            Text(localizedSourceName(config), style = MaterialTheme.typography.titleSmall)
             Text(
-                text = config.displayName,
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onBackground,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                text = config.statusLine(health),
-                style = MaterialTheme.typography.bodyMedium,
-                color = when (health) {
-                    // Only a rejection is coloured. A server that is merely
-                    // down will be up again without anyone doing anything,
-                    // and painting that red trains people to ignore the
-                    // colour by the time it means something.
-                    is SourceHealth.Rejected -> MaterialTheme.colorScheme.error
-                    else -> MaterialTheme.colorScheme.onSurfaceVariant
-                },
-                maxLines = 2,
+                localizedSourceDetail(config.kind),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Spacer(Modifier.width(8.dp))
+        if (onRemove != null) {
+            TextButton(onClick = onRemove) {
+                Text(stringResource(R.string.audio_addon_remove))
+            }
+            Spacer(Modifier.width(4.dp))
+        }
         Switch(
-            checked = config.enabled,
-            onCheckedChange = onToggle,
-            colors = SwitchDefaults.colors(
-                checkedTrackColor = MaterialTheme.colorScheme.primary,
-                checkedBorderColor = MaterialTheme.colorScheme.primary,
-            ),
+            checked = if (config.kind == SourceKind.YOUTUBE) true else config.enabled,
+            enabled = config.kind != SourceKind.YOUTUBE,
+            onCheckedChange = onEnabled,
         )
     }
 }
 
-/** The second line of a row: what this source is, or what is wrong with it. */
-private fun SourceConfig.statusLine(health: SourceHealth?): String = when {
-    !isComplete -> "Tap to finish setting up"
-    health is SourceHealth.Ok -> listOfNotNull(
-        health.detail,
-        kind.labels.take(3).joinToString(" · "),
-    ).joinToString(" — ")
-    health is SourceHealth.Rejected -> health.reason
-    health is SourceHealth.Unreachable -> "Can't reach it right now — ${health.reason}"
-    kind.needsServer -> "Checking…"
-    else -> kind.labels.take(3).joinToString(" · ")
+@Composable
+private fun localizedSourceName(config: SourceConfig): String {
+    val configuredName = config.label.trim()
+    if (config.kind == SourceKind.ADDON && configuredName.contains("navidrome", ignoreCase = true)) {
+        return stringResource(R.string.audio_source_addon)
+    }
+    if (configuredName.isNotEmpty() && config.kind in setOf(SourceKind.ADDON, SourceKind.CUSTOM_MODULE, SourceKind.MODULE)) {
+        return configuredName
+    }
+    return when (config.kind) {
+        SourceKind.TIDAL -> stringResource(R.string.audio_source_tidal_hifi)
+        SourceKind.ADDON -> stringResource(R.string.audio_source_addon)
+        SourceKind.CUSTOM_MODULE -> stringResource(R.string.audio_source_custom_module)
+        SourceKind.MODULE -> stringResource(R.string.audio_source_module)
+        SourceKind.JIOSAAVN -> stringResource(R.string.audio_source_jiosaavn)
+        SourceKind.YOUTUBE -> stringResource(R.string.audio_source_youtube)
+    }
 }
 
-/**
- * Add or edit the module source.
- *
- * Test is offered rather than required: an index that happens to be asleep is
- * still worth saving, and refusing to store it until it answers would make
- * setting one up from a coffee shop impossible.
- */
 @Composable
-private fun ServerEditorDialog(
-    config: SourceConfig,
-    onDismiss: () -> Unit,
-    onSave: (SourceConfig) -> Unit,
-    onDelete: () -> Unit,
-    probe: suspend (SourceConfig) -> SourceHealth,
-    scope: kotlinx.coroutines.CoroutineScope,
-) {
-    val isNew = SourceRegistry.config(config.id) == null
-    var label by remember { mutableStateOf(config.label) }
-    var baseUrl by remember { mutableStateOf(config.baseUrl) }
-    var testing by remember { mutableStateOf(false) }
-    var result by remember { mutableStateOf<SourceHealth?>(null) }
+private fun localizedSourceDetail(kind: SourceKind): String = when (kind) {
+    SourceKind.TIDAL -> stringResource(R.string.audio_source_tidal_hifi_detail)
+    SourceKind.ADDON -> stringResource(R.string.audio_source_addon_detail)
+    SourceKind.CUSTOM_MODULE -> stringResource(R.string.audio_source_custom_module_detail)
+    SourceKind.MODULE -> stringResource(R.string.audio_source_module_detail)
+    SourceKind.JIOSAAVN -> stringResource(R.string.audio_source_jiosaavn_detail)
+    SourceKind.YOUTUBE -> stringResource(R.string.audio_source_youtube_detail)
+}
 
-    val candidate = config.copy(label = label.trim(), baseUrl = baseUrl.trim())
+@Composable
+private fun localizedQualityName(quality: AudioQuality): String = when (quality) {
+    AudioQuality.LOW -> stringResource(R.string.audio_quality_low_name)
+    AudioQuality.MEDIUM -> stringResource(R.string.audio_quality_medium_name)
+    AudioQuality.HIGH, AudioQuality.AAC -> stringResource(R.string.audio_quality_high_name)
+}
 
-    AlertDialog(
-        onDismissRequest = { if (!testing) onDismiss() },
-        title = { Text(if (isNew) "Add ${config.kind.label.lowercase()}" else config.displayName) },
-        text = {
-            Column {
-                OutlinedTextField(
-                    value = baseUrl,
-                    onValueChange = { baseUrl = it; result = null },
-                    label = { Text("Link") },
-                    placeholder = { Text("https://example.com/modules/index.json") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    text = "Paste the URL of a Convx-compatible module index JSON. The index " +
-                        "lists JS plugins that can search and stream from services like Tidal, " +
-                        "Qobuz, Apple Music and more.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = label,
-                    onValueChange = { label = it },
-                    label = { Text("Name (optional)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-
-                result?.let { health ->
-                    Spacer(Modifier.height(10.dp))
-                    Text(
-                        text = when (health) {
-                            is SourceHealth.Ok ->
-                                listOfNotNull("Connected", health.detail).joinToString(" — ")
-                            is SourceHealth.Rejected -> health.reason
-                            is SourceHealth.Unreachable -> health.reason
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (health.isOk) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            MaterialTheme.colorScheme.error
-                        },
-                    )
-                }
-
-                if (!isNew) {
-                    Spacer(Modifier.height(6.dp))
-                    TextButton(onClick = onDelete, modifier = Modifier.align(Alignment.Start)) {
-                        Text("Remove this source", color = MaterialTheme.colorScheme.error)
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(
-                    onClick = {
-                        testing = true
-                        result = null
-                        scope.launch {
-                            result = probe(candidate)
-                            testing = false
-                        }
-                    },
-                    enabled = !testing && candidate.isComplete,
-                ) {
-                    Text(if (testing) "Testing…" else "Test")
-                }
-                TextButton(
-                    onClick = { onSave(candidate) },
-                    enabled = !testing && candidate.isComplete,
-                ) {
-                    Text("Save")
-                }
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss, enabled = !testing) { Text("Cancel") }
-        },
-    )
+@Composable
+private fun localizedQualityDetail(quality: AudioQuality): String = when (quality) {
+    AudioQuality.LOW -> stringResource(R.string.audio_quality_low_detail)
+    AudioQuality.MEDIUM -> stringResource(R.string.audio_quality_medium_detail)
+    AudioQuality.HIGH, AudioQuality.AAC -> stringResource(R.string.audio_quality_high_detail)
 }

@@ -46,9 +46,9 @@ data class RemoteTransitionDirective(
     val bassSwapFraction: Double,
     val filterSweep: Double,
     val gainEnvelope: List<TransitionGainPoint>,
-    val tempoEnvelope: List<TransitionTempoPoint>,
-    val incomingPitchSemitones: Double,
-    val harmonicLockScore: Double,
+    val tempoEnvelope: List<TransitionTempoPoint> = emptyList(),
+    val incomingPitchSemitones: Double = 0.0,
+    val harmonicLockScore: Double = 0.0,
     val protectedOutgoing: Boolean = false,
     val outgoingReleaseTime: Double = 0.0,
     val incomingImpactTime: Double = 0.0,
@@ -80,11 +80,6 @@ data class RemoteTransitionDirective(
     /** Explicit server verdict that no musical transition should be applied. */
     val blocked: Boolean = false,
     val serverAuthoritative: Boolean = true,
-)
-
-data class Decision(
-    val pending: Boolean = false,
-    val plan: TransitionPlan? = null,
 )
 
 internal object RemoteAutomixClient {
@@ -120,158 +115,6 @@ internal object RemoteAutomixClient {
             confirmedAvailable &&
             SystemClock.elapsedRealtime() >= retryAfterMs
 
-
-    private sealed interface CachedPlan {
-        data object Pending : CachedPlan
-        data class Ready(val plan: TransitionPlan) : CachedPlan
-    }
-
-    private val decisionCache = ConcurrentHashMap<String, CachedPlan>()
-    private val plannerExecutor = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "orb-automix-plan").apply { isDaemon = true }
-    }
-
-    /**
-     * Non-blocking adapter used by playback. Network planning never runs on the
-     * controller tick. A backend failure becomes an explicit NO_TRANSITION plan
-     * instead of falling back to a local 2.5 crossfade.
-     */
-    fun decisionFor(
-        outgoing: TrackAnalysis,
-        incoming: TrackAnalysis,
-        outgoingTrack: TransitionTrackInfo,
-        incomingTrack: TransitionTrackInfo,
-    ): Decision {
-        if (!isAvailable() ||
-            !outgoing.isUsable ||
-            !incoming.isUsable ||
-            outgoing.analysisSchema < REQUIRED_ANALYSIS_SCHEMA ||
-            incoming.analysisSchema < REQUIRED_ANALYSIS_SCHEMA
-        ) {
-            return Decision(plan = noTransitionPlan(outgoingTrack, "remote-unavailable-or-analysis-incomplete"))
-        }
-
-        val key = buildString {
-            append(outgoing.trackId.ifBlank { outgoingTrack.id })
-            append(':').append(outgoing.analysisSchema)
-            append(':').append(outgoing.energyCurve.size)
-            append(':').append(outgoing.onsetCurve.size)
-            append("->")
-            append(incoming.trackId.ifBlank { incomingTrack.id })
-            append(':').append(incoming.analysisSchema)
-            append(':').append(incoming.energyCurve.size)
-            append(':').append(incoming.onsetCurve.size)
-        }
-
-        return when (val cached = decisionCache[key]) {
-            is CachedPlan.Ready -> Decision(plan = cached.plan)
-            CachedPlan.Pending -> Decision(pending = true)
-            null -> {
-                decisionCache[key] = CachedPlan.Pending
-                plannerExecutor.execute {
-                    val directive = requestPlan(outgoing, incoming)
-                    val plan = directive
-                        ?.toTransitionPlan(outgoing, incoming, outgoingTrack, incomingTrack)
-                        ?: noTransitionPlan(outgoingTrack, "remote-plan-failed")
-                    decisionCache[key] = CachedPlan.Ready(plan)
-                }
-                Decision(pending = true)
-            }
-        }
-    }
-
-    private fun noTransitionPlan(
-        outgoingTrack: TransitionTrackInfo,
-        reason: String,
-    ): TransitionPlan {
-        val end = (outgoingTrack.durationMs.coerceAtLeast(0L) / 1000.0)
-        return TransitionPlan(
-            blocked = true,
-            markerVisible = false,
-            transitionStart = end,
-            transitionEnd = end,
-            transitionStyle = TransitionStyle.CUT,
-            reason = "remote:$reason",
-            policyReasons = listOf("remote-authoritative"),
-        )
-    }
-
-    private fun RemoteTransitionDirective.toTransitionPlan(
-        outgoing: TrackAnalysis,
-        incoming: TrackAnalysis,
-        outgoingTrack: TransitionTrackInfo,
-        incomingTrack: TransitionTrackInfo,
-    ): TransitionPlan {
-        if (blocked) return noTransitionPlan(outgoingTrack, reason)
-
-        val currentDuration = outgoing.duration.takeIf { it.isFinite() && it > 0.0 }
-            ?: (outgoingTrack.durationMs / 1000.0)
-        val nextDuration = incoming.duration.takeIf { it.isFinite() && it > 0.0 }
-            ?: (incomingTrack.durationMs / 1000.0)
-
-        var end = transitionEnd.coerceIn(0.0, currentDuration.coerceAtLeast(0.0))
-        var start = transitionStart.coerceIn(0.0, end)
-        val maxSpan = when (style) {
-            TransitionStyle.RUNWAY_BLEND -> 82.0
-            TransitionStyle.PHRASE_TAKEOVER -> 28.0
-            TransitionStyle.PHRASE_CUT, TransitionStyle.CUT -> 1.5
-            else -> 16.0
-        }
-        if (end - start > maxSpan) start = end - maxSpan
-        if (end <= start) return noTransitionPlan(outgoingTrack, "invalid-remote-window")
-
-        val cue = incomingCueTime.coerceIn(0.0, (nextDuration - 0.25).coerceAtLeast(0.0))
-        val handoff = incomingHandoffTime.coerceIn(cue, nextDuration.coerceAtLeast(cue))
-
-        return TransitionPlan(
-            markerVisible = true,
-            transitionStart = start,
-            transitionEnd = end,
-            fadeSeconds = end - start,
-            transitionStyle = style,
-            incomingCueTime = cue,
-            incomingHandoffTime = handoff,
-            outgoingPlaybackRate = outgoingPlaybackRate.coerceIn(0.96, 1.04),
-            incomingPlaybackRate = incomingPlaybackRate.coerceIn(0.96, 1.04),
-            transitionBeats = transitionBeats,
-            bassSwap = bassSwap,
-            handoffFraction = handoffFraction.coerceIn(0.02, 0.995),
-            bassSwapFraction = bassSwapFraction.coerceIn(0.0, 1.0),
-            filterSweep = filterSweep.coerceIn(0.0, 1.0),
-            gainEnvelope = gainEnvelope,
-            tempoEnvelope = tempoEnvelope,
-            incomingPitchSemitones = incomingPitchSemitones.coerceIn(-1.0, 1.0),
-            harmonicLockScore = harmonicLockScore.coerceIn(0.0, 1.0),
-            vocalOverlap = overlapVocalClash.coerceIn(0.0, 1.0),
-            outgoingBpm = outgoingLocalBpm.takeIf { it > 0.0 } ?: outgoing.bpm,
-            incomingBpm = incomingLocalBpm.takeIf { it > 0.0 } ?: incoming.bpm,
-            keyCompatibility = keyCompatibility,
-            tempoCompatibility = tempoCompatibility,
-            phraseAlignment = phraseAlignment,
-            pairCompatibility = pairCompatibility,
-            energyCompatibility = energyCompatibility,
-            overlapVocalClash = overlapVocalClash,
-            spanCompatibility = spanCompatibility,
-            requestedTransitionBeats = requestedTransitionBeats,
-            outgoingAnchor = outgoingAnchor,
-            incomingAnchor = incomingAnchor,
-            outgoingTransitionKey = outgoingTransitionKey,
-            incomingTransitionKey = incomingTransitionKey,
-            curveCompatibility = curveCompatibility,
-            onsetCurveFit = onsetCurveFit,
-            harmonicCurveFit = harmonicCurveFit,
-            spectralCurveFit = spectralCurveFit,
-            beatPhaseFit = beatPhaseFit,
-            beatPhaseErrorMs = beatPhaseErrorMs,
-            localTempoCompatibility = localTempoCompatibility,
-            outgoingLocalBpm = outgoingLocalBpm,
-            incomingLocalBpm = incomingLocalBpm,
-            curveCueShiftMs = curveCueShiftMs,
-            curveAlignmentScore = curveAlignmentScore,
-            policyReasons = listOf("remote-authoritative", "curve-aware"),
-            reason = "remote:$reason",
-        )
-    }
 
     /**
      * Cheap startup probe. v5 is required because only v5 advertises the server-authoritative

@@ -68,6 +68,15 @@ object VocalSpectrogram {
         override fun hashCode(): Int = 31 * (31 * values.contentHashCode() + frames) + bins
     }
 
+    internal fun nativeReconstructVocalsForTracker(
+        left: FloatArray,
+        right: FloatArray,
+        target: FloatBuffer,
+        usableFrames: Int,
+    ): Array<FloatArray>? = nativeReconstructVocals(
+        left, right, sampleRate, target, usableFrames = usableFrames, modelFrames = VocalTracker.FIXED_FRAMES,
+    )
+
     const val CHANNELS = 2
 
     @JvmStatic private external fun nativeCompute(left: FloatArray, right: FloatArray, rate: Double): FloatArray
@@ -75,6 +84,14 @@ object VocalSpectrogram {
     @JvmStatic private external fun nativeSampleRate(): Double
     @JvmStatic private external fun nativeHop(): Int
     @JvmStatic private external fun nativeFftSize(): Int
+    @JvmStatic private external fun nativeReconstructVocals(
+        left: FloatArray,
+        right: FloatArray,
+        rate: Double,
+        target: FloatBuffer,
+        modelFrames: Int,
+        usableFrames: Int,
+    ): Array<FloatArray>?
 }
 
 /**
@@ -88,10 +105,87 @@ object VocalSpectrogram {
  * CC-BY-NC-4.0, which a distributed application cannot ship, and its ONNX export additionally has
  * unresolved blockers around complex-valued STFT ops.
  *
- * Only the vocals target is used. open-unmix trains four independent checkpoints; BitChord needs to
- * know how much vocal content is present at an instant, not to reconstruct four stems.
+ * Only the vocals target is shipped. For analysis it is reduced to a vocal-presence curve; for the
+ * Instrumental Overlay the same target can be reconstructed to PCM and subtracted from the mix,
+ * yielding the complementary accompaniment without shipping the other three Open-Unmix targets.
  */
 class VocalTracker(private val context: Context) {
+
+    data class StemPair(
+        val vocalsLeft: FloatArray,
+        val vocalsRight: FloatArray,
+        val accompanimentLeft: FloatArray,
+        val accompanimentRight: FloatArray,
+        val sampleRate: Double,
+    )
+
+    /**
+     * Reconstructs real vocal and accompaniment PCM for one transition-sized window.
+     *
+     * The shipped Open-Unmix checkpoint already estimates the vocals target magnitude. The
+     * analyzer previously reduced that estimate to a single presence curve and discarded it.
+     * Here the same target is combined with the mixture phase in native code to reconstruct
+     * stereo vocals; accompaniment is then the exact residual `mix - vocals`. The operation is
+     * intentionally window-bounded because Automix needs stems only around the handoff, not for
+     * the whole song.
+     */
+    fun separate(left: FloatArray, right: FloatArray, rate: Double): StemPair? {
+        if (!VocalSpectrogram.available || left.isEmpty() || left.size != right.size) return null
+        val resampledLeft = MelSpectrogram.resample(left, rate, VocalSpectrogram.sampleRate) ?: return null
+        val resampledRight = MelSpectrogram.resample(right, rate, VocalSpectrogram.sampleRate) ?: return null
+        val spectrogram = VocalSpectrogram.compute(resampledLeft, resampledRight) ?: return null
+        if (spectrogram.frames > FIXED_FRAMES || spectrogram.frames <= 0) return null
+        val active = session() ?: return null
+
+        return runCatching {
+            val bins = spectrogram.bins
+            val backing = ByteBuffer
+                .allocateDirect(VocalSpectrogram.CHANNELS * bins * FIXED_FRAMES * Float.SIZE_BYTES)
+                .order(ByteOrder.nativeOrder())
+            fillFixedFrames(backing.asFloatBuffer(), spectrogram.values, bins, spectrogram.frames)
+            val environment = OrtEnvironment.getEnvironment()
+            val shape = longArrayOf(1, VocalSpectrogram.CHANNELS.toLong(), bins.toLong(), FIXED_FRAMES.toLong())
+
+            OnnxTensor.createTensor(environment, backing.asFloatBuffer(), shape).use { tensor ->
+                active.run(mapOf(active.inputNames.first() to tensor)).use outputUse@ { outputs ->
+                    val target = (outputs.get(0) as OnnxTensor).floatBuffer
+                    val nativeTarget = if (target.isDirect) {
+                        target
+                    } else {
+                        val copy = ByteBuffer
+                            .allocateDirect(target.capacity() * Float.SIZE_BYTES)
+                            .order(ByteOrder.nativeOrder())
+                            .asFloatBuffer()
+                        for (index in 0 until target.capacity()) copy.put(index, target.get(index))
+                        copy
+                    }
+                    val vocal = VocalSpectrogram.nativeReconstructVocalsForTracker(
+                        resampledLeft,
+                        resampledRight,
+                        nativeTarget,
+                        spectrogram.frames,
+                    ) ?: return@outputUse null
+                    val vocalLeft = vocal.getOrNull(0) ?: return@outputUse null
+                    val vocalRight = vocal.getOrNull(1) ?: return@outputUse null
+                    val size = minOf(resampledLeft.size, resampledRight.size, vocalLeft.size, vocalRight.size)
+                    if (size <= 0) return@outputUse null
+                    val accompanimentLeft = FloatArray(size) { index ->
+                        (resampledLeft[index] - vocalLeft[index]).coerceIn(-1f, 1f)
+                    }
+                    val accompanimentRight = FloatArray(size) { index ->
+                        (resampledRight[index] - vocalRight[index]).coerceIn(-1f, 1f)
+                    }
+                    StemPair(
+                        vocalsLeft = vocalLeft.copyOf(size),
+                        vocalsRight = vocalRight.copyOf(size),
+                        accompanimentLeft = accompanimentLeft,
+                        accompanimentRight = accompanimentRight,
+                        sampleRate = VocalSpectrogram.sampleRate,
+                    )
+                }
+            }
+        }.onFailure { Log.w(TAG, "Stem separation failed", it) }.getOrNull()
+    }
 
     @Volatile private var session: OrtSession? = null
     private val lock = Any()
@@ -108,6 +202,9 @@ class VocalTracker(private val context: Context) {
                     }
                 }
                 val options = OrtSession.SessionOptions().apply {
+                    // TrackAnalyzer runs one inference job at a time and releases this session
+                    // as soon as that job finishes. The four workers therefore exist only for the
+                    // bounded inference burst, never as parallel analyses of multiple tracks.
                     setIntraOpNumThreads(INFERENCE_THREADS)
                     setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
                     // Same reasoning as BeatTracker: the arena retains every block it allocates for
@@ -258,7 +355,7 @@ class VocalTracker(private val context: Context) {
     companion object {
         private const val TAG = "BitChordVocalTracker"
         private const val MODEL_ASSET = "vocals_umxhq_int8.onnx"
-        private const val INFERENCE_THREADS = 4
+        private const val INFERENCE_THREADS = 2
 
         /** The model's fixed input width, ~22.8 s, chosen upstream to cover a transition overlap. */
         const val FIXED_FRAMES = 960

@@ -816,16 +816,56 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
         )
     }
 
-    /**
-     * The bundled Open-Unmix wrapper currently exposes vocal-presence masks,
-     * not inverse-STFT PCM reconstruction. Keep the optional stem deck disabled
-     * rather than manufacturing fake stems from the full mix.
-     */
-    private fun separateStemChunk(
-        file: File,
-        requestedStartMs: Long,
-        requestedEndMs: Long,
-    ): StemChunk? = null
+    /** Separates one Open-Unmix-sized useful region, with extra context removed after iSTFT. */
+    private fun separateStemChunk(file: File, requestedStartMs: Long, requestedEndMs: Long): StemChunk? {
+        val requestedStartSeconds = requestedStartMs / 1000.0
+        val requestedEndSeconds = requestedEndMs / 1000.0
+        val paddedStartSeconds = (requestedStartSeconds - STEM_EDGE_PAD_SECONDS).coerceAtLeast(0.0)
+        val paddedEndSeconds = requestedEndSeconds + STEM_EDGE_PAD_SECONDS
+        val decoded = reliableAudio.dataSource(file)?.use { source ->
+            AudioDecoder.decodeRegionStereo(source, paddedStartSeconds, paddedEndSeconds)
+        } ?: return null
+        val pcm = decoded.first
+        val actualStart = decoded.second
+        if (pcm.sampleRate <= 0.0 || pcm.left.isEmpty() || pcm.left.size != pcm.right.size) return null
+
+        val padTrimFrames = ((paddedStartSeconds - actualStart) * pcm.sampleRate)
+            .toInt().coerceAtLeast(0).coerceAtMost(pcm.left.size)
+        // MediaExtractor may land a little after the requested decode point. Track the actual first
+        // retained sample instead of assuming the requested padded start was reached exactly; this
+        // keeps the generated stem on B's musical timeline even across codec/keyframe differences.
+        val retainedStartSeconds = actualStart + padTrimFrames / pcm.sampleRate
+        val paddedWantedFrames = ((paddedEndSeconds - retainedStartSeconds) * pcm.sampleRate)
+            .toInt().coerceAtLeast(1)
+        val paddedEndFrame = (padTrimFrames + paddedWantedFrames).coerceAtMost(pcm.left.size)
+        if (paddedEndFrame <= padTrimFrames) return null
+
+        val paddedLeft = pcm.left.copyOfRange(padTrimFrames, paddedEndFrame)
+        val paddedRight = pcm.right.copyOfRange(padTrimFrames, paddedEndFrame)
+        val separated = stemSeparator.separate(paddedLeft, paddedRight, pcm.sampleRate) ?: return null
+
+        val outputRate = separated.sampleRate
+        val usefulStartFrame = ((requestedStartSeconds - retainedStartSeconds) * outputRate)
+            .toInt().coerceAtLeast(0)
+        val usefulWantedFrames = ((requestedEndSeconds - requestedStartSeconds) * outputRate)
+            .toInt().coerceAtLeast(1)
+        val separatedFrames = minOf(
+            separated.vocalsLeft.size,
+            separated.vocalsRight.size,
+            separated.accompanimentLeft.size,
+            separated.accompanimentRight.size,
+        )
+        val usefulEndFrame = (usefulStartFrame + usefulWantedFrames).coerceAtMost(separatedFrames)
+        if (usefulEndFrame <= usefulStartFrame) return null
+
+        return StemChunk(
+            vocalsLeft = separated.vocalsLeft.copyOfRange(usefulStartFrame, usefulEndFrame),
+            vocalsRight = separated.vocalsRight.copyOfRange(usefulStartFrame, usefulEndFrame),
+            accompanimentLeft = separated.accompanimentLeft.copyOfRange(usefulStartFrame, usefulEndFrame),
+            accompanimentRight = separated.accompanimentRight.copyOfRange(usefulStartFrame, usefulEndFrame),
+            sampleRate = outputRate.toInt(),
+        )
+    }
 
     private fun StemChunk.tail(frames: Int): StemChunk {
         val count = frames.coerceIn(1, this.frames)

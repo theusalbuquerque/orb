@@ -26,6 +26,8 @@ data class LyricLine(
     val text: String,
     val words: List<LyricWord> = emptyList(),
     val sungUntilMs: Long? = null,
+    /** Display-only translation: keep the original vocal envelope/timing. */
+    val timingSource: LyricLine? = null,
 ) {
     val isGap: Boolean get() = text.isEmpty()
 
@@ -59,6 +61,11 @@ data class LyricLine(
      * on rather than jumping ahead of the next word's first letter.
      */
     fun revealedChars(positionMs: Long): Float {
+        timingSource?.let { source ->
+            if (source.text.isEmpty()) return 0f
+            return (source.revealedChars(positionMs) / source.text.length.toFloat())
+                .coerceIn(0f, 1f) * text.length.toFloat()
+        }
         if (words.isEmpty()) return if (positionMs >= timeMs) text.length.toFloat() else 0f
         var offset = 0
         words.forEachIndexed { index, word ->
@@ -102,6 +109,7 @@ data class LyricLine(
      * pauses dark and costs nothing to draw.
      */
     fun glowIntensity(positionMs: Long): Float {
+        timingSource?.let { return it.glowIntensity(positionMs) }
         val word = words.firstOrNull { positionMs < it.endMs } ?: return 0f
         if (positionMs < word.startMs) return 0f
 

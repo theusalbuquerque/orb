@@ -51,12 +51,41 @@ data class Song(
      * the track played as a 128kbps MP3.
      */
     val sourceQuality: String? = null,
-    val isExplicit: Boolean = false,
-    val releaseYear: Int? = null,
+    /**
+     * The listener explicitly chose this track's position in the future queue
+     * (for example with Play next or by dragging it). Shuffle may reorder the
+     * surrounding queue, but never this item or anything across it.
+     */
     val queuePinned: Boolean = false,
+    /** YouTube/source metadata marks this recording as explicit content. */
+    val isExplicit: Boolean = false,
+    /**
+     * Release year when a catalogue exposes it. Primarily used as recording
+     * identity during cross-source matching; null means the source did not
+     * state a trustworthy release year, never "current year".
+     */
+    val releaseYear: Int? = null,
+    /**
+     * Whether [isExplicit] was actually stated by the source. YouTube rows
+     * normally know this, while lightweight TIDAL search responses sometimes
+     * omit the flag entirely. An omitted flag is unknown, not a clean master.
+     * Kept at the end to preserve positional Song constructor compatibility.
+     */
+    val sourceExplicitKnown: Boolean = true,
+    /** Playlist context when this track was launched from a playlist detail page.
+     * Used only as metadata: Stats persists this attribution on the listener's own
+     * RLS-protected listening_activity row; no audio or stream data is transferred. */
     val sourcePlaylistId: String? = null,
     val sourcePlaylistTitle: String? = null,
     val sourcePlaylistArtworkUrl: String? = null,
+    /**
+     * Every artist credit that YouTube Music explicitly links for this track.
+     *
+     * [artistId] remains the primary/legacy shortcut, while this list preserves
+     * collaborations such as "Nu Aspect, Arkaden, & Sam Welch" as independent
+     * navigation targets instead of making the whole byline open the first artist.
+     */
+    val artistLinks: List<ArtistLink> = emptyList(),
 )
 
 /**
@@ -108,6 +137,8 @@ data class BrowseItem(
     val subtitle: String,
     val thumbnailUrl: String?,
     val type: BrowseType,
+    /** Explicit badge exposed by YouTube Music for this album/release. */
+    val isExplicit: Boolean = false,
 )
 
 /** Search rows are heterogeneous once filters other than "Songs" are used. */
@@ -130,6 +161,29 @@ data class ShelfItem(
     val thumbnailUrl: String?,
     val videoId: String?,
     val browseId: String?,
+    /** Explicit badge exposed by the catalogue for this track/release. */
+    val isExplicit: Boolean = false,
+    /** What a browse card opens; ALBUM also covers singles and EPs. */
+    val type: BrowseType = BrowseType.OTHER,
+    /** Current position when this card belongs to an ordered YouTube chart. */
+    val rank: Int? = null,
+    /** Playback metadata preserved for local/offline recent cards. */
+    val localUri: String? = null,
+    val localPath: String? = null,
+    val sourceQuality: String? = null,
+    val durationText: String? = null,
+    val artistId: String? = null,
+    val albumId: String? = null,
+    val albumName: String? = null,
+    val isVideo: Boolean = false,
+    val setVideoId: String? = null,
+    val fromAutoplay: Boolean = false,
+    val queuePinned: Boolean = false,
+    val releaseYear: Int? = null,
+    val sourceExplicitKnown: Boolean = true,
+    val sourcePlaylistId: String? = null,
+    val sourcePlaylistTitle: String? = null,
+    val sourcePlaylistArtworkUrl: String? = null,
 )
 
 /** The signed-in Google account, as YouTube Music reports it. */
@@ -137,13 +191,43 @@ data class Account(
     val name: String,
     val email: String,
     val thumbnailUrl: String?,
+    /** YouTube channel handle when this account comes from YouTube Music. */
+    val handle: String = "",
 )
+
+/**
+ * One YouTube identity available under the signed-in Google account.
+ *
+ * [pageId] is YouTube's delegated/Brand Account id. A null page id is the
+ * Google account's primary YouTube identity. When a Brand Account is selected, Innertube sends this id as
+ * context.user.onBehalfOfUser; browser-cookie requests also carry X-Goog-PageId.
+ */
+data class YouTubeAccountIdentity(
+    val name: String,
+    val handle: String = "",
+    val thumbnailUrl: String? = null,
+    val pageId: String? = null,
+    val isSelected: Boolean = false,
+) {
+    val stableKey: String
+        get() = pageId ?: "primary:${handle.ifBlank { name }}"
+}
 
 data class HomeShelf(
     val title: String,
     val items: List<ShelfItem>,
     /** YouTube's "strapline" — the grey line Apple Music runs under a heading. */
     val subtitle: String = "",
+    /**
+     * Optional destination behind the shelf header's "more" affordance.
+     *
+     * Artist pages only inline a small first slice of Albums / Singles. Keeping
+     * the header browse id lets the repository page the complete shelf after the
+     * visible landing page has rendered, without making page opening wait for it.
+     */
+    val browseId: String? = null,
+    /** Optional browse params paired with [browseId] (artist discography filters often need it). */
+    val browseParams: String? = null,
 )
 
 /** A page of the Home feed, plus the token for the next one — null once exhausted. */
@@ -155,7 +239,7 @@ data class HomeFeed(
 /**
  * The signed-in library, as YouTube Music splits it: the auto-generated Liked
  * Music playlist, the tracks explicitly added to the library, and a shelf per
- * saved collection (playlists, albums, artists, subscriptions, podcasts).
+ * saved music collection (playlists, albums, artists and subscriptions).
  */
 data class LibraryPage(
     val likedSongs: List<Song>,
@@ -166,6 +250,12 @@ data class LibraryPage(
         get() = likedSongs.isEmpty() && librarySongs.isEmpty() && shelves.isEmpty()
 }
 
+/** One artist explicitly linked by a detail-page header. */
+data class ArtistLink(
+    val artistId: String,
+    val name: String,
+)
+
 /** A browsed album / artist / playlist page. */
 data class DetailPage(
     val browseId: String,
@@ -174,8 +264,20 @@ data class DetailPage(
     val thumbnailUrl: String?,
     val songs: UiState<List<Song>>,
     val type: BrowseType = BrowseType.OTHER,
+    /** Explicit hint carried from the card/search result so the header knows it immediately. */
+    val isExplicit: Boolean = false,
+    /** Artist header audience text, e.g. "29.1M monthly audience". */
+    val monthlyAudience: String? = null,
+    /** Artists that the release/playlist header itself links to. */
+    val headerArtists: List<ArtistLink> = emptyList(),
     /** Albums / singles carousels, populated for artist pages. */
     val sections: List<HomeShelf> = emptyList(),
+    /**
+     * Continuation for a partially loaded album/playlist. Keeping the token on
+     * the page makes progressive loading resumable if the user leaves before a
+     * very long playlist has finished appending and then opens it again.
+     */
+    val continuation: String? = null,
     /**
      * Tracks YouTube offers to round out a playlist but that were never
      * added — see [com.music.orb.data.innertube.InnertubeParser.parsePlaylistShelf].
@@ -215,6 +317,8 @@ data class ArtistPage(
     val thumbnailUrl: String? = null,
     /** The single artist this page is for, as the header bills them. */
     val name: String? = null,
+    /** Header-provided monthly audience, kept with its label for localization. */
+    val monthlyAudience: String? = null,
 )
 
 /**
@@ -248,6 +352,18 @@ data class UserPlaylist(
 ) {
     val browseId: String get() = "VL$playlistId"
 }
+
+/** Contributor metadata exposed by YouTube Music's TRACK_CREDITS page. */
+data class SongCreditSection(
+    /** Localized section title supplied by YouTube Music, e.g. Performed by. */
+    val title: String,
+    /** People or organizations credited in this section, in source order. */
+    val names: List<String>,
+)
+
+data class SongCredits(
+    val sections: List<SongCreditSection>,
+)
 
 /**
  * The per-track state that only YouTube can answer: its rating, and whether it

@@ -3,12 +3,15 @@ package com.music.orb.data.sources
 import com.music.orb.data.model.Song
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
+/** User-facing native lossless tier carried through source resolution and badges. */
 enum class LosslessTier {
-    NONE, LOSSLESS, HI_RES_LOSSLESS;
+    NONE,
+    LOSSLESS,
+    HI_RES_LOSSLESS;
+
     val isLossless: Boolean get() = this != NONE
     val isHiRes: Boolean get() = this == HI_RES_LOSSLESS
 }
-
 
 /**
  * What a source is about to hand the decoder, as far as the source will say.
@@ -28,6 +31,11 @@ data class StreamFormat(
     val kbps: Int? = null,
     val sampleRateHz: Int? = null,
     val bitDepth: Int? = null,
+    /**
+     * Native tier explicitly declared by the source/manifest. This matters for
+     * valid Hi-Res files such as 24-bit/44.1 kHz where sample rate alone cannot
+     * distinguish the tier, and for manifests that expose FLAC_HIRES by label.
+     */
     val declaredLosslessTier: LosslessTier? = null,
 ) {
     /**
@@ -41,6 +49,12 @@ data class StreamFormat(
     val isLossless: Boolean?
         get() = codec?.let { it in LOSSLESS_CODECS }
 
+    /**
+     * User-facing quality tier. Hi-Res is never inferred from bitrate or from
+     * the decoder's working PCM precision: it requires a lossless codec plus
+     * native media metadata above 16-bit or 48 kHz. Missing resolution metadata
+     * stays at the conservative Lossless tier rather than being promoted.
+     */
     val losslessTier: LosslessTier
         get() = when {
             isLossless != true -> LosslessTier.NONE
@@ -75,6 +89,7 @@ data class SourceStream(
     val url: String,
     val format: StreamFormat = StreamFormat(),
     val headers: Map<String, String> = emptyMap(),
+    /** Explicit adaptive-transport hint for URLs whose path does not end in .mpd. */
     val isDash: Boolean = false,
     /**
      * Whether this is less than was asked for, taken because nothing better
@@ -101,17 +116,40 @@ data class SourceStream(
      * against the runtime being played.
      */
     val durationSec: Int? = null,
+    /**
+     * True only when Orb independently verified that this rendition is
+     * lossless (for example by reading a FLAC manifest/header), rather than
+     * merely trusting a catalogue quality label. This is fallback evidence for
+     * the brief/rare cases where Media3 has not exposed a renderer MIME yet.
+     * A renderer MIME, when present, always wins over this flag.
+     */
     val losslessVerified: Boolean = false,
 )
 
+/**
+ * Whether this stream can be handed to the HTTP data source.
+ *
+ * Keep this check next to [SourceStream] so every catalogue uses the exact
+ * same definition. Android's [android.net.Uri] accepts arbitrary strings such
+ * as `media`, while OkHttp rejects them later as `Malformed URL`; validating
+ * with OkHttp's own parser prevents a bad catalogue answer from reaching
+ * ExoPlayer in the first place.
+ */
 fun SourceStream.hasPlayableHttpUrl(): Boolean = url.isPlayableHttpStreamUrl()
+
+/** True only for a syntactically valid HTTP(S) URL that OkHttp can open. */
 fun String.isPlayableHttpStreamUrl(): Boolean {
     val candidate = trim()
-    if (candidate.isEmpty() || candidate.any { it.code < 0x20 || it.code == 0x7f }) return false
+    if (candidate.isEmpty()) return false
+    if (candidate.any { it.code < 0x20 || it.code == 0x7f }) return false
     return candidate.toHttpUrlOrNull() != null
 }
+
+/** Safe, token-free origin used in diagnostics for invalid stream answers. */
 fun String.streamOriginForLog(): String =
-    trim().toHttpUrlOrNull()?.host ?: trim().substringBefore('?').take(96).ifBlank { "<blank>" }
+    trim().toHttpUrlOrNull()?.host
+        ?: trim().substringBefore('?').take(96).ifBlank { "<blank>" }
+
 
 /**
  * How much of the stream the caller is willing to pay for.
@@ -128,6 +166,8 @@ sealed interface StreamRequest {
 
     /** A transcode at or below [maxKbps]. What a metered connection asks for. */
     data class Capped(val maxKbps: Int) : StreamRequest
+
+    /** Prefer AAC/M4A, capped so a source cannot silently turn this into Lossless. */
     data class Aac(val maxKbps: Int = 320) : StreamRequest
 
     /** Whatever the source considers its best lossy rendition. */

@@ -10,16 +10,22 @@ import android.os.Build
 import android.provider.MediaStore
 import com.music.orb.data.DebugLog as Log
 import androidx.core.content.ContextCompat
+import com.music.orb.data.model.BrowseType
+import com.music.orb.data.model.SearchFilter
+import com.music.orb.data.model.SearchResult
 import com.music.orb.data.model.Song
 import com.music.orb.download.DownloadStore
 import com.music.orb.download.Downloads
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 
 object LocalMediaRepository {
 
     private const val TAG = "BitChord"
+    private val artistArtworkCache = ConcurrentHashMap<String, String>()
+    private val albumArtworkCache = ConcurrentHashMap<String, String>()
 
     /** Check if storage/audio permission is granted to query device local music. */
     fun hasStoragePermission(context: Context): Boolean {
@@ -35,6 +41,56 @@ object LocalMediaRepository {
             ) == PackageManager.PERMISSION_GRANTED
         }
     }
+
+    /**
+     * Local tags rarely contain a dedicated artist portrait. Resolve one from
+     * the catalogue and retain positive matches for the app session; album art
+     * remains the immediate offline fallback in the UI.
+     */
+    suspend fun artistArtwork(artistName: String): String? {
+        val key = artistName.trim().lowercase()
+        if (key.isBlank() || key == "unknown artist") return null
+        artistArtworkCache[key]?.let { return it }
+
+        val artists = YtMusicRepository.search(artistName, SearchFilter.ARTISTS)
+            .getOrNull()
+            .orEmpty()
+            .filterIsInstance<SearchResult.Browse>()
+            .filter { it.item.type == BrowseType.ARTIST && !it.item.thumbnailUrl.isNullOrBlank() }
+        val match = artists.firstOrNull { it.item.title.trim().lowercase() == key }
+            ?: artists.firstOrNull()
+        return match?.item?.thumbnailUrl?.also { artistArtworkCache[key] = it }
+    }
+
+    /** Uses catalogue artwork only when the file and MediaStore expose no cover. */
+    suspend fun albumArtwork(albumName: String, artistName: String): String? {
+        val albumKey = albumName.trim().lowercase()
+        val artistKey = artistName.trim().lowercase()
+        if (albumKey.isBlank()) return null
+        val key = "$albumKey|$artistKey"
+        albumArtworkCache[key]?.let { return it }
+
+        val query = listOf(artistName, albumName).filter { it.isNotBlank() }.joinToString(" ")
+        val albums = YtMusicRepository.search(query, SearchFilter.ALBUMS)
+            .getOrNull()
+            .orEmpty()
+            .filterIsInstance<SearchResult.Browse>()
+            .filter { it.item.type == BrowseType.ALBUM && !it.item.thumbnailUrl.isNullOrBlank() }
+        val match = albums.firstOrNull {
+            it.item.title.trim().lowercase() == albumKey &&
+                    (artistKey.isBlank() || it.item.subtitle.lowercase().contains(artistKey))
+        } ?: albums.firstOrNull { it.item.title.trim().lowercase() == albumKey }
+            ?: albums.firstOrNull()
+        return match?.item?.thumbnailUrl?.also { albumArtworkCache[key] = it }
+    }
+
+    /**
+     * Removes every Orb offline file and cancels anything still queued/running.
+     * Downloads owns the authoritative sweep because it also knows about
+     * app-private files and legacy public Music/BitChord entries that may not
+     * currently be visible in this screen's media scan.
+     */
+    suspend fun deleteAllDownloads(context: Context): Int = Downloads.deleteAll(context)
 
     /**
      * Retrieves all songs in the `Music/BitChord` directory, combining app downloads
@@ -64,6 +120,7 @@ object LocalMediaRepository {
                     MediaStore.Audio.Media.RELATIVE_PATH,
                     MediaStore.Audio.Media.ALBUM,
                     MediaStore.Audio.Media.ALBUM_ID,
+                    MediaStore.Audio.Media.DURATION,
                 )
                 val selection = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
                 val selectionArgs = arrayOf("%${DownloadStore.FOLDER}%")
@@ -79,6 +136,7 @@ object LocalMediaRepository {
                     val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
                     val albumCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
                     val albumIdCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM_ID)
+                    val durationCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
                     val albumArtBaseUri = Uri.parse("content://media/external/audio/albumart")
 
                     while (cursor.moveToNext()) {
@@ -86,6 +144,7 @@ object LocalMediaRepository {
                         val name = cursor.getString(nameCol) ?: continue
                         val contentUri = ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id).toString()
                         val albumId = cursor.getLong(albumIdCol)
+                        val durationMs = cursor.getLong(durationCol).takeIf { it > 0L }
                         val tags = ScannedTags(
                             albumName = cursor.getString(albumCol).cleanTag(),
                             artworkUrl = if (albumId > 0) {
@@ -93,6 +152,7 @@ object LocalMediaRepository {
                             } else {
                                 null
                             },
+                            durationText = durationMs?.let(::formatDuration),
                         )
                         scanned[contentUri] = tags
                         if (contentUri !in knownUris && isAudioFileName(name)) {
@@ -121,10 +181,15 @@ object LocalMediaRepository {
         }.onFailure { Log.w(TAG, "Failed scanning Music/BitChord directory: ${it.message}") }
 
         val filled = appDownloads.map { song ->
-            if (song.albumName != null) return@map song
-            val uri = song.localUri ?: return@map song
-            val album = scanned[uri]?.albumName ?: return@map song
-            song.copy(albumName = album)
+            val tags = song.localUri?.let(scanned::get)
+            song.copy(
+                albumName = song.albumName ?: tags?.albumName,
+                thumbnailUrl = song.thumbnailUrl ?: tags?.artworkUrl,
+                durationText = song.durationText ?: tags?.durationText
+                    ?: song.localUri?.let { uri ->
+                        runCatching { buildSongFromUri(context, uri, song.title).durationText }.getOrNull()
+                    },
+            )
         }
 
         (filled + extraSongs).distinctBy { it.localUri ?: it.videoId }
@@ -134,7 +199,11 @@ object LocalMediaRepository {
      * The parts of a scanner row worth reading back — everything else about a
      * download is better known from the record that made it.
      */
-    private class ScannedTags(val albumName: String?, val artworkUrl: String?)
+    private class ScannedTags(
+        val albumName: String?,
+        val artworkUrl: String?,
+        val durationText: String? = null,
+    )
 
     /** What MediaStore writes into a column it has nothing for. */
     private fun String?.cleanTag(): String? =

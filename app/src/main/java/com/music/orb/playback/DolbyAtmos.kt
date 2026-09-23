@@ -7,31 +7,27 @@ import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
-import android.media.Spatializer
 import android.media.audiofx.AudioEffect
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.provider.Settings
-import androidx.annotation.RequiresApi
-import com.music.orb.data.settings.AppSettings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * Whether the device has Dolby Atmos, and whether it is switched on right now.
+ * Device/system Dolby Atmos capability and current state.
  *
- * Spatial audio hangs off both: the app's own effect is only offered on a
- * device that ships Atmos, and only runs while the system's Atmos switch is on
- * — the same contract Apple Music keeps, where the row is dead on hardware that
- * cannot do it and follows the system switch on hardware that can.
+ * This object is intentionally independent from Orb's 360 Audio DSP. Atmos is
+ * a Dolby/system capability that may be provided by the phone itself or by the
+ * active output route; 360 Audio is Orb's own post-decode stereo processor and
+ * does not require this object to report support or to be enabled.
  *
- * Nothing here can turn Atmos *on*. No public API exposes the OEM's switch to a
- * third-party app; [settingsIntent] is the closest thing, a jump to the panel
- * that owns it. What this can do is notice the moment it goes off — via the
- * platform spatializer's own callback, the vendor setting, or an output route
- * change — and take spatial audio down with it.
+ * Nothing here can turn Atmos *on*. Android exposes no universal public API for
+ * a third-party app to mutate an OEM Atmos switch, so [settingsIntent] opens the
+ * panel that owns it. We only observe capability/state so the UI can report it
+ * accurately without pretending Orb owns that setting.
  */
 object DolbyAtmos {
 
@@ -42,16 +38,15 @@ object DolbyAtmos {
     private val _supported = MutableStateFlow(false)
     val supported: StateFlow<Boolean> = _supported.asStateFlow()
 
-    /** Atmos is switched on and applies to whatever audio is routed to now. */
+    /** Atmos is switched on when Orb can read a vendor switch; otherwise best-known availability. */
     private val _enabledOnDevice = MutableStateFlow(false)
     val enabledOnDevice: StateFlow<Boolean> = _enabledOnDevice.asStateFlow()
 
-    /** What the effect should actually do: the user's switch, gated on Atmos. */
-    val spatialAudioActive: Boolean
-        get() = _supported.value && _enabledOnDevice.value && AppSettings.spatialAudio.value
+    /** True only when Orb can read an actual OEM Dolby/Atmos setting. */
+    private val _statusReadable = MutableStateFlow(false)
+    val statusReadable: StateFlow<Boolean> = _statusReadable.asStateFlow()
 
     private var audioManager: AudioManager? = null
-    private var spatializer: Spatializer? = null
 
     /** The vendor setting Atmos lives in on this device, if it has one. */
     private var vendorToggle: VendorToggle? = null
@@ -61,10 +56,6 @@ object DolbyAtmos {
         val manager = app.getSystemService(AudioManager::class.java) ?: return
         audioManager = manager
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S_V2) {
-            spatializer = runCatching { manager.spatializer }.getOrNull()
-            watchSpatializer(app)
-        }
         // Only worth probing on a device that has Atmos to switch — elsewhere
         // a key of the same name would be some other vendor's business.
         if (hasAtmosHardware()) {
@@ -87,19 +78,17 @@ object DolbyAtmos {
     }
 
     /**
-     * Re-read the device's state and, if Atmos has gone away, take the user's
-     * spatial audio switch down with it — an effect that survived its
-     * precondition would be lying about what it is.
+     * Re-read Atmos capability/state. This never changes the 360 Audio
+     * preference: the two features are separate by design.
      *
      * Cheap enough to call on every resume, which is how a trip to the system
      * panel and back gets noticed on devices whose Atmos switch isn't watchable.
      */
     fun refresh() {
-        _supported.value = hasAtmosHardware()
-        _enabledOnDevice.value = _supported.value && isAtmosOn()
-        if (!_enabledOnDevice.value && AppSettings.spatialAudio.value) {
-            AppSettings.setSpatialAudio(false)
-        }
+        val supportedNow = hasAtmosHardware()
+        _supported.value = supportedNow
+        _statusReadable.value = supportedNow && vendorToggle != null
+        _enabledOnDevice.value = supportedNow && isAtmosOn()
     }
 
     /**
@@ -146,32 +135,13 @@ object DolbyAtmos {
     }
 
     /**
-     * In order of how much the answer can be trusted: the OEM's own setting,
-     * then the platform spatializer. A device that offers neither has Atmos
-     * with no readable switch, so the user's choice stands rather than being
-     * silently overruled by a state we can't see.
+     * Read only a genuine OEM Dolby/Atmos switch. Android's generic Spatializer
+     * is deliberately not used as a proxy: spatial audio and Dolby Atmos are
+     * separate capabilities. When no Dolby-specific switch is readable, the
+     * device/output is still Atmos-capable but the active state is unknown, so
+     * we keep the best-known value true and expose [statusReadable] to the UI.
      */
-    private fun isAtmosOn(): Boolean {
-        vendorToggle?.let { return it.isOn() }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S_V2) {
-            spatializer?.let { return it.isEnabled && it.isAvailable }
-        }
-        return true
-    }
-
-    @RequiresApi(Build.VERSION_CODES.S_V2)
-    private fun watchSpatializer(context: Context) {
-        val current = spatializer ?: return
-        runCatching {
-            current.addOnSpatializerStateChangedListener(
-                context.mainExecutor,
-                object : Spatializer.OnSpatializerStateChangedListener {
-                    override fun onSpatializerEnabledChanged(spatializer: Spatializer, enabled: Boolean) = refresh()
-                    override fun onSpatializerAvailableChanged(spatializer: Spatializer, available: Boolean) = refresh()
-                },
-            )
-        }
-    }
+    private fun isAtmosOn(): Boolean = vendorToggle?.isOn() ?: true
 
     /**
      * OEMs keep the Atmos switch in their own Settings row rather than anywhere

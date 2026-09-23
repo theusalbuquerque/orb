@@ -7,32 +7,26 @@
     <string name="tab_search">Search</string>
     <string name="title_listen_now">Listen Now</string>
     <string name="title_settings">Settings</string>
-    <string name="title_account_scrobbling">Account &amp; Integrations</string>
-    <string name="sign_in_google">Sign in to Google</string>
+    <string name="title_account_integrations">Account &amp; Integrations</string>
+    <string name="sign_in_google">Continue with Google</string>
     <string name="settings_title">Settings</string>
-    <string name="settings_account_integrations">Account &amp; Integrations</string>
+    <string name="settings_account_integrations">Accounts &amp; Integrations</string>
     <string name="settings_signed_in">Signed in</string>
     <string name="settings_not_signed_in">Not signed in</string>
-    <string name="settings_audio_quality">Audio quality</string>
+    <string name="settings_audio_quality">Audio Quality</string>
     <string name="settings_lossless_hq">Lossless Audio</string>
     <string name="settings_on_wifi">On Wi-Fi</string>
-    <string name="settings_on_mobile_data">On mobile data</string>
+    <string name="settings_on_mobile_data">On Mobile Data</string>
     <string name="settings_playback">Playback</string>
     <string name="settings_crossfade">Crossfade</string>
-    <string name="settings_automix">Automix</string>
-    <string name="settings_automix_version">Automix version</string>
-    <string name="settings_automix_20">2.0</string>
-    <string name="settings_automix_25">2.5</string>
-    <string name="settings_automix_25_premium_preview">Premium preview · available on this account</string>
-    <string name="settings_automix_subtitle_on_version">Automix %1$s is on</string>
-    <string name="settings_skip_silence">Skip silence</string>
-    <string name="settings_spatial_audio">Spatial audio</string>
+<string name="settings_skip_silence">Skip silence</string>
+    <string name="settings_spatial_audio">360 Audio</string>
     <string name="settings_equalizer">Equalizer</string>
-    <string name="settings_nerd_stats">Show stats for nerds</string>
+    <string name="settings_nerd_stats">Stats for Nerds</string>
     <string name="settings_appearance">Appearance</string>
     <string name="settings_theme">Theme</string>
     <string name="settings_reduce_animation">Reduce animation</string>
-    <string name="settings_reduce_dynamic_blur">Reduce dynamic blur</string>
+    <string name="settings_reduce_dynamic_blur">Reduce blur</string>
     <string name="settings_fullscreen_art">Full-screen cover art</string>
     <string name="settings_animated_art">Animated cover art</string>
     <string name="settings_synced_lyrics">Synced lyrics</string>
@@ -43,9 +37,9 @@
     <string name="settings_clear_image_cache">Clear image cache</string>
     <string name="settings_miscellaneous">Miscellaneous</string>
     <string name="settings_swipe_next">Play next on swipe</string>
-    <string name="settings_stop_music_close">Stop music on close from recents</string>
+    <string name="settings_stop_music_close">Stop music when close</string>
     <string name="settings_hide_volume">Hide volume bar</string>
-    <string name="settings_header_audio_quality">Audio quality</string>
+    <string name="settings_header_audio_quality">Audio Quality</string>
     <string name="settings_footer_audio_quality">Each connection keeps its own ceiling, so Wi-Fi can stay on High while mobile data is capped. High costs about 77 MB/hr of data. The ceiling applies to every source, and outranks the lossless preference.</string>
     <string name="settings_lossless_subtitle_on">Turn on to experience lossless music quality. Restart Required!</string>
     <string name="settings_lossless_subtitle_mod">Orb will play Lossless audio whenever it is possible.</string>
@@ -53,14 +47,33 @@
     <string name="settings_badge_in_use">In use</string>
     <string name="settings_header_playback">Playback</string>
     <string name="settings_crossfade_subtitle">Blends one track into the next</string>
-    <string name="settings_automix_subtitle_on">Blends every transition, timed automatically from each track. Turn off if facing overheating or lag.</string>
-    <string name="settings_automix_subtitle_off">Times and blends transitions automatically, no slider needed. May not work as expected in low-mid range devices.</string>
+    <string name="settings_crossfade_disabled_automix">Disabled while Automix is on</string>
+    <string name="settings_automix">Automix</string>
+    <string name="settings_automix_subtitle">Beat-aware transitions adapted to tempo, key and energy</string>
+    <string name="settings_automix_subtitle_v20">Automix 2.0 · Stable public engine</string>
+    <string name="settings_automix_subtitle_v25">Automix 2.5 · Premium preview</string>
+    <string name="settings_automix_version">Automix version</string>
+    <string name="settings_automix_20">2.0</string>
+    <string name="settings_automix_25">2.5</string>
+    <string name="settings_automix_25_premium_preview">Premium preview · available on this account</string>
+    <string name="automix_beta_notice_title">Experimental Automix 2.0</string>
+    <string name="automix_beta_notice_message">Automix 2.0 analyzes audio locally to plan more natural transitions. It remains experimental and some tracks may not produce the ideal transition. If your phone gets unusually warm or Android starts stopping Orb automatically, disable Automix.</string>
+    <string name="automix_25_beta_notice_title">Automix 2.5 Premium preview</string>
+    <string name="automix_25_beta_notice_message">Automix 2.5 uses the new remote musical planner based on tempo, key, phrase structure, energy and vocal overlap. This preview is still experimental and is currently restricted to authorized accounts.</string>
     <string name="settings_skip_silence_subtitle">Trim gaps longer than a second</string>
-    <string name="settings_spatial_subtitle_unsupported">Needs a device with Dolby Atmos</string>
-    <string name="settings_spatial_subtitle_disabled">Turn on Dolby Atmos to use it</string>
-    <string name="settings_spatial_subtitle_enabled">Widens stereo tracks for a more immersive feel</string>
+    <string name="settings_spatial_subtitle_unsupported">360 Audio is processed by Orb and does not require Dolby Atmos.</string>
+    <string name="settings_spatial_subtitle_disabled">360 Audio is processed by Orb and works independently of Dolby Atmos.</string>
+    <string name="settings_spatial_subtitle_enabled">Orb spatial processing for a wider, more immersive stereo image. Works independently of Dolby Atmos.</string>
+    <string name="settings_dolby_atmos">Dolby Atmos</string>
+    <string name="settings_dolby_atmos_available">Available on this device/output. Its current state is managed by the system and cannot be read by Orb.</string>
+    <string name="settings_dolby_atmos_active">Active on this device/output. Managed by system audio settings.</string>
+    <string name="settings_dolby_atmos_disabled">Available, but currently off. Tap to open system audio settings.</string>
+    <string name="settings_dolby_atmos_unsupported">Not available on the current device/output.</string>
+    <string name="settings_dolby_atmos_on">On</string>
+    <string name="settings_dolby_atmos_off">Off</string>
+    <string name="settings_dolby_atmos_system">System</string>
     <string name="settings_equalizer_subtitle">Your device\'s system panel</string>
-    <string name="settings_nerd_stats_subtitle">Codec, bitrate and sample rate on the player</string>
+    <string name="settings_nerd_stats_subtitle">See source, codec, bitrate, sample rate, network quality and Automix analysis in real time.</string>
     <string name="settings_header_appearance">Appearance</string>
     <string name="settings_reduce_animation_subtitle">Freezes the main player\'s gradient instead of drifting</string>
     <string name="settings_reduce_blur_subtitle">Swaps frosted glass for solid fills across the app</string>
@@ -68,7 +81,7 @@
     <string name="settings_animated_art_subtitle">Plays the looping video some releases ship instead of a still sleeve</string>
     <string name="settings_synced_lyrics_subtitle">Lights up the words on the player as they\'re sung</string>
     <string name="settings_lyrics_empty">None — no lyrics will be fetched</string>
-    <string name="settings_header_storage">Storage</string>
+    <string name="settings_header_storage">System</string>
     <string name="settings_cache_limit_subtitle_high">Downloaded audio kept on disk for instant seeking and replays</string>
     <string name="settings_clear_song_cache_subtitle">Frees space used by downloaded audio</string>
     <string name="settings_clear_image_cache_subtitle">Frees space used by album artwork</string>
@@ -78,12 +91,12 @@
     <string name="settings_swipe_next_subtitle_off">Swiping a song adds it to the end of the queue when disabled</string>
     <string name="settings_stop_music_subtitle">Stops playback when swiped away from recent apps</string>
     <string name="settings_hide_volume_subtitle">Removes the volume slider from the main player</string>
-    <string name="banner_signin_title">Sign in to YouTube Music</string>
-    <string name="banner_signin_subtitle">Get personalized recommendations for you</string>
-    <string name="banner_signin_button">Sign in</string>
+    <string name="banner_signin_title">Continue with Google</string>
+    <string name="banner_signin_subtitle">One account for Orb, social features and YouTube Music</string>
+    <string name="banner_signin_button">Continue</string>
     <string name="quality_sheet_title">Audio quality</string>
     <string name="quality_sheet_subtitle">While on %s</string>
-    <string name="account_screen_title">Account &amp; Integrations</string>
+    <string name="account_screen_title">Accounts &amp; Integrations</string>
     <string name="account_sign_out">Sign out</string>
     <string name="account_not_signed_in">Not signed in</string>
     <string name="account_tap_signin">Tap to sign in with Google</string>
@@ -125,6 +138,10 @@
     <string name="library_local_music">Local Music</string>
     <string name="library_local_music_subtitle">Audio files on device</string>
     <string name="library_signin_description">Sign in to your Google account to see your YouTube Music liked songs, playlists and history.</string>
+    <string name="library_search_hint">Search albums or playlists</string>
+    <string name="library_search_open">Search library</string>
+    <string name="library_search_close">Close library search</string>
+    <string name="library_search_empty">No albums or playlists found in your library.</string>
     <string name="btn_sign_in">Sign in</string>
 
     <string name="screen_search">Search</string>
@@ -156,5 +173,90 @@
     <string name="type_artist">Artist</string>
 
     <string name="footer_made_by">Made by </string>
-    <string name="footer_backend">YouTube Music Backend, helped by </string>
+    <string name="software_update_title">Software Update</string>
+    <string name="software_update_message">Orb %s is available to download.</string>
+    <string name="download_now">Download Now</string>
+    <string name="remind_me_later">Remind Me Later</string>
+
+    <string name="settings_audio_sources">Audio &amp; Sources</string>
+    <string name="settings_audio_sources_subtitle">Quality, lossless audio and playback sources</string>
+    <string name="settings_lossless_limited">Limited</string>
+
+    <string name="settings_lossless_no_source">No lossless source is currently enabled. Enable TIDAL Lossless or add a compatible module source.</string>
+    <string name="settings_lossless_quality_limited">The current connection quality is set below High. This limit takes priority over the lossless preference.</string>
+    <string name="settings_lossless_footer">With lossless audio enabled, Orb prioritizes FLAC and Hi-Res from compatible sources. If a lossless version is unavailable, YouTube Music is used as the fallback.</string>
+
+
+    <string name="settings_header_audio_sources">Audio Sources</string>
+    <string name="settings_audio_sources_footer">Sources above YouTube Music are tried first. YouTube Music is Orb’s compatibility source and always remains enabled.</string>
+
+    <string name="source_module">Module Source</string>
+    <string name="source_module_detail">A Convx-compatible module index. Modules can search and stream from services such as TIDAL, Qobuz, Apple Music and more.</string>
+
+    <string name="source_tidal">TIDAL Lossless</string>
+    <string name="source_tidal_detail">Lossless FLAC from TIDAL. If a compatible lossless version is unavailable, YouTube Music is used as the fallback.</string>
+
+    <string name="source_youtube">YouTube Music</string>
+    <string name="source_youtube_detail">Orb’s full-catalog compatibility source. It remains available when other sources cannot provide a track.</string>
+
+    <string name="source_tag_lossless">Lossless</string>
+    <string name="source_tag_builtin">Built-in</string>
+    <string name="source_tag_full_catalogue">Full catalogue</string>
+    <string name="source_tag_always_active">Always active</string>
+    <string name="source_tag_plugins">Plugins</string>
+    <string name="source_tag_lossy">Lossy</string>
+
+    <string name="source_add_module">Add module source</string>
+    <string name="source_always_active">Always active</string>
+    <string name="source_finish_setup">Tap to finish setup</string>
+    <string name="source_checking">Checking…</string>
+    <string name="source_connected">Connected</string>
+    <string name="source_unreachable">Can’t reach it right now — %1$s</string>
+
+    <string name="source_editor_add">Add %1$s</string>
+    <string name="source_editor_link">Link</string>
+    <string name="source_editor_name_optional">Name (optional)</string>
+    <string name="source_editor_module_help">Paste the URL of a Convx-compatible module index. The index lists JS plugins that can search and stream from services such as TIDAL, Qobuz and Apple Music.</string>
+    <string name="source_editor_remove">Remove this source</string>
+    <string name="source_editor_test">Test</string>
+    <string name="source_editor_testing">Testing…</string>
+    <string name="source_editor_save">Save</string>
+    <string name="source_editor_cancel">Cancel</string>
+
+
+
+    <string name="quality_low_hourly">29 MB/hr</string>
+    <string name="quality_medium_hourly">58 MB/hr</string>
+    <string name="quality_high_hourly">77 MB/hr with Opus; FLAC/Hi-Res may use more</string>
+
+    <string name="quality_selected">Selected</string>
+    <string name="youtube_music_compatibility_title">YouTube Music</string>
+    <string name="youtube_music_compatibility_message">Your Google account is already connected to Orb. Finish YouTube Music setup here only if Orb needs browser access, or use this screen to choose a different YouTube channel. This does not create another Orb account.</string>
+    <string name="account_google_account">Google account</string>
+    <string name="account_connections_header">Integrations</string>
+    <string name="account_orb_profile">Orb profile</string>
+    <string name="account_orb_profile_subtitle">The username your friends will use to find you</string>
+    <string name="account_youtube_music">YouTube Music</string>
+    <string name="account_youtube_same_google">Uses the same Google account</string>
+    <string name="account_youtube_finish_setup">Choose the YouTube Music channel Orb will use</string>
+    <string name="account_channel_switch_footer">Tap YouTube Music above to choose or switch the YouTube channel used by Orb.</string>
+    <string name="youtube_channel_picker_title">YouTube channel</string>
+    <string name="youtube_channel_picker_message">Choose which YouTube profile or channel Orb should use. This does not change your Google or Orb account.</string>
+    <string name="youtube_channel_picker_current">In use</string>
+    <string name="youtube_channel_picker_reconnect">Reconnect YouTube</string>
+    <string name="youtube_channel_picker_cancel">Cancel</string>
+    <string name="settings_cache_limit_subtitle_large">Up to %1$s of downloaded audio can be kept on this device — this may use a significant part of your free storage.</string>
+    <string name="settings_song_cache_cleared">Song cache cleared</string>
+    <string name="account_orb_create_username">Create a username</string>
+    <string name="account_username_dialog_title">Create your Orb username</string>
+    <string name="account_username_dialog_description">Choose a unique username so friends can find you on Orb.</string>
+    <string name="account_username_field_label">Username</string>
+    <string name="account_username_rules">3–30 lowercase letters, numbers, dots or underscores.</string>
+    <string name="account_username_save_error">That username could not be saved. Try another one.</string>
+    <string name="account_username_cancel">Cancel</string>
+    <string name="account_username_create">Create</string>
+    <string name="now_playing_instrumental">Instrumental</string>
+    <string name="now_playing_lyrics_not_available">Lyrics aren’t available for this song</string>
+    <string name="settings_prioritize_album_versions">Prioritize album versions</string>
+    <string name="settings_prioritize_album_versions_subtitle">Prefer official album recordings over single or remix editions when the same song is available.</string>
 </resources>

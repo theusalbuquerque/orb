@@ -32,6 +32,7 @@ object CanvasRepository {
 
     private const val TAG = "CanvasRepository"
     private const val CACHE_SIZE = 64
+    private const val MISS_RETRY_MS = 10L * 60L * 1000L
 
     /**
      * A settled answer for one track or release.
@@ -42,7 +43,7 @@ object CanvasRepository {
      * it resolves a beat after the track starts. A miss reached without it is
      * therefore provisional; everything else is final.
      */
-    private class Entry(val artwork: CanvasArtwork?, val withAlbum: Boolean)
+    private class Entry(val artwork: CanvasArtwork?, val withAlbum: Boolean, val resolvedAtMs: Long)
 
     private val cache = object : LinkedHashMap<String, Entry>(CACHE_SIZE, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Entry>) =
@@ -126,10 +127,10 @@ object CanvasRepository {
         lookUp: () -> CanvasArtwork?,
     ): CanvasArtwork? = lock.withLock {
         synchronized(cache) {
-            cache[key]?.let { if (it.reusable(withAlbum)) return@withLock it.artwork }
+            cache[key]?.let { if (it.reusable(withAlbum, System.currentTimeMillis())) return@withLock it.artwork }
         }
         val found = withContext(Dispatchers.IO) { lookUp() }
-        synchronized(cache) { cache[key] = Entry(found, withAlbum) }
+        synchronized(cache) { cache[key] = Entry(found, withAlbum, System.currentTimeMillis()) }
         found
     }
 
@@ -140,8 +141,16 @@ object CanvasRepository {
      * too, unless it was reached blind and there is now an album name to try,
      * which is the one case worth spending a second round of requests on.
      */
-    private fun Entry.reusable(withAlbum: Boolean): Boolean =
-        artwork != null || this.withAlbum || !withAlbum
+    private fun Entry.reusable(withAlbum: Boolean, nowMs: Long): Boolean {
+        if (artwork != null) return true
+        val albumKnowledgeStillMatches = this.withAlbum || !withAlbum
+        if (!albumKnowledgeStillMatches) return false
+        // A miss may be a transient Apple/Tidal/community failure. Keep the
+        // negative cache long enough to avoid hammering providers while users
+        // skip tracks, but never let one temporary outage disable animated
+        // artwork for the rest of the process lifetime.
+        return nowMs - resolvedAtMs < MISS_RETRY_MS
+    }
 
     /**
      * The first source that answers with something that survives [accept].

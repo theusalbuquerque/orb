@@ -40,13 +40,14 @@ object LyricsPlus {
         artist: String,
         durationMs: Long,
         album: String? = null,
+        isrc: String? = null,
     ): List<LyricLine>? = coroutineScope {
         val hosts = lastGood.get()
             ?.let { listOf(it) + MIRRORS.filterNot { mirror -> mirror == it } }
             ?: MIRRORS
 
         val pending = hosts.map { host ->
-            host to async(Dispatchers.IO) { fetch(host, title, artist, durationMs, album) }
+            host to async(Dispatchers.IO) { fetch(host, title, artist, durationMs, album, isrc) }
         }.toMutableList()
 
         // Take the first mirror to answer with something usable rather than
@@ -75,6 +76,7 @@ object LyricsPlus {
         artist: String,
         durationMs: Long,
         album: String?,
+        isrc: String?,
     ): List<LyricLine>? = withContext(Dispatchers.IO) {
         val url = "$host/v2/lyrics/get".toHttpUrl().newBuilder()
             .addQueryParameter("title", title)
@@ -83,6 +85,7 @@ object LyricsPlus {
                 val seconds = durationMs / 1000
                 if (seconds > 0) addQueryParameter("duration", seconds.toString())
                 if (!album.isNullOrBlank()) addQueryParameter("album", album)
+                if (!isrc.isNullOrBlank()) addQueryParameter("isrc", isrc)
             }
             .build()
 

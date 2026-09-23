@@ -8,15 +8,13 @@ import java.nio.ByteOrder
 import kotlin.math.roundToInt
 
 /**
- * Cheap stand-in for "spatial audio": widens the mid/side image and mixes in
- * a short, low-passed cross-feed between channels — the same trick most
- * consumer virtual-surround plugins use. O(1) per sample, no FFT or
- * convolution, so it costs nothing worth measuring on a phone CPU.
+ * Orb 360 Audio: widens the mid/side image and mixes in a short, low-passed
+ * cross-feed between channels to create a broader stereo field. O(1) per
+ * sample, with no FFT or convolution, so it stays inexpensive on a phone CPU.
  *
- * Exists because the platform [android.media.audiofx.Virtualizer] produced no
- * audible difference on the reference device — likely swallowed by the OEM's
- * own audio effect chain — so this runs inside ExoPlayer's own audio
- * processor pipeline instead, where nothing else can intercept it.
+ * This processor is not Dolby Atmos and does not depend on Atmos support. It
+ * runs after decoding inside ExoPlayer's own processor pipeline, so compatible
+ * stereo AAC, Opus and lossless sources can all use the same Orb DSP.
  */
 @UnstableApi
 class SpatialAudioProcessor : BaseAudioProcessor() {

@@ -160,7 +160,7 @@ class DownloadService : Service() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_logo)
+            .setSmallIcon(R.drawable.ic_notification_logo)
             .setContentTitle(song?.title ?: "Downloading")
             .setContentText(
                 when {

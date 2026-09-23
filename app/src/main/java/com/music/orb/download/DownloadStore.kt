@@ -1,87 +1,47 @@
 package com.music.orb.download
 
-import android.content.ContentValues
+import android.content.ContentUris
 import android.content.Context
-import android.media.MediaScannerConnection
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import com.music.orb.data.DebugLog as Log
-import androidx.annotation.RequiresApi
 import com.music.orb.data.model.Song
 import java.io.File
 import java.io.OutputStream
+import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Where a downloaded track goes, and how it gets there.
+ * App-managed offline storage for Orb downloads.
  *
- * The destination is the device's own Music folder, in a `BitChord`
- * subfolder — somewhere the file manager lists, other players can open, and a
- * user can back up or delete without going through this app. That choice is
- * what makes this class necessary at all: an app-private directory would be
- * four lines of [File], but a shared one crosses the scoped-storage line and
- * the two sides of that line have nothing in common.
+ * New downloads intentionally do NOT go into the public Music/BitChord folder.
+ * They live in Orb's app-specific external files directory instead, so Android's
+ * media scanner and other players do not treat them as ordinary user files and
+ * Orb can always remove them without a MediaStore ownership/permission round-trip.
  *
- * It goes through the audio collection rather than Downloads because that is
- * where audio belongs and where every other player on the device looks. What
- * first ruled Downloads out was narrower and is worth keeping on the record:
- * the files were `.webm` then — a container extension Android's own mime table
- * ties to video regardless of what MIME type this class declares for it — and a
- * Gallery app crawling Downloads for video-looking files does not care what a
- * column says otherwise. Nothing writes `.webm` any more (see [storable] and
- * `StreamResolver.resolveForDownload`), so that particular trap is behind us;
- * the conclusion it led to is still the right one.
- *
- *  - **API 29+** goes through [MediaStore]. There is no filesystem path to
- *    write to; the store mints a row, hands back a content uri, and the file
- *    exists at a location it chooses. `IS_PENDING` keeps the row invisible to
- *    everything else until the bytes are all there, so a cancelled download is
- *    never a half-file somebody can find and play.
- *  - **API 26–28** is a real path and a runtime permission. The file is written
- *    beside its final name with a `.part` suffix and renamed on completion,
- *    which is the same guarantee `IS_PENDING` gives for free above, and the
- *    media scanner is told afterwards or the file stays invisible to everything
- *    that reads the index rather than the disk.
- *
- * Neither side writes tags — this class only ever copies the bytes the server
- * on the other end sent. [MediaTagger] rewrites the finished file afterwards to
- * add them; the filename below is what every downloaded track carries
- * regardless of whether that rewrite finds a layout it recognises.
+ * Older builds did publish files into Music/BitChord. Legacy helpers are kept
+ * only so "Remove all downloads" can clean those files up after an update.
  */
 object DownloadStore {
 
     private const val TAG = "BitChord"
 
-    /** The subfolder of Music that everything lands in. */
+    /** Historical public subfolder name, retained for legacy cleanup only. */
     const val FOLDER = "BitChord"
 
-    private val relativePath = "${Environment.DIRECTORY_MUSIC}/$FOLDER"
+    private const val MANAGED_FOLDER = "offline"
 
-    /**
-     * Whether saving needs `WRITE_EXTERNAL_STORAGE` asked for at runtime.
-     *
-     * Only below API 29. From there on the app writes through the media store,
-     * which grants access to rows it created and needs no permission for them —
-     * and the permission it would ask for isn't grantable anyway.
-     *
-     * Every version check in this file is written out inline rather than
-     * routed through this, deliberately: lint reads an inline `SDK_INT`
-     * comparison as a guard around the API-29 calls beside it and does not
-     * read a boolean property the same way, so hiding the check behind a name
-     * costs a `NewApi` error on the release build.
-     */
-    fun needsLegacyPermission(): Boolean = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
+    /** Files already opened successfully by Android's extractor this process. */
+    private val validatedAudioUris = ConcurrentHashMap.newKeySet<String>()
+
+    /** App-specific storage never needs WRITE_EXTERNAL_STORAGE. */
+    fun needsLegacyPermission(): Boolean = false
 
     // ---- Naming -------------------------------------------------------------
 
-    /**
-     * What the file is called: `Artist - Title.ext`.
-     *
-     * Artist first because a Music folder is sorted by name and nothing
-     * else — no tags to group by — so leading with the artist is the only thing
-     * that puts an album back together in the listing.
-     */
     fun fileNameFor(song: Song, extension: String): String {
         val artist = sanitise(song.artist)
         val title = sanitise(song.title)
@@ -93,10 +53,6 @@ object DownloadStore {
         return "${stem.take(MAX_STEM_CHARS).trimEnd()}.$extension"
     }
 
-    /**
-     * Everything a FAT32 volume, the media store or a shell would each object
-     * to for its own reasons, plus the whitespace that survives them.
-     */
     private fun sanitise(raw: String): String = raw
         .replace(ILLEGAL, " ")
         .replace(WHITESPACE, " ")
@@ -105,187 +61,206 @@ object DownloadStore {
 
     private val ILLEGAL = Regex("""[\\/:*?"<>|\x00-\x1F]""")
     private val WHITESPACE = Regex("""\s+""")
-
-    /** Long enough for anything real, short of the 255-byte filename ceiling. */
     private const val MAX_STEM_CHARS = 120
 
-    /** What a file of some codec is called and what the store is told it is. */
     class Storable(val extension: String, val mimeType: String)
 
-    /**
-     * How to file a track of [codec], or null if this device won't have it.
-     *
-     * A source that can serve lossless does not thereby serve something Android
-     * will keep: the media store's audio collection accepts a closed list of
-     * MIME types, and one it doesn't recognise is refused outright at [begin] —
-     * which is a download that cannot start rather than one that sounds worse
-     * than hoped. Anything not answered for here falls the caller back to
-     * YouTube's AAC, so an unfamiliar codec costs quality and not the download.
-     *
-     * Kept as a table rather than derived from the codec string because two of
-     * these are not the identity mapping they look like. WAV's registered type
-     * is `audio/x-wav` on Android, and ALAC ships inside an MP4 container, so an
-     * ALAC file is an `.m4a` as far as both the store and [Mp4Tagger] are
-     * concerned — the tagger works on the box tree and never asks what the
-     * samples inside are.
-     */
     fun storable(codec: String?): Storable? = when (codec?.lowercase()?.trim()) {
         "flac", "x-flac" -> Storable("flac", "audio/flac")
         "wav", "x-wav", "wave" -> Storable("wav", "audio/x-wav")
-        "alac", "m4a", "mp4" -> Storable("m4a", "audio/mp4")
+        "alac", "aac", "mp4a", "m4a", "mp4" -> Storable("m4a", "audio/mp4")
         else -> null
     }
 
-    // ---- Lookup -------------------------------------------------------------
+    // ---- Managed location ---------------------------------------------------
 
-    /**
-     * The uri of a file already saved under this name, or null.
-     *
-     * Worth asking before every download because the media store does not
-     * refuse a duplicate — it silently renames it to `… (1)`, and a user who
-     * taps download twice gets two copies rather than being told they already
-     * have one.
-     */
-    fun existing(context: Context, name: String): Uri? =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            mediaStoreEntry(context, name)
-        } else {
-            legacyFile(name).takeIf { it.exists() }?.let(Uri::fromFile)
-        }
+    private fun managedRoot(context: Context): File {
+        val base = context.getExternalFilesDir(Environment.DIRECTORY_MUSIC)
+            ?: File(context.filesDir, "music")
+        return File(base, MANAGED_FOLDER)
+    }
 
-    @RequiresApi(Build.VERSION_CODES.Q)
-    private fun mediaStoreEntry(context: Context, name: String): Uri? = runCatching {
-        context.contentResolver.query(
-            MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
-            arrayOf(MediaStore.MediaColumns._ID),
-            "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND " +
-                "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?",
-            arrayOf(name, "%$FOLDER%"),
-            null,
-        )?.use { cursor ->
-            if (!cursor.moveToFirst()) return@use null
-            MediaStore.Audio.Media.EXTERNAL_CONTENT_URI.buildUpon()
-                .appendPath(cursor.getLong(0).toString())
-                .build()
-        }
-    }.onFailure { Log.w(TAG, "media store lookup failed for $name: ${it.message}") }.getOrNull()
+    private fun managedFile(context: Context, name: String): File =
+        File(managedRoot(context), name)
 
-    /**
-     * Whether [uri] still names a file that is there.
-     *
-     * The record of what has been downloaded is kept by this app, but the files
-     * are not this app's to keep: they sit in a folder built for the user to
-     * manage, and one deleted from a file manager leaves the record behind
-     * claiming a download that no longer exists. Cheap to ask, and the answer
-     * is what stops the menu offering to delete nothing.
-     */
+    /** URI of a completed app-managed file with this name, if valid. */
+    fun existing(context: Context, name: String): Uri? {
+        val candidate = managedFile(context, name)
+        if (!candidate.exists() || !candidate.isFile) return null
+        val uri = Uri.fromFile(candidate)
+        if (isPlayableAudio(context, uri)) return uri
+        Log.w(TAG, "$name exists in managed storage but is not playable; deleting it")
+        delete(context, uri)
+        return null
+    }
+
     fun exists(context: Context, uri: Uri): Boolean = runCatching {
         if (uri.scheme == "file") return uri.path?.let { File(it).exists() } == true
         context.contentResolver.openFileDescriptor(uri, "r")?.use { true } == true
     }.getOrDefault(false)
 
+    fun isPlayableAudio(context: Context, uri: Uri, force: Boolean = false): Boolean {
+        val key = uri.toString()
+        if (!force && key in validatedAudioUris) return true
+
+        val valid = runCatching {
+            val extractor = MediaExtractor()
+            try {
+                if (uri.scheme == "file") {
+                    extractor.setDataSource(requireNotNull(uri.path))
+                } else {
+                    extractor.setDataSource(context, uri, null)
+                }
+                (0 until extractor.trackCount).any { index ->
+                    extractor.getTrackFormat(index)
+                        .getString(MediaFormat.KEY_MIME)
+                        ?.startsWith("audio/", ignoreCase = true) == true
+                }
+            } finally {
+                extractor.release()
+            }
+        }.onFailure {
+            Log.w(TAG, "audio validation failed for $uri: ${it.message}")
+        }.getOrDefault(false)
+
+        if (valid) validatedAudioUris.add(key) else validatedAudioUris.remove(key)
+        return valid
+    }
+
     fun delete(context: Context, uri: Uri): Boolean = runCatching {
+        validatedAudioUris.remove(uri.toString())
         if (uri.scheme == "file") {
-            uri.path?.let { File(it).delete() } == true
+            val file = uri.path?.let(::File) ?: return@runCatching false
+            !file.exists() || file.delete()
         } else {
-            context.contentResolver.delete(uri, null, null) > 0
+            context.contentResolver.delete(uri, null, null) > 0 || !exists(context, uri)
         }
     }.onFailure { Log.w(TAG, "could not delete $uri: ${it.message}") }.getOrDefault(false)
 
     // ---- Writing ------------------------------------------------------------
 
-    /**
-     * A destination that exists but is not yet a file anyone else can see.
-     *
-     * Every path out of here is either [commit] or [abort]; there is no third
-     * option, because the thing being protected against is a partial file
-     * surviving a failure and looking like a whole one.
-     */
     class Pending internal constructor(
-        private val context: Context,
         val uri: Uri,
         val name: String,
-        /** Set on the legacy path only: the `.part` file being written. */
-        private val part: File?,
-        /** Set on the legacy path only: what [part] is renamed to. */
-        private val target: File?,
+        private val part: File,
+        private val target: File,
     ) {
-        fun openStream(): OutputStream =
-            part?.outputStream()
-                ?: context.contentResolver.openOutputStream(uri)
-                ?: error("Could not open $name for writing")
+        fun openStream(): OutputStream = part.outputStream()
 
-        /** @return the uri the finished file can be reached at. */
         fun commit(): Uri {
-            if (part != null && target != null) {
-                if (!part.renameTo(target)) error("Could not finish writing $name")
-                // Nothing indexes a file that simply appeared; without this it
-                // is on disk and invisible to every app that lists media.
-                MediaScannerConnection.scanFile(
-                    context,
-                    arrayOf(target.absolutePath),
-                    null,
-                    null,
-                )
-                return Uri.fromFile(target)
+            if (target.exists() && !target.delete()) {
+                error("Could not replace existing $name")
             }
-            context.contentResolver.update(
-                uri,
-                ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
-                null,
-                null,
-            )
-            return uri
+            if (!part.renameTo(target)) error("Could not finish writing $name")
+            return Uri.fromFile(target)
         }
 
         fun abort() {
-            part?.delete()
-            if (part == null) runCatching { context.contentResolver.delete(uri, null, null) }
+            part.delete()
         }
+    }
+
+    /** Reserve a private, app-managed destination for one completed offline track. */
+    fun begin(context: Context, name: String, mimeType: String): Pending {
+        // mimeType is intentionally retained in the API: callers still resolve and
+        // validate a real storable audio format before we reach this layer.
+        @Suppress("UNUSED_VARIABLE")
+        val validatedMime = mimeType
+
+        val folder = managedRoot(context)
+        if (!folder.exists() && !folder.mkdirs()) {
+            error("Could not create Orb offline storage")
+        }
+        val target = managedFile(context, name)
+        val part = File(folder, "$name.part")
+        if (part.exists()) part.delete()
+        return Pending(Uri.fromFile(target), name, part, target)
     }
 
     /**
-     * Reserve [name] and return somewhere to write it.
-     *
-     * @throws IllegalStateException if the folder or the store row can't be
-     *   made — a failure worth surfacing, since every one of them means the
-     *   download cannot start rather than that it might not finish.
+     * Removes every file from Orb's current app-managed download directory,
+     * including interrupted .part files and orphaned files no longer in prefs.
      */
-    fun begin(context: Context, name: String, mimeType: String): Pending {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val values = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-                put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
-                put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
-                put(MediaStore.MediaColumns.IS_PENDING, 1)
+    fun deleteAllManaged(context: Context): Int {
+        val root = managedRoot(context)
+        if (!root.exists()) return 0
+        var removed = 0
+        root.walkBottomUp().forEach { file ->
+            if (file == root) return@forEach
+            if (file.isFile) {
+                validatedAudioUris.remove(Uri.fromFile(file).toString())
+                if (file.delete()) removed++
+            } else if (file.isDirectory) {
+                file.delete()
             }
-            // A MIME type the audio collection doesn't recognise is not a null
-            // return but an IllegalArgumentException thrown from inside the
-            // resolver, several frames away from anything that names the
-            // download it belongs to. Every type written here came from
-            // [storable] or from the stream resolver, so landing in this branch
-            // means one of those two is wrong about this device — worth saying
-            // in those words the first time it happens again.
-            val uri = runCatching {
-                context.contentResolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values)
-            }.getOrElse { cause ->
-                Log.w(TAG, "the media store refused $mimeType for $name: ${cause.message}")
-                error("Android won't store ${name.substringAfterLast('.', mimeType)} files in Music")
-            } ?: error("Could not create $name in Music")
-            return Pending(context, uri, name, part = null, target = null)
         }
-
-        val target = legacyFile(name)
-        val folder = target.parentFile ?: error("No Music folder on this device")
-        if (!folder.exists() && !folder.mkdirs()) error("Could not create ${folder.path}")
-        val part = File(folder, "$name.part")
-        part.delete()
-        return Pending(context, Uri.fromFile(target), name, part = part, target = target)
+        root.delete()
+        return removed
     }
 
-    @Suppress("DEPRECATION")
-    private fun legacyFile(name: String) = File(
-        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC), FOLDER),
-        name,
-    )
+    /**
+     * Cleans files created by older Orb builds in the public Music/BitChord
+     * folder. These are no longer used for new downloads.
+     */
+    fun deleteAllLegacyPublic(context: Context): Int {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            deleteLegacyMediaStoreRows(context)
+        } else {
+            @Suppress("DEPRECATION")
+            val folder = File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC),
+                FOLDER,
+            )
+            if (!folder.exists()) 0 else {
+                var removed = 0
+                folder.walkBottomUp().forEach { file ->
+                    if (file == folder) return@forEach
+                    if (file.isFile && file.delete()) removed++
+                    else if (file.isDirectory) file.delete()
+                }
+                folder.delete()
+                removed
+            }
+        }
+    }
+
+    private fun deleteLegacyMediaStoreRows(context: Context): Int {
+        var removed = 0
+        runCatching {
+            val resolver = context.contentResolver
+            val projection = arrayOf(
+                MediaStore.Audio.Media._ID,
+                MediaStore.MediaColumns.RELATIVE_PATH,
+            )
+            val selection = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
+            val args = arrayOf("%$FOLDER%")
+            val ids = mutableListOf<Long>()
+            resolver.query(
+                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                projection,
+                selection,
+                args,
+                null,
+            )?.use { cursor ->
+                val idCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
+                val pathCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.RELATIVE_PATH)
+                while (cursor.moveToNext()) {
+                    val relative = cursor.getString(pathCol).orEmpty()
+                    // Avoid deleting an unrelated folder merely because its name
+                    // contains the same letters; require a real BitChord path segment.
+                    val segments = relative.replace('\\', '/').split('/').filter { it.isNotBlank() }
+                    if (segments.any { it.equals(FOLDER, ignoreCase = true) }) {
+                        ids += cursor.getLong(idCol)
+                    }
+                }
+            }
+            ids.forEach { id ->
+                val uri = ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id)
+                if (delete(context, uri)) removed++
+            }
+        }.onFailure {
+            Log.w(TAG, "legacy public download cleanup failed: ${it.message}")
+        }
+        return removed
+    }
 }

@@ -28,7 +28,7 @@ import dev.chrisbanes.haze.materials.HazeMaterials
  * purpose: the ramp below spends most of its run at a blur too small to see,
  * and that long invisible lead-in is what hides where the layer begins.
  */
-private val FADE_HEIGHT = 180.dp
+private val FADE_HEIGHT = 80.dp
 
 /** Taller once the mini player is stacked on top of the tab bar. */
 private val FADE_HEIGHT_WITH_MINI_PLAYER = 248.dp

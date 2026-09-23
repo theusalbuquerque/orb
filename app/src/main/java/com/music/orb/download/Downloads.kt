@@ -12,6 +12,7 @@ import com.music.orb.data.model.Song
 import com.music.orb.data.sources.SourceResolver
 import com.music.orb.data.sources.SourceStream
 import com.music.orb.data.sources.TrackMatcher
+import com.music.orb.playback.PlaybackStreamStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -51,10 +52,9 @@ sealed interface DownloadState {
  *    without a media-store query per row, and the only way it knows *which*
  *    file a track corresponds to when asked to delete it.
  *
- * [saved] is a claim about a folder this app does not own. The user is expected
- * to manage Downloads with a file manager, so an entry here can outlive the
- * file it names — which is why every read of it goes through [savedUri], and
- * why that verifies before it answers.
+ * [saved] points at Orb-managed offline files. Older installs may still carry
+ * MediaStore URIs from the former public Music/BitChord location, so every read
+ * still goes through [savedUri] and verifies the file before answering.
  */
 object Downloads {
 
@@ -157,22 +157,154 @@ object Downloads {
     suspend fun savedUri(context: Context, videoId: String): Uri? = withContext(Dispatchers.IO) {
         val recorded = _saved.value[videoId] ?: return@withContext null
         val uri = recorded.toUri()
-        if (DownloadStore.exists(context, uri)) return@withContext uri
-        Log.d(TAG, "$videoId was downloaded but the file is gone; forgetting it")
-        forget(videoId)
+        if (DownloadStore.exists(context, uri) && DownloadStore.isPlayableAudio(context, uri)) {
+            return@withContext uri
+        }
+        Log.w(TAG, "$videoId points to a missing or invalid download; removing the stale file/record")
+        DownloadStore.delete(context, uri)
+        forgetUri(recorded)
         null
     }
 
-    /** Delete the file saved for [videoId] and forget it. */
+    /** Delete the file saved for [videoId] and forget every alias that points to it. */
     suspend fun delete(context: Context, videoId: String): Boolean = withContext(Dispatchers.IO) {
-        val uri = _saved.value[videoId]?.toUri() ?: return@withContext false
-        val deleted = DownloadStore.delete(context, uri)
-        forget(videoId)
+        val uriText = _saved.value[videoId] ?: return@withContext false
+        val deleted = deleteBestEffort(context, uriText.toUri())
+        if (deleted) forgetUri(uriText)
         deleted
+    }
+
+    /**
+     * Delete a downloaded-library row even when it predates Orb's saved map.
+     * The scanned [Song.localUri] is used only by the Downloads page host;
+     * callers elsewhere never expose this operation for arbitrary local music.
+     */
+    suspend fun delete(context: Context, song: Song): Boolean = withContext(Dispatchers.IO) {
+        val candidateUris = linkedSetOf<String>()
+        _saved.value[song.videoId]?.let(candidateUris::add)
+        song.localUri?.takeIf { it.isNotBlank() }?.let(candidateUris::add)
+        song.localPath?.takeIf { it.isNotBlank() }?.let { candidateUris.add(Uri.fromFile(java.io.File(it)).toString()) }
+        _savedMetadata.value.values
+            .asSequence()
+            .filter { meta ->
+                meta.uri.isNotBlank() && (
+                    meta.videoId == song.videoId ||
+                    meta.uri == song.localUri ||
+                    (meta.title.equals(song.title, ignoreCase = true) &&
+                        meta.artist.equals(song.artist, ignoreCase = true))
+                )
+            }
+            .map { it.uri }
+            .forEach(candidateUris::add)
+
+        val deletedUri = candidateUris.firstOrNull { uriText ->
+            deleteBestEffort(context, uriText.toUri())
+        } ?: return@withContext false
+
+        candidateUris.forEach(::forgetUri)
+        if (_saved.value.containsKey(song.videoId)) forget(song.videoId)
+        deletedUri.let { removed ->
+            val cleanedMeta = _savedMetadata.value.filterValues { meta ->
+                meta.uri != removed && !(meta.title.equals(song.title, ignoreCase = true) &&
+                    meta.artist.equals(song.artist, ignoreCase = true))
+            }
+            if (cleanedMeta.size != _savedMetadata.value.size) {
+                record(_saved.value, cleanedMeta)
+            }
+        }
+        true
+    }
+
+    /**
+     * Cancels the whole queue and removes every completed Orb download we can
+     * identify, then sweeps both the current app-managed folder and the legacy
+     * public Music/BitChord folder for orphan files that are not in prefs.
+     *
+     * Saved state is cleared even when a stale URI is already gone, so the UI
+     * cannot remain stuck showing a download that no longer exists.
+     */
+    suspend fun deleteAll(context: Context): Int = withContext(Dispatchers.IO) {
+        val running = synchronized(lock) {
+            pending.clear()
+            runningId = null
+            runningJob.also { runningJob = null }
+        }
+        running?.cancel()
+        _active.value = emptyMap()
+
+        val recordedUris = (_saved.value.values + _savedMetadata.value.values.map { it.uri })
+            .filter { it.isNotBlank() }
+            .distinct()
+        var removed = 0
+        recordedUris.forEach { uriText ->
+            if (deleteBestEffort(context, uriText.toUri())) removed++
+        }
+
+        // Sweep after the recorded URIs: this catches interrupted/orphaned new
+        // downloads and all files left by the old public-storage implementation.
+        removed += DownloadStore.deleteAllManaged(context)
+        removed += DownloadStore.deleteAllLegacyPublic(context)
+
+        record(emptyMap(), emptyMap())
+        removed
+    }
+
+    private fun deleteBestEffort(context: Context, uri: Uri): Boolean {
+        if (DownloadStore.delete(context, uri)) return true
+
+        if (uri.scheme == "file") {
+            return uri.path?.let { java.io.File(it).delete() } == true
+        }
+
+        if (uri.scheme == "content") {
+            runCatching {
+                context.contentResolver.query(
+                    uri,
+                    arrayOf(
+                        android.provider.MediaStore.MediaColumns.DISPLAY_NAME,
+                        android.provider.MediaStore.MediaColumns.RELATIVE_PATH,
+                    ),
+                    null,
+                    null,
+                    null,
+                )?.use { cursor ->
+                    if (!cursor.moveToFirst()) return@use false
+                    val name = cursor.getString(0) ?: return@use false
+                    val relativePath = cursor.getString(1) ?: ""
+                    context.contentResolver.query(
+                        android.provider.MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                        arrayOf(android.provider.MediaStore.Audio.Media._ID),
+                        "${android.provider.MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${android.provider.MediaStore.MediaColumns.RELATIVE_PATH} = ?",
+                        arrayOf(name, relativePath),
+                        null,
+                    )?.use { matches ->
+                        while (matches.moveToNext()) {
+                            val id = matches.getLong(0)
+                            val candidate = android.content.ContentUris.withAppendedId(
+                                android.provider.MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                                id,
+                            )
+                            if (DownloadStore.delete(context, candidate)) return@use true
+                        }
+                        false
+                    } == true
+                } ?: false
+            }.onFailure {
+                Log.w(TAG, "best-effort delete fallback failed for $uri: ${it.message}")
+            }.getOrDefault(false).let { if (it) return true }
+        }
+
+        return false
     }
 
     private fun forget(videoId: String) {
         record(_saved.value - videoId, _savedMetadata.value - videoId)
+    }
+
+    private fun forgetUri(uriText: String) {
+        val saved = _saved.value.filterValues { it != uriText }
+        val metadata = _savedMetadata.value.filterValues { it.uri != uriText }
+        record(saved, metadata)
     }
 
     /**
@@ -237,7 +369,8 @@ object Downloads {
 
         for ((videoId, meta) in metaMap) {
             val uri = meta.uri.toUri()
-            if (DownloadStore.exists(context, uri)) {
+            val valid = DownloadStore.exists(context, uri) && DownloadStore.isPlayableAudio(context, uri)
+            if (valid) {
                 if (seenUris.add(meta.uri)) {
                     result.add(
                         Song(
@@ -252,7 +385,9 @@ object Downloads {
                     )
                 }
             } else {
-                forget(videoId)
+                Log.w(TAG, "discarding invalid offline file for $videoId")
+                DownloadStore.delete(context, uri)
+                forgetUri(meta.uri)
             }
         }
         result
@@ -322,7 +457,7 @@ object Downloads {
             // title is where "(Official Video)" lives, and that would be baked
             // into a filename this app never gets to correct.
             val track = runCatching { YtMusicRepository.resolveAudio(song) }.getOrDefault(song)
-            val route = routeFor(track)
+            val route = routeFor(track, askedVideoId = song.videoId)
             Log.d(TAG, "downloading $id as .${route.extension} (${route.describe})")
 
             val name = DownloadStore.fileNameFor(track, route.extension)
@@ -330,7 +465,7 @@ object Downloads {
             // adopt it rather than writing a second copy beside it.
             val alreadyThere = DownloadStore.existing(context, name)
             if (alreadyThere != null) {
-                Log.d(TAG, "$name is already in Music; adopting it")
+                Log.d(TAG, "$name is already in Orb offline storage; adopting it")
                 remember(song, track, alreadyThere)
                 clear(id)
                 return@withContext
@@ -346,7 +481,23 @@ object Downloads {
             }
             val savedUri = destination.commit()
             pending = null
+
+            // Never publish a file merely because every byte arrived. The
+            // playback stream and the offline container are separate concerns:
+            // a transport can be perfectly playable while streaming and still
+            // not be a standalone file Android can reopen. Verify the raw file,
+            // tag it, then verify once more because metadata rewriting must not
+            // be allowed to turn a good download into a broken one.
+            if (!DownloadStore.isPlayableAudio(context, savedUri)) {
+                DownloadStore.delete(context, savedUri)
+                error("The downloaded audio container is invalid — try again")
+            }
             MediaTagger.embed(context, savedUri, track, route.extension)
+            if (!DownloadStore.isPlayableAudio(context, savedUri, force = true)) {
+                DownloadStore.delete(context, savedUri)
+                error("The downloaded file could not be verified — try again")
+            }
+
             remember(song, track, savedUri)
             clear(id)
             Log.d(TAG, "saved $name")
@@ -386,25 +537,69 @@ object Downloads {
      * none of them can serve it — see [SourceResolver.forDownload] for what
      * "can" means, which is narrower here than it is for playback.
      */
-    private suspend fun routeFor(track: Song): Route {
+    private suspend fun routeFor(track: Song, askedVideoId: String): Route {
+        val playback = sequenceOf(askedVideoId, track.videoId)
+            .distinct()
+            .mapNotNull(PlaybackStreamStore::recent)
+            .firstOrNull()
+
+        // Preserve the quality the listener actually reached, but do not save
+        // the playback URL itself. Streaming transports can be fragmented,
+        // adaptive or mislabeled by a source and still be perfectly fine for
+        // ExoPlayer; MediaStore needs a self-contained file. Lossless is
+        // resolved through the normal file-capable source path, while lossy
+        // playback contributes only its bitrate target to a fresh, validated
+        // AAC/MP4 download resolve.
+        if (playback != null) {
+            if (playback.format.isLossless == true) {
+                lossless(track)?.let { (stream, storable) ->
+                    return directSourceRoute(stream, storable, "${stream.format.summary} (playback quality)")
+                }
+            }
+
+            val targetKbps = playback.format.kbps
+            if (targetKbps != null || playback.format.codec != null) {
+                val stream = StreamResolver.resolveForDownload(track.videoId, targetKbps)
+                return youtubeRoute(track.videoId, stream, targetKbps)
+            }
+        }
+
+        // No trustworthy playback quality is known (for example, a download
+        // requested before the first stream resolved). Keep the established
+        // behaviour: prefer a downloadable lossless copy, then YouTube AAC.
         lossless(track)?.let { (stream, storable) ->
-            return Route(
-                extension = storable.extension,
-                mimeType = storable.mimeType,
-                describe = stream.format.summary,
-                write = { sink, onProgress ->
-                    Downloader.fetchDirect(stream.url, stream.headers, sink, onProgress)
-                },
-            )
+            return directSourceRoute(stream, storable, stream.format.summary)
         }
         val stream = StreamResolver.resolveForDownload(track.videoId)
-        return Route(
-            extension = stream.downloadExtension,
-            mimeType = stream.downloadMimeType,
-            describe = "${stream.kbps}kbps ${stream.mimeType}",
-            write = { sink, onProgress -> Downloader.fetch(track.videoId, stream, sink, onProgress) },
-        )
+        return youtubeRoute(track.videoId, stream, targetKbps = null)
     }
+
+    private fun directSourceRoute(
+        stream: SourceStream,
+        storable: DownloadStore.Storable,
+        description: String,
+    ): Route = Route(
+        extension = storable.extension,
+        mimeType = storable.mimeType,
+        describe = description,
+        write = { sink, onProgress ->
+            Downloader.fetchDirect(stream.url, stream.headers, sink, onProgress)
+        },
+    )
+
+    private fun youtubeRoute(
+        videoId: String,
+        stream: StreamResolver.Stream,
+        targetKbps: Int?,
+    ): Route = Route(
+        extension = stream.downloadExtension,
+        mimeType = stream.downloadMimeType,
+        describe = buildString {
+            append("${stream.kbps}kbps ${stream.mimeType}")
+            if (targetKbps != null) append(" (target ${targetKbps}kbps playback quality)")
+        },
+        write = { sink, onProgress -> Downloader.fetch(videoId, stream, sink, onProgress) },
+    )
 
     /**
      * The lossless stream to keep for [track], with how to file it — or null,
@@ -432,6 +627,14 @@ object Downloads {
                 null
             }
         } ?: return null
+
+        val path = runCatching { Uri.parse(stream.url).path.orEmpty() }.getOrDefault("")
+        if (stream.isDash || path.endsWith(".mpd", ignoreCase = true) ||
+            path.endsWith(".m3u8", ignoreCase = true)
+        ) {
+            Log.d(TAG, "adaptive source stream cannot be stored as a standalone file for ${track.videoId}")
+            return null
+        }
 
         val storable = DownloadStore.storable(stream.format.codec)
         if (storable == null) {

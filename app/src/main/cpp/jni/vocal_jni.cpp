@@ -38,7 +38,7 @@ extern "C" {
 // mirroring the planar layout the front end wants and avoiding a deinterleave
 // on either side of the boundary.
 JNIEXPORT jfloatArray JNICALL
-Java_com_music_bitchord_playback_smart_VocalSpectrogram_nativeCompute(
+Java_com_music_orb_playback_smart_VocalSpectrogram_nativeCompute(
     JNIEnv* env,
     jclass /* clazz */,
     jfloatArray left,
@@ -66,27 +66,75 @@ Java_com_music_bitchord_playback_smart_VocalSpectrogram_nativeCompute(
 }
 
 JNIEXPORT jint JNICALL
-Java_com_music_bitchord_playback_smart_VocalSpectrogram_nativeBins(
+Java_com_music_orb_playback_smart_VocalSpectrogram_nativeBins(
     JNIEnv* /* env */, jclass /* clazz */) {
   return static_cast<jint>(bitchord::smart::kVocalSpectrogramBins);
 }
 
 JNIEXPORT jdouble JNICALL
-Java_com_music_bitchord_playback_smart_VocalSpectrogram_nativeSampleRate(
+Java_com_music_orb_playback_smart_VocalSpectrogram_nativeSampleRate(
     JNIEnv* /* env */, jclass /* clazz */) {
   return bitchord::smart::kVocalSpectrogramSampleRate;
 }
 
 JNIEXPORT jint JNICALL
-Java_com_music_bitchord_playback_smart_VocalSpectrogram_nativeHop(
+Java_com_music_orb_playback_smart_VocalSpectrogram_nativeHop(
     JNIEnv* /* env */, jclass /* clazz */) {
   return static_cast<jint>(bitchord::smart::kVocalSpectrogramHop);
 }
 
 JNIEXPORT jint JNICALL
-Java_com_music_bitchord_playback_smart_VocalSpectrogram_nativeFftSize(
+Java_com_music_orb_playback_smart_VocalSpectrogram_nativeFftSize(
     JNIEnv* /* env */, jclass /* clazz */) {
   return static_cast<jint>(bitchord::smart::kVocalSpectrogramFft);
 }
 
 }  // extern "C"
+
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_music_orb_playback_smart_VocalSpectrogram_nativeReconstructVocals(
+    JNIEnv* env,
+    jclass /* clazz */,
+    jfloatArray left,
+    jfloatArray right,
+    jdouble sample_rate,
+    jobject target_buffer,
+    jint model_frames,
+    jint usable_frames) {
+  if (target_buffer == nullptr || model_frames <= 0 || usable_frames <= 0) return nullptr;
+  auto* target = static_cast<float*>(env->GetDirectBufferAddress(target_buffer));
+  if (target == nullptr) return nullptr;
+
+  const jsize left_count = env->GetArrayLength(left);
+  const jsize right_count = env->GetArrayLength(right);
+  std::vector<std::vector<float>> channels(2);
+  channels[0].resize(static_cast<size_t>(left_count));
+  channels[1].resize(static_cast<size_t>(right_count));
+  if (left_count > 0) env->GetFloatArrayRegion(left, 0, left_count, channels[0].data());
+  if (right_count > 0) env->GetFloatArrayRegion(right, 0, right_count, channels[1].data());
+
+  const auto stems = bitchord::smart::ReconstructVocalStem(
+      channels,
+      sample_rate,
+      target,
+      static_cast<size_t>(model_frames),
+      static_cast<size_t>(usable_frames));
+  if (stems.size() < 2) return nullptr;
+
+  jclass float_array_class = env->FindClass("[F");
+  if (float_array_class == nullptr) return nullptr;
+  jobjectArray result = env->NewObjectArray(2, float_array_class, nullptr);
+  if (result == nullptr) return nullptr;
+
+  for (jsize channel = 0; channel < 2; ++channel) {
+    const auto& values = stems[static_cast<size_t>(channel)];
+    jfloatArray array = env->NewFloatArray(static_cast<jsize>(values.size()));
+    if (array == nullptr) return nullptr;
+    if (!values.empty()) {
+      env->SetFloatArrayRegion(array, 0, static_cast<jsize>(values.size()), values.data());
+    }
+    env->SetObjectArrayElement(result, channel, array);
+    env->DeleteLocalRef(array);
+  }
+  return result;
+}

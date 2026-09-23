@@ -35,12 +35,17 @@ object PlaybackTracker {
     /** Report watched time once this much new audio has gone by. */
     private const val REPORT_INTERVAL_SECONDS = 30L
 
+    /** Small timing jitter is continuity; a larger rewind of the same id is a real replay. */
+    private const val SAME_TRACK_CONTINUATION_REWIND_SECONDS = 3L
+
     private class Session(
         val videoId: String,
         val cpn: String,
         val tracking: Innertube.PlaybackTracking,
     ) {
         var reportedSeconds = 0L
+        /** Latest player position even when no 30-second watchtime ping was due. */
+        var lastSeenSeconds = 0L
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -87,16 +92,21 @@ object PlaybackTracker {
      */
     fun onTrackChanged(
         positionSeconds: Long,
-        nextVideoId: String?,
-        nextPositionSeconds: Long,
-        previousEnded: Boolean,
+        nextVideoId: String? = null,
+        nextPositionSeconds: Long = 0L,
+        previousEnded: Boolean = false,
     ) {
-        onTrackChanged(positionSeconds)
-        if (!nextVideoId.isNullOrBlank()) onPlaying(nextVideoId)
-    }
-
-    fun onTrackChanged(positionSeconds: Long) {
         val closing = session ?: return
+
+        // A same-item re-prepare is not a new listen. Keep the CPN alive across
+        // pause/resume and recovery callbacks unless the old track genuinely
+        // ended or the playhead jumped back far enough to represent a replay.
+        val sameTrackContinuation =
+            !previousEnded &&
+                nextVideoId == closing.videoId &&
+                nextPositionSeconds + SAME_TRACK_CONTINUATION_REWIND_SECONDS >= closing.lastSeenSeconds
+        if (sameTrackContinuation) return
+
         session = null
         scope.launch(TrackLog.about(closing.videoId)) {
             runCatching { flush(closing, positionSeconds) }
@@ -114,6 +124,7 @@ object PlaybackTracker {
     fun onProgress(videoId: String, positionSeconds: Long) {
         val current = session ?: return
         if (current.videoId != videoId) return
+        current.lastSeenSeconds = positionSeconds.coerceAtLeast(0L)
         if (positionSeconds - current.reportedSeconds < REPORT_INTERVAL_SECONDS) return
         scope.launch(TrackLog.about(videoId)) {
             runCatching { flush(current, positionSeconds) }

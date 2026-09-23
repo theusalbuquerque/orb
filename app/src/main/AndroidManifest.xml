@@ -46,7 +46,9 @@
     <application
         android:name=".BitChordApplication"
         android:allowBackup="true"
+        android:enableOnBackInvokedCallback="true"
         android:usesCleartextTraffic="false"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
@@ -67,19 +69,29 @@
             android:value="true" />
 
         <!--
-          Portrait only. Every screen is laid out for a tall single column —
-          the player's artwork square, the frosted bars, the floating tab bar —
-          and none of it has a landscape design to fall back on.
+          Phones stay portrait outside Now Playing. When the user explicitly enables
+          Now Playing rotation, MainActivity temporarily requests sensor orientation.
+          Handle configuration changes in-place so the open player survives rotation
+          and animates between portrait and the shared two-pane landscape layout.
         -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:screenOrientation="portrait"
             android:theme="@style/Theme.BitChord">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="spotiflac"
+                    android:host="session-grant" />
             </intent-filter>
         </activity>
 

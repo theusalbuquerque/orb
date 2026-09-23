@@ -76,6 +76,9 @@ class BeatTracker(private val context: Context) {
                     }
                 }
                 val options = OrtSession.SessionOptions().apply {
+                    // TrackAnalyzer runs one inference job at a time and releases this session
+                    // as soon as that job finishes. The four workers therefore exist only for the
+                    // bounded inference burst, never as parallel analyses of multiple tracks.
                     setIntraOpNumThreads(INFERENCE_THREADS)
                     setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
                     // ORT's arena allocator keeps every block it has ever needed, which for this
@@ -206,7 +209,7 @@ class BeatTracker(private val context: Context) {
     companion object {
         private const val TAG = "BitChordBeatTracker"
         private const val MODEL_ASSET = "beat_this_int8.onnx"
-        private const val INFERENCE_THREADS = 4
+        private const val INFERENCE_THREADS = 2
 
         /** The window the model was trained on, and the margin discarded from each chunk's edges. */
         const val CHUNK_FRAMES = 1500

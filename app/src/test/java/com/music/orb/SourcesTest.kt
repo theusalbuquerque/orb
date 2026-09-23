@@ -213,6 +213,50 @@ class SourcesTest {
         )
     }
 
+
+    @Test
+    fun `strict substitution refuses a cover hidden under official metadata`() {
+        val target = TrackMatcher.Target(
+            title = "California Gurls (feat. Snoop Dogg)",
+            artist = "Katy Perry, Snoop Dogg",
+            durationSec = 234,
+            albumName = "Teenage Dream",
+            releaseYear = 2010,
+            sourceVideoId = "official-youtube-id",
+        )
+        val disguisedCover = Song(
+            videoId = "src:external::cover",
+            title = "California Gurls (Cover)",
+            artist = "Katy Perry, Snoop Dogg",
+            thumbnailUrl = null,
+            durationText = "3:54",
+            albumName = "Katy Perry Tribute",
+        )
+        assertFalse(TrackMatcher.verifiedForSubstitution(disguisedCover, target))
+    }
+
+    @Test
+    fun `strict substitution accepts the official album family`() {
+        val target = TrackMatcher.Target(
+            title = "California Gurls (feat. Snoop Dogg)",
+            artist = "Katy Perry, Snoop Dogg",
+            durationSec = 234,
+            albumName = "Teenage Dream",
+            releaseYear = 2010,
+            sourceVideoId = "official-youtube-id",
+        )
+        val officialReissue = Song(
+            videoId = "src:external::official",
+            title = "California Gurls (feat. Snoop Dogg)",
+            artist = "Katy Perry, Snoop Dogg",
+            thumbnailUrl = null,
+            durationText = "3:54",
+            albumName = "Teenage Dream: The Complete Confection",
+            releaseYear = 2010,
+        )
+        assertTrue(TrackMatcher.verifiedForSubstitution(officialReissue, target))
+    }
+
     @Test
     fun `accepts a shared artist when catalogues credit differently`() {
         assertTrue(

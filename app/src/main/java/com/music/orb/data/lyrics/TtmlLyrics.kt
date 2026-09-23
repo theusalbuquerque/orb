@@ -4,6 +4,7 @@ import org.w3c.dom.Element
 import org.w3c.dom.Node
 import java.io.StringReader
 import javax.xml.parsers.DocumentBuilderFactory
+import javax.xml.XMLConstants
 import org.xml.sax.InputSource
 
 /**
@@ -41,9 +42,15 @@ object TtmlLyrics {
             // The document declares four namespaces and we address attributes
             // by their qualified names (ttm:agent), so leave prefixes intact.
             isNamespaceAware = false
-            // Lyrics arrive from a third-party host; refuse to resolve
-            // anything the document asks us to go and fetch.
-            setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
+            // Lyrics arrive from third-party hosts. Android and desktop JVMs
+            // expose different XML parser feature sets, so harden each switch
+            // independently instead of aborting the whole TTML parse when an
+            // OEM parser does not implement one of them.
+            harden("http://apache.org/xml/features/disallow-doctype-decl")
+            harden("http://xml.org/sax/features/external-general-entities", false)
+            harden("http://xml.org/sax/features/external-parameter-entities", false)
+            harden(XMLConstants.FEATURE_SECURE_PROCESSING)
+            runCatching { isExpandEntityReferences = false }
         }
         val document = factory.newDocumentBuilder().parse(InputSource(StringReader(ttml)))
         val paragraphs = document.getElementsByTagName("p")
@@ -55,6 +62,24 @@ object TtmlLyrics {
         }
         lines.sortedBy { it.timeMs }.withInstrumentalGaps()
     }.getOrDefault(emptyList())
+
+    private fun DocumentBuilderFactory.harden(feature: String, value: Boolean = true) {
+        runCatching { setFeature(feature, value) }
+    }
+
+    /** Android's Expat parser may expose prefixed attributes by local name only. */
+    private fun Element.qualified(name: String): String {
+        getAttribute(name).takeIf { it.isNotEmpty() }?.let { return it }
+        val local = name.substringAfter(':')
+        val attrs = attributes ?: return ""
+        for (index in 0 until attrs.length) {
+            val attr = attrs.item(index) ?: continue
+            if (attr.nodeName == name || attr.nodeName == local || attr.localName == local) {
+                return attr.nodeValue.orEmpty()
+            }
+        }
+        return ""
+    }
 
     private fun lineFrom(paragraph: Element): LyricLine? {
         val pieces = mutableListOf<Piece>()
@@ -94,7 +119,7 @@ object TtmlLyrics {
         for (i in 0 until children.length) {
             when (val child = children.item(i)) {
                 is Element -> {
-                    if (child.getAttribute("ttm:role") in SKIPPED_ROLES) continue
+                    if (child.qualified("ttm:role") in SKIPPED_ROLES) continue
                     val begin = time(child.getAttribute("begin"))
                     val end = time(child.getAttribute("end"))
                     if (begin != null && end != null && !hasTimedChild(child)) {

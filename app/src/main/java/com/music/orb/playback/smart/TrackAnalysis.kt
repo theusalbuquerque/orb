@@ -184,6 +184,4 @@ enum class TransitionTier {
     /** Automix 2.0 legacy floor. */
     PLAIN_CROSSFADE,
 
-    /** Automix 2.5 floor: insufficient evidence means natural playback. */
-    NO_TRANSITION,
 }

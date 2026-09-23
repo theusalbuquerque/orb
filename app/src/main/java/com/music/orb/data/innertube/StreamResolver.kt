@@ -5,6 +5,7 @@ import com.music.orb.data.TrackLog
 import com.music.orb.data.Http
 import com.music.orb.data.NerdStats
 import com.music.orb.data.settings.AppSettings
+import com.music.orb.data.settings.AudioQuality
 import com.music.orb.data.sources.SourceStream
 import com.music.orb.data.sources.StreamFormat
 import kotlinx.coroutines.CancellationException
@@ -13,10 +14,14 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -38,6 +43,7 @@ import java.io.IOException
 import java.net.URLDecoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import kotlin.math.abs
 
 /**
  * Turns a videoId into a URL ExoPlayer can actually stream.
@@ -75,6 +81,21 @@ object StreamResolver {
     /** Past this, an extractor fetch is worth flagging rather than just noting. */
     private const val SLOW_FETCH_MS = 2000L
 
+    /**
+     * A first-note request is allowed to move on much sooner than a background
+     * quality lookup. In the reference recordings, one 6-second client timeout
+     * was directly visible as 7s of silence, and two sequential timeouts as
+     * roughly 14.5s.
+     */
+    private const val FIRST_NOTE_PLAYER_REQUEST_MS = 1_000L
+    private const val FIRST_NOTE_VISITOR_WARMUP_MS = 150L
+    // Every unciphered identity is cheap enough to ask in the same first-note wave. The old
+    // limit of three meant one bad trio could fall into the slow full resolver even while IOS or
+    // another plain-URL client would have answered immediately. They race and are cancelled as
+    // soon as one usable Opus/AAC carrier arrives, so this widens reliability without serial wait.
+    private const val FIRST_NOTE_CLIENT_LIMIT = 6
+    private const val FIRST_NOTE_AUTH_RESCUE_MS = 1_500L
+
     /** See [OkHttpDownloader.execute] — the one request the extractor is not allowed to make. */
     private const val NEXT_ENDPOINT = "/youtubei/v1/next"
 
@@ -107,11 +128,11 @@ object StreamResolver {
      * PO Token — the most reliable client as of July 2026.
      */
     private val CLIENTS = listOf(
-        PlayerClient.ANDROID_MUSIC,
         PlayerClient.TVHTML5,
+        PlayerClient.ANDROID_MUSIC,
         PlayerClient.ANDROID_VR,
-        PlayerClient.ANDROID_VR_LEGACY,
         PlayerClient.IOS,
+        PlayerClient.ANDROID_VR_LEGACY,
         PlayerClient.IOS_RECENT,
         PlayerClient.ANDROID,
     )
@@ -303,60 +324,126 @@ object StreamResolver {
     suspend fun resolve(videoId: String): String {
         init
 
+        val quality = AppSettings.effectiveAudioQuality
         recent[videoId]
-            ?.takeIf { SystemClock.elapsedRealtime() - it.at < URL_TTL_MS }
-            ?.let { return it.url }
+            ?.takeIf { cached ->
+                SystemClock.elapsedRealtime() - cached.at < URL_TTL_MS &&
+                    validHttpStreamUrl(videoId, cached.url, "playback cache") != null &&
+                    cached.matches(quality)
+            }
+            ?.let { cached ->
+                // The resolver cache can outlive PlaybackService. Re-publish the
+                // exact bitrate when a fresh cached rendition is reused so UI
+                // quality proof never depends on stale session telemetry.
+                NerdStats.onStreamPicked(videoId, cached.kbps)
+                return cached.url
+            }
 
         val stream = coalescedResolve(videoId)
 
         // The container carries no bitrate field, so this is the only place the
         // real figure is ever known.
         NerdStats.onStreamPicked(videoId, stream.kbps)
-        remember(videoId, stream.url)
+        remember(videoId, stream)
         return stream.url
     }
 
-    suspend fun resolveImmediatePlayback(videoId: String): SourceStream {
-        init
-        val resolved = coalescedResolve(videoId)
-        NerdStats.onStreamPicked(videoId, resolved.kbps)
-        remember(videoId, resolved.url)
-        val codec = when {
-            "mp4" in resolved.mimeType || "m4a" in resolved.mimeType -> "aac"
-            "opus" in resolved.mimeType || "webm" in resolved.mimeType -> "opus"
-            else -> null
-        }
-        return SourceStream(
-            url = resolved.url,
-            format = StreamFormat(codec = codec, kbps = resolved.kbps),
-            headers = PlayerClient.forStreamUrl(resolved.url).mediaHeaders(),
-        )
-    }
-    fun invalidatePlaybackUrl(videoId: String) { recent.remove(videoId) }
 
     /**
-     * One walk per videoId at a time.
+     * Fast first-note resolver for an unprepared/manual play.
      *
-     * [AudioCache]'s read-ahead resolves the queued track before it is
-     * reached, to warm the cache; if the queue advances faster than that
-     * walk finishes, playback calls [resolve] for the same track a second
-     * time before the first walk has populated [recent]. Left alone, that is
-     * two full client walks in flight for the same track at once, each
-     * paying for the other's requests — round trips measured elsewhere in
-     * this file at ~250ms stretched past 3s under exactly this contention.
-     * A second caller for a videoId already being resolved waits on the
-     * first walk instead of starting its own.
-     *
-     * Parented to [resolverScope] rather than the caller's own coroutine, so
-     * that a caller giving up on its own timeout — see
-     * [PlaybackService][com.music.orb.playback.PlaybackService] —
-     * cancels only its own wait, not the walk a second caller may still be
-     * waiting on. Being parented elsewhere is also why the walk has to be told
-     * whose it is — [TrackLog.about] — rather than inheriting it: this is the
-     * single largest producer of lines in the log, and every one of them was
-     * previously filed against whatever happened to be playing while the walk
-     * ran, which for read-ahead is the track before this one.
+     * This asks for one ordinary playable carrier and returns as soon as that
+     * carrier is proven. It does not walk the AAC 320/250 hierarchy and does
+     * not invoke NewPipe on the normal first-note path. Higher quality is a
+     * separate post-start job.
      */
+    suspend fun resolveImmediatePlayback(videoId: String): SourceStream =
+        withContext(Dispatchers.IO + TrackLog.about(videoId)) {
+            // The normal first-note path does not use NewPipe. Initialising the
+            // extractor here made the first manual play pay setup work for a
+            // fallback that usually is never needed.
+            val now = SystemClock.elapsedRealtime()
+            val ceiling = AppSettings.effectiveAudioQuality.maxKbps
+
+            recent[videoId]
+                ?.takeIf { cached ->
+                    now - cached.at < URL_TTL_MS &&
+                        validHttpStreamUrl(videoId, cached.url, "recent cache") != null &&
+                        (
+                            AppSettings.effectiveAudioQuality == AudioQuality.AAC ||
+                                AppSettings.effectiveAudioQuality == AudioQuality.HIGH ||
+                                cached.kbps <= ceiling
+                        )
+                }
+                ?.let { cached ->
+                    NerdStats.onStreamPicked(videoId, cached.kbps)
+                    return@withContext SourceStream(
+                        url = cached.url,
+                        format = StreamFormat(
+                            codec = codecNameForMime(cached.mimeType),
+                            kbps = cached.kbps,
+                        ),
+                        headers = PlayerClient.forStreamUrl(cached.url).mediaHeaders(),
+                    )
+                }
+
+            fun pickImmediateCarrier(response: JsonObject): Audio? =
+                when (AppSettings.effectiveAudioQuality) {
+                    AudioQuality.AAC, AudioQuality.HIGH ->
+                        pickOpus128Tier(response)
+                            ?: pickAac128Tier(response)
+                            ?: pickForQualityResponse(response)
+                    AudioQuality.MEDIUM, AudioQuality.LOW ->
+                        pickForQualityResponse(response)
+                }
+
+            val stream = timed("$videoId immediate carrier") {
+                firstNoteParallelStream(
+                    videoId = videoId,
+                    select = ::pickImmediateCarrier,
+                )
+            } ?: withTimeoutOrNull(FIRST_NOTE_AUTH_RESCUE_MS) {
+                // One bounded signed-in browser attempt before the expensive compatibility
+                // ladder. This is especially useful on networks where anonymous device clients
+                // are being bot-checked but the user's real Music session is still accepted.
+                authenticatedWebRemixStream(videoId, ::pickImmediateCarrier)
+            } ?: run {
+                // Emergency only. The normal path above is deliberately broad enough that this
+                // should be rare; keep the full resolver as the final reliability net rather than
+                // turning a temporary YouTube refusal into a hard playback error.
+                TrackLog.w(TAG, "all fast first-note carriers missed for $videoId; using full resolver as rescue")
+                val url = resolve(videoId)
+                val mime = resolvedMimeType(videoId).orEmpty()
+                val kbps = resolvedBitrateKbps(videoId)
+                return@withContext SourceStream(
+                    url = url,
+                    format = StreamFormat(codec = codecNameForMime(mime), kbps = kbps),
+                    headers = PlayerClient.forStreamUrl(url).mediaHeaders(),
+                )
+            }
+
+            NerdStats.onStreamPicked(videoId, stream.kbps)
+            remember(videoId, stream)
+            SourceStream(
+                url = stream.url,
+                format = StreamFormat(
+                    codec = codecNameForMime(stream.mimeType),
+                    kbps = stream.kbps,
+                ),
+                headers = PlayerClient.forStreamUrl(stream.url).mediaHeaders(),
+            )
+        }
+
+    private fun codecNameForMime(mimeType: String): String? {
+        val value = mimeType.lowercase()
+        return when {
+            "opus" in value || "webm" in value -> "opus"
+            "mp4" in value || "m4a" in value || "mp4a" in value -> "aac"
+            else -> null
+        }
+    }
+
+
     private suspend fun coalescedResolve(videoId: String): Stream {
         // computeIfAbsent, not getOrPut: getOrPut's get-then-put isn't atomic
         // on a ConcurrentHashMap, and two racing callers each starting their
@@ -379,12 +466,18 @@ object StreamResolver {
     private suspend fun resolveUncached(videoId: String): Stream {
         val resolveStart = SystemClock.elapsedRealtime()
         val stream = try {
-            timed("$videoId playerStream") { playerStream(videoId, ::pickForPlayback) }
-                ?: timed("$videoId authenticatedWebRemixStream") { authenticatedWebRemixStream(videoId, ::pickForPlayback) }
-                ?: run {
-                    TrackLog.w(TAG, "every player client failed for $videoId; falling back to extraction")
-                    timed("$videoId newPipeStream") { newPipeStream(videoId, ::pickForQuality) }
-                }
+            if (AppSettings.effectiveAudioQuality == AudioQuality.AAC) {
+                resolvePreferredLossy(videoId, purpose = "playback")
+            } else {
+                timed("$videoId playerStream") { playerStream(videoId, ::pickForPlayback) }
+                    ?: timed("$videoId authenticatedWebRemixStream") {
+                        authenticatedWebRemixStream(videoId, ::pickForPlayback)
+                    }
+                    ?: run {
+                        TrackLog.w(TAG, "every player client failed for $videoId; falling back to extraction")
+                        timed("$videoId newPipeStream") { newPipeStream(videoId, ::pickForQuality) }
+                    }
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: LinkageError) {
@@ -425,6 +518,101 @@ object StreamResolver {
         return stream
     }
 
+    /**
+     * Resolve the listener-facing lossy ladder in a strict order:
+     *
+     *  1. AAC ~320 kbps
+     *  2. AAC 250/256 kbps
+     *  3. Opus ~128 kbps (or the best Opus offered)
+     *  4. AAC ~128 kbps / remaining sub-250 AAC
+     *
+     * The crucial difference from the old AAC path is that a 128 kbps M4A from
+     * the first client no longer wins merely because it arrived first. Player
+     * responses are retained between tier passes, so after the first walk the
+     * lower tiers are selected locally from the same responses rather than
+     * repeating the network request. This hierarchy is intentionally playback-
+     * only: audio analysis uses the first usable AAC carrier so BPM/beat-grid
+     * work never waits for a 320/250 kbps hunt.
+     */
+    private suspend fun resolvePreferredLossy(videoId: String, purpose: String): Stream {
+        val responses = mutableMapOf<PlayerClient, JsonObject>()
+        val authenticatedResponses = mutableMapOf<String, JsonObject>()
+
+        suspend fun tryTier(label: String, selector: (JsonObject) -> Audio?): Stream? {
+            return timed("$videoId $purpose player $label") {
+                playerStream(
+                    videoId = videoId,
+                    select = selector,
+                    responses = responses,
+                    missingFormatIsRefusal = false,
+                    formatFailureIsRefusal = false,
+                )
+            } ?: timed("$videoId $purpose authenticated $label") {
+                authenticatedWebRemixStream(
+                    videoId = videoId,
+                    select = selector,
+                    responseCache = authenticatedResponses,
+                )
+            }
+        }
+
+        tryTier("AAC-320", ::pickAac320Tier)?.let { return it }
+        tryTier("AAC-250", ::pickAac250Tier)?.let { return it }
+
+        // Do not put NewPipe on the first-note path while a normal player
+        // response already has a perfectly usable carrier. NewPipe is the
+        // expensive escape hatch (watch-page scrape + JS work) and can take
+        // tens of seconds under bot checks. Prefer the requested hierarchy from
+        // the responses we already paid to fetch: AAC 320 -> AAC 250 -> Opus
+        // 128 -> AAC 128. Only if all four tiers are unavailable do we invoke
+        // extraction.
+        tryTier("Opus-128", ::pickOpus128Tier)?.let { return it }
+        tryTier("AAC-128", ::pickAac128Tier)?.let { return it }
+
+        val extracted = timed("$videoId $purpose NewPipe hierarchy") {
+            newPipePreferredLossyStream(videoId)
+        }
+        if (extracted != null) return extracted
+
+        // Unknown/legacy formats are an emergency compatibility path only. They
+        // are deliberately below the four requested tiers and never qualify for
+        // the Hi-Quality badge.
+        TrackLog.w(TAG, "$purpose quality ladder exhausted for $videoId; using emergency lossy fallback")
+        playerStream(
+            videoId = videoId,
+            select = ::pickForQualityResponse,
+            responses = responses,
+            missingFormatIsRefusal = false,
+        )?.let { return it }
+        authenticatedWebRemixStream(
+            videoId = videoId,
+            select = ::pickForQualityResponse,
+            responseCache = authenticatedResponses,
+        )?.let { return it }
+        return newPipeStream(videoId, ::pickForQuality)
+    }
+
+    private enum class LossyTier(val rank: Int) {
+        EMERGENCY(0),
+        AAC_128(1),
+        OPUS_128(2),
+        AAC_250(3),
+        AAC_320(4),
+    }
+
+    private fun streamLossyTier(stream: Stream): LossyTier {
+        val mime = stream.mimeType.lowercase()
+        val isAac = "mp4" in mime || "m4a" in mime || "mp4a" in mime
+        val isOpus = "opus" in mime || "webm" in mime
+        return when {
+            isAac && stream.kbps >= AAC_320_FLOOR_KBPS -> LossyTier.AAC_320
+            isAac && stream.kbps >= AAC_250_FLOOR_KBPS -> LossyTier.AAC_250
+            isOpus && stream.kbps >= OPUS_128_FLOOR_KBPS -> LossyTier.OPUS_128
+            isAac && stream.kbps >= AAC_128_FLOOR_KBPS -> LossyTier.AAC_128
+            else -> LossyTier.EMERGENCY
+        }
+    }
+
     /** Logs how long [block] took, whatever it returns — a timing probe, not a control flow change. */
     private suspend inline fun <T> timed(label: String, block: suspend () -> T): T {
         val start = SystemClock.elapsedRealtime()
@@ -461,19 +649,25 @@ object StreamResolver {
     private suspend fun authenticatedWebRemixStream(
         videoId: String,
         select: (JsonObject) -> Audio?,
+        responseCache: MutableMap<String, JsonObject>? = null,
     ): Stream? {
-        if (Innertube.cookie == null) return null
+        if (!Innertube.hasAccountSession) return null
         return try {
-            timed("$videoId WEB_REMIX ensureVisitorData") { Innertube.ensureVisitorData() }
-            val timestamp = timed("$videoId WEB_REMIX getSignatureTimestamp") {
-                jsPlayerManager { YoutubeJavaScriptPlayerManager.getSignatureTimestamp(videoId) }
-            }
-            val response = timed("$videoId WEB_REMIX player()") {
-                Innertube.player(videoId, PlayerClient.WEB_REMIX, timestamp, authenticated = true)
+            val cacheKey = "WEB_REMIX_AUTH"
+            val response = responseCache?.get(cacheKey) ?: run {
+                timed("$videoId WEB_REMIX ensureVisitorData") { Innertube.ensureVisitorData() }
+                val timestamp = timed("$videoId WEB_REMIX getSignatureTimestamp") {
+                    jsPlayerManager { YoutubeJavaScriptPlayerManager.getSignatureTimestamp(videoId) }
+                }
+                timed("$videoId WEB_REMIX player()") {
+                    Innertube.player(videoId, PlayerClient.WEB_REMIX, timestamp, authenticated = true)
+                }.also { responseCache?.put(cacheKey, it) }
             }
             val format = select(response) ?: return null
             val url = timed("$videoId WEB_REMIX streamUrl") {
-                streamUrl(videoId, format)?.let { patchClientVersion(it, PlayerClient.WEB_REMIX.clientVersion) }
+                streamUrl(videoId, format)
+                    ?.let { patchClientVersion(it, PlayerClient.WEB_REMIX.clientVersion) }
+                    ?.let { validHttpStreamUrl(videoId, it, "WEB_REMIX URL") }
             } ?: return null
             if (timed("$videoId WEB_REMIX probe") { probe(url) } != Probe.OK) return null
             TrackLog.d(TAG, "resolved $videoId via authenticated WEB_REMIX @ ${format.kbps}kbps")
@@ -522,6 +716,68 @@ object StreamResolver {
         val downloadMimeType: String
             get() = if (downloadExtension == "m4a") "audio/mp4" else "audio/webm"
     }
+
+    /**
+     * A fresh Hi-Q-only second look for a track that is already audible.
+     *
+     * This deliberately bypasses [recent]: that cache may contain the Opus/AAC-128
+     * fallback that won first note, and reusing it would make a background quality
+     * upgrade on mobile data a no-op until the URL TTL expired. Only AAC/MP4 at
+     * 256 kbps or better is accepted, so this can never turn the mobile path into
+     * Lossless/Hi-Res Lossless.
+     */
+    suspend fun resolveHiQualityUpgrade(videoId: String): SourceStream? =
+        withContext(Dispatchers.IO + TrackLog.about(videoId)) {
+            init
+            val responses = mutableMapOf<PlayerClient, JsonObject>()
+            val authenticatedResponses = mutableMapOf<String, JsonObject>()
+
+            fun pickHiQuality(response: JsonObject): Audio? =
+                audioFormats(response)
+                    .filter { it.isAac && it.kbps >= HI_QUALITY_UPGRADE_MIN_KBPS }
+                    .maxByOrNull { it.kbps }
+
+            suspend fun tryHiQuality(): Stream? =
+                timed("$videoId live-upgrade Hi-Q") {
+                    playerStream(
+                        videoId = videoId,
+                        select = { response -> pickHiQuality(response) },
+                        responses = responses,
+                        missingFormatIsRefusal = false,
+                        formatFailureIsRefusal = false,
+                    )
+                } ?: timed("$videoId live-upgrade authenticated Hi-Q") {
+                    authenticatedWebRemixStream(
+                        videoId = videoId,
+                        select = { response -> pickHiQuality(response) },
+                        responseCache = authenticatedResponses,
+                    )
+                }
+
+            val stream = tryHiQuality()
+                ?: runCatching {
+                    extractStream(videoId) { candidates ->
+                        candidates
+                            .filter { (kbps, audio) -> audio.isM4a && kbps >= HI_QUALITY_UPGRADE_MIN_KBPS }
+                            .maxByOrNull { it.first }
+                            ?.second
+                    }
+                }.onFailure { error ->
+                    TrackLog.d(TAG, "Hi-Q second look missed for $videoId: ${error.message}")
+                }.getOrNull()
+                ?: return@withContext null
+
+            if (stream.kbps < HI_QUALITY_UPGRADE_MIN_KBPS) return@withContext null
+            val mime = stream.mimeType.lowercase()
+            if ("mp4" !in mime && "m4a" !in mime && "mp4a" !in mime) return@withContext null
+
+            TrackLog.d(TAG, "Hi-Q second look found $videoId @ ${stream.kbps}kbps")
+            SourceStream(
+                url = stream.url,
+                format = StreamFormat(codec = "aac", kbps = stream.kbps),
+                headers = PlayerClient.forStreamUrl(stream.url).mediaHeaders(),
+            )
+        }
 
     /**
      * As [resolve], but for a file being kept rather than a stream being heard:
@@ -574,8 +830,8 @@ object StreamResolver {
      * has to do the same thing or it fails while the track it is refusing to
      * save is audibly playing.
      */
-    suspend fun resolveForDownload(videoId: String): Stream {
-        val stream = downloadStream(videoId)
+    suspend fun resolveForDownload(videoId: String, targetKbps: Int? = null): Stream {
+        val stream = downloadStream(videoId, targetKbps)
         // Belt and braces on the one invariant the media store enforces for us,
         // and enforces badly: everything in [downloadStream] selects for MP4,
         // and this is where a format that somehow slipped through says so in a
@@ -584,7 +840,10 @@ object StreamResolver {
         return stream
     }
 
-    private suspend fun downloadStream(videoId: String): Stream = withContext(TrackLog.about(videoId)) {
+    private suspend fun downloadStream(
+        videoId: String,
+        targetKbps: Int? = null,
+    ): Stream = withContext(TrackLog.about(videoId)) {
         init
 
         // Whether any client offered AAC at all, as distinct from whether one
@@ -602,8 +861,11 @@ object StreamResolver {
             // across attempts would make every attempt after the first a
             // no-op.
             val responses = mutableMapOf<PlayerClient, JsonObject>()
-            playerStream(videoId, { response -> pickAac(response)?.also { offered = true } }, responses)
-                ?.let { return@withContext it }
+            playerStream(
+                videoId,
+                { response -> pickAacForDownload(response, targetKbps)?.also { offered = true } },
+                responses,
+            )?.let { return@withContext it }
         }
 
         // Not "try again later" — every client being refused at once is a state
@@ -614,9 +876,16 @@ object StreamResolver {
         TrackLog.w(TAG, "no client minted a usable MP4 URL for $videoId; extracting")
         runCatching {
             newPipeStream(videoId) { candidates ->
-                candidates.filter { it.second.isM4a }
-                    .maxByOrNull { it.first }?.second
-                    ?.also { offered = true }
+                val m4a = candidates.filter { it.second.isM4a }
+                val selected = if (targetKbps == null) {
+                    m4a.maxByOrNull { it.first }
+                } else {
+                    m4a.minWithOrNull(
+                        compareBy<Pair<Int, AudioStream>> { abs(it.first - targetKbps) }
+                            .thenByDescending { it.first },
+                    )
+                }
+                selected?.second?.also { offered = true }
             }
         }.onSuccess { return@withContext it }
             .onFailure { TrackLog.w(TAG, "extraction found no MP4 for $videoId: ${it.message}") }
@@ -639,20 +908,129 @@ object StreamResolver {
      *
      * @return the validated stream, or null to fall through to [newPipeStream].
      */
+    /**
+     * First-note-only resolver that races a very small set of unciphered clients.
+     *
+     * The old hot path walked clients one at a time. Three 1.8 s timeouts were
+     * enough to turn one tap into 5–6 seconds of silence before ExoPlayer even
+     * received a URL. The first three identities in [CLIENTS] are intentionally
+     * cheap, plain-URL clients, so asking them concurrently gives the same
+     * reliability envelope while the latency is bounded by the slowest request
+     * in one wave instead of the sum of all of them.
+     *
+     * No stream probe is performed here: ExoPlayer is the probe. Any client that
+     * fails is recorded/stood down exactly as it is in [playerStream].
+     */
+    private suspend fun firstNoteParallelStream(
+        videoId: String,
+        select: (JsonObject) -> Audio?,
+    ): Stream? {
+        withTimeoutOrNull(FIRST_NOTE_VISITOR_WARMUP_MS) {
+            timed("$videoId ensureVisitorData(first-note-parallel)") { Innertube.ensureVisitorData() }
+        }
+
+        val clients = clientOrder()
+            .asSequence()
+            .filterNot { isStoodDown(videoId, it) }
+            // Keep JavaScript/signature work out of the parallel hot path.
+            .filterNot { it.needsSignatureTimestamp }
+            .take(FIRST_NOTE_CLIENT_LIMIT)
+            .toList()
+        if (clients.isEmpty()) return null
+
+        return supervisorScope {
+            val results = Channel<Pair<PlayerClient, Stream?>>(capacity = clients.size)
+            val jobs = clients.map { client ->
+                launch(Dispatchers.IO + TrackLog.about(videoId)) {
+                    val stream = try {
+                        val started = SystemClock.elapsedRealtime()
+                        val response = Innertube.player(
+                            videoId = videoId,
+                            client = client,
+                            signatureTimestamp = null,
+                            requestTimeoutMs = FIRST_NOTE_PLAYER_REQUEST_MS,
+                        )
+                        val format = select(response)
+                        if (format == null) {
+                            TrackLog.d(TAG, "${client.clientName} offered no immediate format for $videoId")
+                            null
+                        } else {
+                            val url = streamUrl(videoId, format)
+                                ?.let { patchClientVersion(it, client.clientVersion) }
+                                ?.let { validHttpStreamUrl(videoId, it, "${client.clientName} immediate URL") }
+                            if (url == null) {
+                                TrackLog.d(TAG, "${client.clientName} could not unlock immediate URL for $videoId")
+                                null
+                            } else {
+                                val took = SystemClock.elapsedRealtime() - started
+                                TrackLog.d(
+                                    TAG,
+                                    "FIRST_NOTE winner-candidate ${client.clientName} ${took}ms " +
+                                        "@ ${format.kbps}kbps",
+                                    about = videoId,
+                                )
+                                Stream(url, format.kbps, format.mimeType)
+                            }
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        if (e is Innertube.UnplayableException) {
+                            if (e.looksLikeBotCheck) standDownEverywhere(client) else refused(videoId, client)
+                        }
+                        TrackLog.d(TAG, "FIRST_NOTE ${client.clientName} missed $videoId: ${e.message}", about = videoId)
+                        null
+                    }
+                    results.send(client to stream)
+                }
+            }
+
+            var winner: Stream? = null
+            repeat(clients.size) {
+                val (client, result) = results.receive()
+                if (result != null && winner == null) {
+                    winner = result
+                    served(client)
+                    preferred = client
+                    TrackLog.d(TAG, "FIRST_NOTE selected ${client.clientName} for $videoId", about = videoId)
+                    jobs.forEach { if (it.isActive) it.cancel() }
+                    return@supervisorScope result
+                }
+            }
+            winner
+        }
+    }
+
     private suspend fun playerStream(
         videoId: String,
         select: (JsonObject) -> Audio?,
         responses: MutableMap<PlayerClient, JsonObject> = mutableMapOf(),
+        missingFormatIsRefusal: Boolean = true,
+        formatFailureIsRefusal: Boolean = true,
+        probeStream: Boolean = true,
+        playerRequestTimeoutMs: Long? = null,
+        visitorWarmupTimeoutMs: Long? = null,
+        maxClients: Int? = null,
+        refreshVisitorOnBotCheck: Boolean = true,
     ): Stream? {
-        // Before anything asks. Without one, the good clients refuse outright
-        // and the rest hand back URLs that only *look* like they work — see
-        // [Innertube.ensureVisitorData].
-        timed("$videoId ensureVisitorData") { Innertube.ensureVisitorData() }
+        // A cold visitor-data request can itself block the hot path. Background
+        // lookups keep the full wait; first-note playback gets only a small
+        // warm-up budget and then proceeds with whatever session state exists.
+        if (visitorWarmupTimeoutMs != null) {
+            withTimeoutOrNull(visitorWarmupTimeoutMs) {
+                timed("$videoId ensureVisitorData(first-note)") { Innertube.ensureVisitorData() }
+            }
+        } else {
+            timed("$videoId ensureVisitorData") { Innertube.ensureVisitorData() }
+        }
 
         var timestamp: Int? = null
         var mintedFreshVisitor = false
+        val orderedClients = clientOrder().let { order ->
+            maxClients?.let(order::take) ?: order
+        }
 
-        for (client in clientOrder()) {
+        for (client in orderedClients) {
             if (isStoodDown(videoId, client)) continue
             val clientStart = SystemClock.elapsedRealtime()
             try {
@@ -666,17 +1044,29 @@ object StreamResolver {
                     } ?: continue
                 }
 
+                suspend fun playerRequest(): JsonObject =
+                    if (playerRequestTimeoutMs != null) {
+                        Innertube.player(
+                            videoId = videoId,
+                            client = client,
+                            signatureTimestamp = timestamp,
+                            requestTimeoutMs = playerRequestTimeoutMs,
+                        )
+                    } else {
+                        Innertube.player(videoId, client, timestamp)
+                    }
+
                 val response = responses[client] ?: try {
-                    timed("$videoId ${client.clientName} player()") { Innertube.player(videoId, client, timestamp) }
+                    timed("$videoId ${client.clientName} player()") { playerRequest() }
                 } catch (e: Innertube.UnplayableException) {
                     // A visitor id can be burned while the session around it is
                     // fine, and the only symptom is being called a bot. Worth
                     // one fresh id and one more try, once per resolve.
-                    if (!e.looksLikeBotCheck || mintedFreshVisitor) throw e
+                    if (!e.looksLikeBotCheck || mintedFreshVisitor || !refreshVisitorOnBotCheck) throw e
                     mintedFreshVisitor = true
                     TrackLog.d(TAG, "bot check from ${client.clientName}; minting a fresh visitor id")
                     timed("$videoId ensureVisitorData(refresh)") { Innertube.ensureVisitorData(refresh = true) }
-                    timed("$videoId ${client.clientName} player() retry") { Innertube.player(videoId, client, timestamp) }
+                    timed("$videoId ${client.clientName} player() retry") { playerRequest() }
                 }
                 responses[client] = response
 
@@ -688,19 +1078,38 @@ object StreamResolver {
                 val format = select(response)
                 if (format == null) {
                     TrackLog.d(TAG, "${client.clientName} offered no usable format for $videoId")
-                    refused(videoId, client)
+                    // An AAC-only pass is asking a narrower question than normal
+                    // playback. "No M4A here" is not a client refusal and must
+                    // not poison the same response before the Opus fallback pass.
+                    if (missingFormatIsRefusal) refused(videoId, client)
                     continue
                 }
                 val url = timed("$videoId ${client.clientName} streamUrl") {
-                    streamUrl(videoId, format)?.let { patchClientVersion(it, client.clientVersion) }
+                    streamUrl(videoId, format)
+                        ?.let { patchClientVersion(it, client.clientVersion) }
+                        ?.let { validHttpStreamUrl(videoId, it, "${client.clientName} playback URL") }
                 }
                 if (url == null) {
                     TrackLog.d(
                         TAG,
                         "${client.clientName} offered ${format.mimeType} for $videoId but its URL could not be unlocked",
                     )
-                    refused(videoId, client)
+                    if (formatFailureIsRefusal) refused(videoId, client)
                     continue
+                }
+
+                if (!probeStream) {
+                    // ExoPlayer is about to open this URL immediately. Probing
+                    // it here duplicates that same network read and adds an
+                    // avoidable round trip to the user's tap-to-audio latency.
+                    TrackLog.d(
+                        TAG,
+                        "resolved immediate carrier $videoId via ${client.clientName} " +
+                            "@ ${format.kbps}kbps without pre-probe",
+                    )
+                    served(client)
+                    preferred = client
+                    return Stream(url, format.kbps, format.mimeType)
                 }
 
                 val verdict = timed("$videoId ${client.clientName} probe") { probe(url) }
@@ -715,8 +1124,10 @@ object StreamResolver {
                     // The client itself is being refused this track; don't
                     // spend another round trip on it for a while.
                     Probe.REFUSED -> {
-                        standDown(videoId, client)
-                        refused(videoId, client)
+                        if (formatFailureIsRefusal) {
+                            standDown(videoId, client)
+                            refused(videoId, client)
+                        }
                     }
                     // Nobody answered, so this says nothing about the client —
                     // deliberately not counted as a refusal, or a bad minute on
@@ -802,6 +1213,7 @@ object StreamResolver {
          * is the thing a download actually cares about.
          */
         val isAac: Boolean get() = "mp4" in mimeType.lowercase()
+        val isOpus: Boolean get() = "opus" in mimeType.lowercase()
     }
 
     private fun audioFormats(response: JsonObject): List<Audio> =
@@ -820,9 +1232,62 @@ object StreamResolver {
             ?.filter { it.url != null || it.signatureCipher != null }
             .orEmpty()
 
-    /** What playback wants: the best format the connection's ceiling allows. */
-    private fun pickForPlayback(response: JsonObject): Audio? =
+    private const val AAC_320_FLOOR_KBPS = 300
+    private const val AAC_250_FLOOR_KBPS = 250
+    /** User-facing Hi-Q badge/upgrade threshold. */
+    private const val HI_QUALITY_UPGRADE_MIN_KBPS = 256
+    private const val OPUS_128_FLOOR_KBPS = 120
+    private const val AAC_128_FLOOR_KBPS = 120
+
+    private fun pickAac320Tier(response: JsonObject): Audio? =
+        audioFormats(response)
+            .filter { it.isAac && it.kbps >= AAC_320_FLOOR_KBPS }
+            .maxByOrNull { it.kbps }
+
+    private fun pickAac250Tier(response: JsonObject): Audio? =
+        audioFormats(response)
+            .filter {
+                it.isAac &&
+                    it.kbps >= AAC_250_FLOOR_KBPS &&
+                    it.kbps < AAC_320_FLOOR_KBPS
+            }
+            .maxByOrNull { it.kbps }
+
+    private fun pickOpus128Tier(response: JsonObject): Audio? =
+        audioFormats(response)
+            .filter { it.isOpus && it.kbps >= OPUS_128_FLOOR_KBPS }
+            .maxByOrNull { it.kbps }
+
+    private fun pickAac128Tier(response: JsonObject): Audio? =
+        audioFormats(response)
+            .filter {
+                it.isAac &&
+                    it.kbps >= AAC_128_FLOOR_KBPS &&
+                    it.kbps < AAC_250_FLOOR_KBPS
+            }
+            .maxByOrNull { it.kbps }
+
+    /** What playback wants for the active network quality. */
+    private fun pickForPlayback(response: JsonObject): Audio? {
+        if (AppSettings.effectiveAudioQuality == AudioQuality.AAC) {
+            return pickAacOnly(response) ?: pickForQualityResponse(response)
+        }
+        return pickForQualityResponse(response)
+    }
+
+    /** AAC/M4A only. Returning null tells the caller to keep looking for AAC. */
+    private fun pickAacOnly(response: JsonObject): Audio? {
+        val aac = audioFormats(response).filter { it.isAac }
+        val within = aac.filter { it.kbps <= AudioQuality.AAC.maxKbps }
+        return within.maxByOrNull { it.kbps } ?: aac.minByOrNull { it.kbps }
+    }
+
+    private fun pickForQualityResponse(response: JsonObject): Audio? =
         pickForQuality(audioFormats(response).map { it.kbps to it })
+
+
+    /** Best lossy analysis copy at or below the AAC ceiling, independent of UI settings. */
+
 
     /**
      * What a download wants: the best AAC there is, and nothing else.
@@ -831,15 +1296,32 @@ object StreamResolver {
      * media store will accept for the audio collection — see
      * [resolveForDownload].
      *
-     * No ceiling is applied. The quality setting exists to budget a *stream* —
-     * bytes spent on a track being listened to once, over and over — and a file
-     * saved to the device is the opposite case: paid for once, kept, and played
-     * from disk forever after. Capping it at the setting that happens to be in
-     * force would bake a temporary decision about mobile data into a permanent
-     * artefact.
+     * With no playback target, no ceiling is applied: a saved file is paid for
+     * once and kept. When the listener has already reached a known rendition,
+     * [pickAacForDownload] instead chooses the nearest AAC bitrate so offline
+     * playback preserves that observed quality without copying its transport.
      */
     private fun pickAac(response: JsonObject): Audio? =
         audioFormats(response).filter { it.isAac }.maxByOrNull { it.kbps }
+
+    /**
+     * AAC/MP4 copy nearest the rendition the listener actually heard.
+     *
+     * The playback stream is used only as a quality target. Its URL is not
+     * copied straight to disk because a stream that ExoPlayer can consume is
+     * not necessarily a self-contained MP4 file suitable for MediaStore. The
+     * download resolver therefore mints and probes its own MP4 URL, preserving
+     * the quality tier without inheriting the playback transport.
+     */
+    private fun pickAacForDownload(response: JsonObject, targetKbps: Int?): Audio? {
+        val candidates = audioFormats(response).filter { it.isAac }
+        if (candidates.isEmpty()) return null
+        if (targetKbps == null) return candidates.maxByOrNull { it.kbps }
+        return candidates.minWithOrNull(
+            compareBy<Audio> { abs(it.kbps - targetKbps) }
+                .thenByDescending { it.kbps },
+        )
+    }
 
     private fun JsonObject.str(key: String): String? = this[key]?.jsonPrimitive?.content
 
@@ -848,9 +1330,11 @@ object StreamResolver {
      * everything is above it (e.g. Low on a track that only has 130kbps+), take
      * the cheapest available rather than failing.
      */
-    private fun <T> pickForQuality(candidates: List<Pair<Int, T>>): T? {
+    private fun <T> pickForQuality(candidates: List<Pair<Int, T>>): T? =
+        pickAtCeiling(candidates, AppSettings.effectiveAudioQuality.maxKbps)
+
+    private fun <T> pickAtCeiling(candidates: List<Pair<Int, T>>, ceiling: Int): T? {
         if (candidates.isEmpty()) return null
-        val ceiling = AppSettings.effectiveAudioQuality.maxKbps
         val withinBudget = candidates.filter { it.first <= ceiling }
         return (withinBudget.maxByOrNull { it.first } ?: candidates.minByOrNull { it.first })
             ?.second
@@ -861,7 +1345,10 @@ object StreamResolver {
     /** The playable URL behind a format, or null if it can't be unlocked. */
     private suspend fun streamUrl(videoId: String, format: Audio): String? {
         val direct = format.url
-        if (direct != null) return deobfuscate(videoId, direct)
+        if (direct != null) {
+            val unlocked = deobfuscate(videoId, direct)
+            return validHttpStreamUrl(videoId, unlocked, "player direct URL")
+        }
 
         val cipher = format.signatureCipher ?: return null
         val params = cipher.split("&")
@@ -884,7 +1371,27 @@ object StreamResolver {
             return null
         }
         val separator = if ("?" in base) "&" else "?"
-        return deobfuscate(videoId, "$base$separator$into=$solved")
+        val unlocked = deobfuscate(videoId, "$base$separator$into=$solved")
+        return validHttpStreamUrl(videoId, unlocked, "signature-cipher URL")
+    }
+
+    /**
+     * Reject anything the actual playback transport (OkHttp) cannot parse.
+     * `Uri.parse("media")` succeeds, which is why the old guard let a malformed
+     * player answer reach ExoPlayer and fail five times at 12 ms. Keeping this
+     * at URL-minting time lets the current client fall through and another
+     * YouTube client/fallback win in the same resolve instead.
+     */
+    private fun validHttpStreamUrl(videoId: String, url: String?, stage: String): String? {
+        val candidate = url?.trim().orEmpty()
+        if (candidate.toHttpUrlOrNull() != null) return candidate
+        TrackLog.w(
+            TAG,
+            "$stage returned malformed stream URL for $videoId; ignoring " +
+                candidate.substringBefore('?').take(96).ifBlank { "<blank>" },
+            about = videoId,
+        )
+        return null
     }
 
     /**
@@ -1169,6 +1676,21 @@ object StreamResolver {
      * Called from the playback path — see
      * [ChunkedDataSource][com.music.orb.playback.ChunkedDataSource].
      */
+    /**
+     * Drops only the short-lived playback URL cached for [videoId].
+     *
+     * Recovery uses this after a 401/403. [StreamChoice] is a different cache
+     * and is cleared by PlaybackService; clearing both is intentional. A
+     * prepared queue fallback may otherwise ask [resolveImmediatePlayback]
+     * again and receive the same signed URL from [recent], recreating the
+     * exact failure at the same byte boundary.
+     */
+    fun invalidatePlaybackUrl(videoId: String) {
+        if (recent.remove(videoId) != null) {
+            TrackLog.d(TAG, "invalidated cached playback URL for $videoId", about = videoId)
+        }
+    }
+
     fun onPlaybackRefused(url: String, responseCode: Int) {
         if (responseCode !in REFUSAL_CODES) return
         // Only googlevideo's URLs say anything about a [PlayerClient]. Anything
@@ -1218,6 +1740,59 @@ object StreamResolver {
      * pays that transform four or five times instead: measured on-device at
      * 49.8s against 2.3s for the same track over the same connection.
      */
+    /**
+     * One extractor pass for the playback hierarchy. The expensive watch-page /
+     * player-JS work happens once; the returned candidate is the best NewPipe
+     * can offer under the same global order used by the player clients.
+     */
+    private suspend fun newPipePreferredLossyStream(videoId: String): Stream? = try {
+        extractStream(videoId) { candidates ->
+            val ranked = candidates.map { (kbps, stream) ->
+                Triple(kbps, stream, newPipeLossyTier(kbps, stream))
+            }
+
+            ranked.filter { it.third == LossyTier.AAC_320 }
+                .maxByOrNull { it.first }?.second
+                ?: ranked.filter { it.third == LossyTier.AAC_250 }
+                    .maxByOrNull { it.first }?.second
+                ?: ranked.filter { it.third == LossyTier.OPUS_128 }
+                    .maxByOrNull { it.first }?.second
+                ?: ranked.filter { it.third == LossyTier.AAC_128 }
+                    .maxByOrNull { it.first }?.second
+                ?: candidates.maxByOrNull { it.first }?.second
+        }
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: Exception) {
+        TrackLog.d(TAG, "NewPipe hierarchy pass missed for $videoId: ${error.message}")
+        null
+    }
+
+    private fun newPipeLossyTier(kbps: Int, stream: AudioStream): LossyTier = when {
+        stream.isM4a && kbps >= AAC_320_FLOOR_KBPS -> LossyTier.AAC_320
+        stream.isM4a && kbps >= AAC_250_FLOOR_KBPS -> LossyTier.AAC_250
+        stream.isOpus && kbps >= OPUS_128_FLOOR_KBPS -> LossyTier.OPUS_128
+        stream.isM4a && kbps >= AAC_128_FLOOR_KBPS -> LossyTier.AAC_128
+        else -> LossyTier.EMERGENCY
+    }
+
+    /**
+     * One extractor pass that accepts M4A/AAC only. A codec miss is not retried:
+     * it means this extractor response has no AAC, not that the network failed.
+     */
+    private suspend fun newPipeAacStream(videoId: String): Stream? = try {
+        extractStream(videoId) { candidates ->
+            val aac = candidates.filter { (_, stream) -> stream.isM4a }
+            val within = aac.filter { (kbps, _) -> kbps <= AudioQuality.AAC.maxKbps }
+            (within.maxByOrNull { it.first } ?: aac.minByOrNull { it.first })?.second
+        }
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: Exception) {
+        TrackLog.d(TAG, "NewPipe AAC pass missed for $videoId: ${error.message}")
+        null
+    }
+
     private suspend fun newPipeStream(
         videoId: String,
         select: (List<Pair<Int, AudioStream>>) -> AudioStream?,
@@ -1318,10 +1893,17 @@ object StreamResolver {
             // was a second, redundant trip through that same machinery on every
             // fallback — real latency (and a second chance to hit whatever's
             // currently failing it) spent solving something already solved.
+            val resolvedMime = when (stream.format) {
+                MediaFormat.M4A -> "audio/mp4; codecs=\"mp4a.40.2\""
+                MediaFormat.WEBMA_OPUS -> "audio/webm; codecs=\"opus\""
+                else -> stream.mime
+            }
+            val playableUrl = validHttpStreamUrl(videoId, stream.content, "NewPipe URL")
+                ?: error("Extractor returned malformed audio URL")
             Stream(
-                url = stream.content,
+                url = playableUrl,
                 kbps = stream.averageBitrate,
-                mimeType = stream.mime,
+                mimeType = resolvedMime,
             )
         }
     }
@@ -1351,6 +1933,9 @@ object StreamResolver {
     private val AudioStream.isM4a: Boolean
         get() = format == MediaFormat.M4A
 
+    private val AudioStream.isOpus: Boolean
+        get() = format == MediaFormat.WEBMA_OPUS
+
     // ---- Cache --------------------------------------------------------------
 
     /**
@@ -1365,7 +1950,32 @@ object StreamResolver {
     suspend fun contentLength(videoId: String): Long? =
         resolve(videoId).toHttpUrlOrNull()?.queryParameter("clen")?.toLongOrNull()
 
-    private class Resolved(val url: String, val at: Long)
+    /** Codec/container of the fresh resolved URL, for queue warm-up diagnostics. */
+    fun resolvedMimeType(videoId: String): String? =
+        recent[videoId]
+            ?.takeIf { SystemClock.elapsedRealtime() - it.at < URL_TTL_MS }
+            ?.mimeType
+
+    /** Bitrate of the exact fresh playback rendition already proven by [resolve]. */
+    fun resolvedBitrateKbps(videoId: String): Int? =
+        recent[videoId]
+            ?.takeIf { SystemClock.elapsedRealtime() - it.at < URL_TTL_MS }
+            ?.kbps
+
+    private class Resolved(
+        val url: String,
+        val at: Long,
+        val mimeType: String,
+        val kbps: Int,
+    ) {
+        val isAac: Boolean get() = "mp4" in mimeType.lowercase() || "m4a" in mimeType.lowercase()
+
+        fun matches(quality: AudioQuality): Boolean = when (quality) {
+            AudioQuality.AAC -> isAac && kbps <= AudioQuality.AAC.maxKbps
+            AudioQuality.HIGH -> true
+            AudioQuality.MEDIUM, AudioQuality.LOW -> kbps <= quality.maxKbps
+        }
+    }
 
     /**
      * Stream URLs already resolved, by videoId — and, since [resolve] only ever
@@ -1380,6 +1990,7 @@ object StreamResolver {
      */
     private val recent = ConcurrentHashMap<String, Resolved>()
 
+
     private const val URL_TTL_MS = 20 * 60 * 1000L
 
     /** Enough for the queue in hand; this is a latency cache, not a store. */
@@ -1391,12 +2002,18 @@ object StreamResolver {
     /** Long enough for a freshly minted visitor id to be worth anything, short enough not to be felt. */
     private const val DOWNLOAD_RETRY_MS = 500L
 
-    private fun remember(videoId: String, url: String) {
+    private fun remember(videoId: String, stream: Stream) {
+        if (validHttpStreamUrl(videoId, stream.url, "resolved cache") == null) return
         if (recent.size >= MAX_REMEMBERED) {
             val cutoff = SystemClock.elapsedRealtime() - URL_TTL_MS
             recent.entries.removeAll { it.value.at < cutoff }
             if (recent.size >= MAX_REMEMBERED) recent.clear()
         }
-        recent[videoId] = Resolved(url, SystemClock.elapsedRealtime())
+        recent[videoId] = Resolved(
+            stream.url,
+            SystemClock.elapsedRealtime(),
+            stream.mimeType,
+            stream.kbps,
+        )
     }
 }

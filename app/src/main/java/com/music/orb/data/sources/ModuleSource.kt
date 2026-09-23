@@ -158,6 +158,8 @@ class ModuleSource(
                 durationText = track.duration.takeIf { it > 0 }
                     ?.let { "${it / 60}:${"%02d".format(it % 60)}" },
                 sourceQuality = rowTier(track),
+                isExplicit = track.explicit == true ||
+                        track.isExplicit == true || track.explicitContent == true,
             )
         }
     }
@@ -237,7 +239,7 @@ class ModuleSource(
                 TrackLog.w(
                     TAG,
                     "${config.displayName}: $moduleId returned a malformed URL for " +
-                        "$upstreamId; skipping it — ${url.take(120)}",
+                            "$upstreamId; skipping it — ${url.take(120)}",
                 )
                 return@withContext null
             }
@@ -320,8 +322,8 @@ class ModuleSource(
     private val StreamRequest.tier: String
         get() = when (this) {
             is StreamRequest.Lossless -> LOSSLESS
-            is StreamRequest.Best -> HIGH
             is StreamRequest.Aac -> HIGH
+            is StreamRequest.Best -> HIGH
             is StreamRequest.Capped -> if (maxKbps <= LOW_CEILING_KBPS) LOW else HIGH
         }
 

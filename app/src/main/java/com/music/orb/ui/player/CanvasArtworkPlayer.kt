@@ -31,6 +31,9 @@ import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.annotation.RequiresApi
@@ -54,13 +57,15 @@ import com.music.orb.data.canvas.CanvasArtwork
  * A second, deliberately unassuming ExoPlayer: silent, with its audio track
  * switched off entirely so a clip's soundtrack is never even fetched, and no
  * audio attributes — taking focus here would duck the music this is decorating.
- * It follows the transport, so pausing the track stops the sleeve moving too.
+ * It is intentionally independent from the audio transport: once visible,
+ * the artwork keeps looping even while the song itself is paused.
  *
  * Nothing is drawn until the first frame arrives, and the fade in from there
  * means a failed or slow clip simply leaves the still art showing rather than
  * flashing a black square over it. [CanvasArtwork.fallbackUrl] gets one try if
  * the first rendition won't decode.
  */
+@Suppress("UNUSED_PARAMETER")
 @OptIn(UnstableApi::class)
 @Composable
 fun CanvasArtworkPlayer(
@@ -70,7 +75,7 @@ fun CanvasArtworkPlayer(
     /** Fires once the clip has an actual frame on screen, and again if it drops back to none. */
     onRenderedChanged: (Boolean) -> Unit = {},
     /** A single frame off the playing clip, for callers that want to re-tint around it. */
-    onFrameCaptured: (Bitmap) -> Unit = {},
+    onFrameCaptured: ((Bitmap) -> Unit)? = null,
     /**
      * How much of whatever is behind the clip it is currently hiding: 0 while
      * nothing is drawn, ramping to 1 as the first frame fades in, and back down
@@ -93,6 +98,7 @@ fun CanvasArtworkPlayer(
     bottomFade: Float = 0f,
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
 
     var url by remember(canvas) { mutableStateOf(canvas.url) }
     var rendered by remember(canvas) { mutableStateOf(false) }
@@ -101,6 +107,9 @@ fun CanvasArtworkPlayer(
     var clipAspect by remember(canvas) { mutableFloatStateOf(0f) }
     var bounds by remember { mutableStateOf(IntSize.Zero) }
     var textureView by remember(canvas) { mutableStateOf<TextureView?>(null) }
+    var appVisible by remember(lifecycleOwner) {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+    }
 
     val player = remember {
         ExoPlayer.Builder(context)
@@ -117,6 +126,26 @@ fun CanvasArtworkPlayer(
                     .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
                     .build()
             }
+    }
+
+    DisposableEffect(lifecycleOwner, player) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START, Lifecycle.Event.ON_RESUME -> {
+                    appVisible = true
+                    player.playWhenReady = true
+                }
+                Lifecycle.Event.ON_STOP, Lifecycle.Event.ON_DESTROY -> {
+                    appVisible = false
+                    player.playWhenReady = false
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        appVisible = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+        player.playWhenReady = appVisible
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     DisposableEffect(player) {
@@ -157,20 +186,22 @@ fun CanvasArtworkPlayer(
         val item = MediaItem.Builder().setUri(url)
         mimeTypeOf(url)?.let { item.setMimeType(it) }
         player.setMediaItem(item.build())
+        // Motion artwork is decorative and independent from the audio transport, but there is no
+        // reason to decode it while Orb itself is backgrounded.
+        player.playWhenReady = appVisible
         player.prepare()
     }
 
-    LaunchedEffect(isPlaying) { player.playWhenReady = isPlaying }
-
+    val frameCaptureCallback by rememberUpdatedState(onFrameCaptured)
     LaunchedEffect(rendered) {
         onRenderedChanged(rendered)
         if (!rendered) return@LaunchedEffect
-        // Let the surface actually paint the frame that just triggered this
-        // before reading it back — grabbing it the instant the callback fires
-        // can still catch the previous, empty buffer.
+        val capture = frameCaptureCallback ?: return@LaunchedEffect
+        // TextureView.getBitmap() allocates a full frame. Do not even touch it unless a caller
+        // explicitly consumes the result (the normal Now Playing/Detail paths do not).
         withFrameMillis { }
         val view = textureView ?: return@LaunchedEffect
-        runCatching { view.getBitmap() }.getOrNull()?.let(onFrameCaptured)
+        runCatching { view.getBitmap() }.getOrNull()?.let(capture)
     }
 
     val alpha by animateFloatAsState(

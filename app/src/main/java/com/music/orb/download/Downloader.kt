@@ -4,6 +4,7 @@ import com.music.orb.data.DebugLog as Log
 import com.music.orb.data.Http
 import com.music.orb.data.innertube.PlayerClient
 import com.music.orb.data.innertube.StreamResolver
+import com.music.orb.data.sources.SourceStream
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
@@ -126,6 +127,58 @@ object Downloader {
     }
 
     /**
+     * Saves the exact rendition that playback already selected.
+     *
+     * A googlevideo URL keeps the fast ranged downloader but is never
+     * re-resolved on refusal: re-resolving could silently change bitrate and
+     * defeat the promise that an offline copy matches the quality the listener
+     * actually found. Other source URLs use their normal one-shot transfer.
+     */
+    suspend fun fetchPinned(
+        stream: SourceStream,
+        sink: OutputStream,
+        onProgress: (written: Long, total: Long) -> Unit,
+    ): Long = withContext(Dispatchers.IO) {
+        val host = stream.url.toHttpUrlOrNull()?.host.orEmpty()
+        if (!host.endsWith("googlevideo.com") && !host.contains(".googlevideo.com")) {
+            return@withContext fetchDirect(stream.url, stream.headers, sink, onProgress)
+        }
+
+        val headers = stream.headers.ifEmpty { PlayerClient.forStreamUrl(stream.url).mediaHeaders() }
+        val total = contentLengthPinned(stream.url, headers)
+            ?: error("Track unavailable: no length to fetch")
+        var position = 0L
+        val buffer = ByteArray(BUFFER_BYTES)
+
+        while (position < total) {
+            coroutineContext.ensureActive()
+            val length = minOf(CHUNK_BYTES, total - position)
+            openPinned(stream.url, headers, position, length).use { response ->
+                if (response.code in REFUSAL_CODES) {
+                    error("The selected audio quality expired — try the download again")
+                }
+                if (response.code !in 200..299) error("Download failed (HTTP ${response.code})")
+                val body = response.body ?: error("Download failed: empty response")
+                val source = body.byteStream()
+                var readForChunk = 0L
+                while (readForChunk < length) {
+                    coroutineContext.ensureActive()
+                    val wanted = minOf(buffer.size.toLong(), length - readForChunk).toInt()
+                    val read = source.read(buffer, 0, wanted)
+                    if (read == -1) break
+                    sink.write(buffer, 0, read)
+                    readForChunk += read
+                    position += read
+                    onProgress(position, total)
+                }
+                if (readForChunk == 0L) error("Download stalled at ${position}B")
+            }
+        }
+        sink.flush()
+        position
+    }
+
+    /**
      * Fetch all of [url] into [sink], for a stream that isn't googlevideo's.
      *
      * Deliberately not a parameterised [fetch], on two counts that both matter:
@@ -192,6 +245,34 @@ object Downloader {
             Log.d(TAG, "fetched ${written}B directly")
             written
         }
+    }
+
+    private fun openPinned(
+        url: String,
+        headers: Map<String, String>,
+        position: Long,
+        length: Long,
+    ) = Http.client.newCall(
+        Request.Builder()
+            .url(url)
+            .header("Range", "bytes=$position-${position + length - 1}")
+            .apply { headers.forEach { (name, value) -> header(name, value) } }
+            .build(),
+    ).execute()
+
+    private fun contentLengthPinned(url: String, headers: Map<String, String>): Long? {
+        url.toHttpUrlOrNull()?.queryParameter("clen")?.toLongOrNull()
+            ?.takeIf { it > 0 }
+            ?.let { return it }
+        return runCatching {
+            openPinned(url, headers, 0, 1).use { response ->
+                response.header("Content-Range")
+                    ?.substringAfter('/', "")
+                    ?.toLongOrNull()
+                    ?.takeIf { it > 0 }
+                    ?: response.header("Content-Length")?.toLongOrNull()?.takeIf { it > 0 }
+            }
+        }.onFailure { Log.w(TAG, "could not measure selected rendition: ${it.message}") }.getOrNull()
     }
 
     private fun open(url: String, position: Long, length: Long) = Http.client

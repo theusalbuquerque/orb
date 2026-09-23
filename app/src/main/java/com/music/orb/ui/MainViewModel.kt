@@ -3,18 +3,30 @@ package com.music.orb.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.music.orb.R
 import com.music.orb.auth.AuthStore
+import com.music.orb.auth.OrbGoogleAuth
+import com.music.orb.auth.YouTubeBrowserSession
+import com.music.orb.data.canvas.ArtistArtworkRepository
 import com.music.orb.data.AppUpdateChecker
+import com.music.orb.data.ArtistCreditResolver
 import com.music.orb.data.LocalMediaRepository
+import com.music.orb.data.library.OrbLibraryStore
 import com.music.orb.data.YtMusicRepository
 import com.music.orb.data.lyrics.LyricLine
 import com.music.orb.data.lyrics.LyricsRepository
 import com.music.orb.data.lyrics.LyricsSource
 import com.music.orb.data.settings.AppSettings
+import com.music.orb.data.settings.ArtistPreference
+import com.music.orb.data.settings.ArtistPreferenceStore
+import com.music.orb.data.settings.LikeStatusStore
 import com.music.orb.data.innertube.Innertube
 import com.music.orb.data.innertube.PlaybackTracker
 import com.music.orb.data.innertube.StreamResolver
 import com.music.orb.data.model.Account
+import com.music.orb.data.model.ArtistPage
+import com.music.orb.data.model.ArtistLink
+import com.music.orb.data.model.BrowseItem
 import com.music.orb.data.model.BrowseType
 import com.music.orb.data.model.DetailPage
 import com.music.orb.data.model.HomeShelf
@@ -24,18 +36,34 @@ import com.music.orb.data.model.LikeStatus
 import com.music.orb.data.model.PlaylistPrivacy
 import com.music.orb.data.model.SearchFilter
 import com.music.orb.data.model.SearchResult
+import com.music.orb.data.model.ShelfItem
 import com.music.orb.data.model.Song
 import com.music.orb.data.model.SongMenu
 import com.music.orb.data.model.UiState
 import com.music.orb.data.model.UserPlaylist
 import com.music.orb.data.settings.SearchHistory
+import com.music.orb.data.settings.SearchHistoryEntry
+import com.music.orb.data.social.SocialRepository
+import com.music.orb.data.stats.TrackLanguageResolver
+import com.music.orb.data.social.OrbSongRatingMutation
+import com.music.orb.ui.notifications.OrbNotice
+import com.music.orb.ui.notifications.OrbNoticeCenter
+import com.music.orb.ui.notifications.OrbNoticeIcon
 import android.util.LruCache
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -45,10 +73,17 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import com.music.orb.data.sources.SourceKind
 import com.music.orb.data.sources.SourceRegistry
+import com.music.orb.data.sources.SourceResolver
+import java.text.Normalizer
+import java.time.Instant
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
@@ -60,6 +95,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _home = MutableStateFlow<UiState<List<HomeShelf>>>(UiState.Loading)
     val home: StateFlow<UiState<List<HomeShelf>>> = _home.asStateFlow()
+
+    // YouTube-owned shelves used only by the curated For You page. They are
+    // independent from AppSettings.useYouTubeMusicLibrary: Home should still
+    // show the linked YouTube account's saved songs and Recaps when Orb's own
+    // library is selected as the app-wide save backend.
+    private val _homeYouTubeSections = MutableStateFlow<List<HomeShelf>>(emptyList())
+    val homeYouTubeSections: StateFlow<List<HomeShelf>> = _homeYouTubeSections.asStateFlow()
+    private var homeYouTubeSectionsJob: Job? = null
+    private var homeYouTubeSectionsLoaded = false
 
     /**
      * Token for the next page of Home shelves; null once there's nothing
@@ -75,14 +119,70 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _homeLoadingMore = MutableStateFlow(false)
     val homeLoadingMore: StateFlow<Boolean> = _homeLoadingMore.asStateFlow()
 
+    /**
+     * The priority Home pass (personalised shelves plus supplemental releases)
+     * has finished. Explore and Library may fetch raw catalogue data earlier,
+     * but their costly badge preflights wait for this or a safety timeout.
+     */
+    private val homePriorityPassReady = MutableStateFlow(false)
+
+    /**
+     * Number of remote detail pages currently on their latency-sensitive path.
+     * Background Home/Search/artist-shelf enrichment waits while this is non-zero,
+     * so a page the listener actually opened gets first claim on Innertube and
+     * source work instead of sitting behind speculative prefetches.
+     */
+    private val detailBadgePriorityCount = MutableStateFlow(0)
+
+    /**
+     * Invalidates an older progressive Home pipeline without making network
+     * cancellation part of correctness. A late page may finish its HTTP call,
+     * but it is never allowed to publish over the newer request.
+     */
+    private val homeGeneration = AtomicLong(0L)
+
+    /** Background badge/cache enrichment for the current Home generation. */
+    private var homeBadgeWarmJob: Job? = null
+
+    /** Prevents the four-minute listening-history timer from overlapping requests. */
+    private var recentlyPlayedRefreshJob: Job? = null
+
     private val _explore = MutableStateFlow<UiState<List<HomeShelf>>>(UiState.Loading)
     val explore: StateFlow<UiState<List<HomeShelf>>> = _explore.asStateFlow()
+
+    private val _releasesHub = MutableStateFlow<UiState<List<HomeShelf>>>(UiState.Loading)
+    val releasesHub: StateFlow<UiState<List<HomeShelf>>> = _releasesHub.asStateFlow()
+
+    private val _trendingHub = MutableStateFlow<UiState<List<HomeShelf>>>(UiState.Loading)
+    val trendingHub: StateFlow<UiState<List<HomeShelf>>> = _trendingHub.asStateFlow()
+
+    private val _discoverHub = MutableStateFlow<UiState<List<HomeShelf>>>(UiState.Loading)
+    val discoverHub: StateFlow<UiState<List<HomeShelf>>> = _discoverHub.asStateFlow()
+
+    private val _communityPlaylistsHub = MutableStateFlow<UiState<List<HomeShelf>>>(UiState.Loading)
+    val communityPlaylistsHub: StateFlow<UiState<List<HomeShelf>>> = _communityPlaylistsHub.asStateFlow()
+
+    // A completed page is session cache. Re-entering a tab/filter must never
+    // make it fetch again by itself; force=true and pull-to-refresh are the
+    // explicit invalidation paths.
+    private var releasesHubRequested = false
+    private var trendingHubRequested = false
+    private var discoverHubRequested = false
+    private var communityPlaylistsHubRequested = false
+
+    private var releasesHubStale = true
+    private var trendingHubStale = true
+    private var discoverHubStale = true
+    private var communityPlaylistsHubStale = true
 
     private val _query = MutableStateFlow("")
     val query: StateFlow<String> = _query.asStateFlow()
 
     private val _results = MutableStateFlow<UiState<List<SearchResult>>?>(null)
     val results: StateFlow<UiState<List<SearchResult>>?> = _results.asStateFlow()
+
+    private val _searchRefreshing = MutableStateFlow(false)
+    val searchRefreshing: StateFlow<Boolean> = _searchRefreshing.asStateFlow()
 
     /** Songs is the default tab; there is no "All" tab any more. */
     private val _filter = MutableStateFlow(SearchFilter.SONGS)
@@ -105,6 +205,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     private val _suggestions = MutableStateFlow<List<String>>(emptyList())
     val suggestions: StateFlow<List<String>> = _suggestions.asStateFlow()
+
+    /** The query whose typeahead response is still allowed to publish. */
+    private var suggestionWantedFor: String? = null
 
     // The search pipeline's own state. Declared here, above [init], because
     // that is where the collector is started from and a property declared
@@ -146,7 +249,66 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * up for the moment the narrower one takes rather than blanking the page
      * to a spinner.
      */
-    private val searchCache = LruCache<String, List<SearchResult>>(SEARCH_CACHE_ENTRIES)
+    private val searchCache = object : LruCache<String, List<SearchResult>>(SEARCH_CACHE_ENTRIES) {
+        override fun sizeOf(key: String, value: List<SearchResult>): Int =
+            1 + value.size / 50
+    }
+
+    /**
+     * First-page detail data prepared while a collection is still only a card.
+     *
+     * Album/playlist headers need the first browse response for their real action
+     * row, library state and track count. Keeping that response warm means opening
+     * a card does not have to build the header in several visible stages.
+     */
+    private data class DetailWarmEntry(
+        val page: YtMusicRepository.SongPage?,
+        val pageError: Throwable?,
+        val canonicalSubtitle: String?,
+    )
+
+    private val detailWarmCache = object : LruCache<String, DetailWarmEntry>(DETAIL_WARM_CACHE_ENTRIES) {
+        override fun sizeOf(key: String, value: DetailWarmEntry): Int =
+            1 + (value.page?.songs?.size ?: 0) / 50
+    }
+    private val detailWarmups = mutableMapOf<String, Deferred<DetailWarmEntry>>()
+
+    /** Artist landing responses are small and ideal for card-time prewarming. */
+    private val artistWarmCache = object : LruCache<String, ArtistPage>(ARTIST_WARM_CACHE_ENTRIES) {
+        override fun sizeOf(key: String, value: ArtistPage): Int =
+            1 + value.songs.size / 20 + value.sections.sumOf { it.items.size } / 40
+    }
+    private val artistWarmups = mutableMapOf<String, Deferred<ArtistPage?>>()
+    private val backgroundArtistWarmupGate = Semaphore(ARTIST_WARMUP_CONCURRENCY)
+
+    /**
+     * Speculative card prefetch is intentionally much narrower than foreground
+     * navigation. A feed may contain dozens of collections; letting all of them
+     * browse at once can queue the album the user actually tapped behind work
+     * nobody is looking at. Foreground detail requests do not use this gate.
+     */
+    private val backgroundDetailWarmupGate = Semaphore(DETAIL_WARMUP_CONCURRENCY)
+
+    /**
+     * Fully loaded pages retained as a small access-order working set. DetailPage can carry a
+     * complete track list, header metadata and recommendations, so keeping every page opened in a
+     * long session made RAM usage grow without bound. The weighted budget charges large track lists more than small ones;
+     * older pages are fetched again if revisited.
+     */
+    private val detailPageCache = object : LruCache<String, DetailPage>(DETAIL_PAGE_CACHE_ENTRIES) {
+        override fun sizeOf(key: String, value: DetailPage): Int =
+            1 + ((value.songs as? UiState.Success)?.data?.size ?: 0) / 100
+    }
+    private val detailOpeningJobs = mutableMapOf<String, Job>()
+    private val detailContinuationJobs = mutableMapOf<String, Job>()
+    private val detailArtistVersionsJobs = mutableMapOf<String, Job>()
+
+    private fun cancelDetailContinuations() {
+        detailContinuationJobs.values.forEach { it.cancel() }
+        detailContinuationJobs.clear()
+    }
+    private val _refreshingDetails = MutableStateFlow(emptySet<String>())
+    val refreshingDetails: StateFlow<Set<String>> = _refreshingDetails.asStateFlow()
 
     /** Synced lyrics for whatever is playing; null while unknown or absent. */
     private val _lyrics = MutableStateFlow<List<LyricLine>?>(null)
@@ -173,7 +335,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * than leaving the last answer sitting on a player that would now find a
      * different one.
      */
-    private var lyricsFor: Pair<String, Set<LyricsSource>>? = null
+    private var lyricsFor: Triple<String, Set<LyricsSource>, Boolean>? = null
 
     /** Called as the playing track changes; cheap no-op when already loaded. */
     fun loadLyrics(
@@ -188,7 +350,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         } else {
             emptySet()
         }
-        val key = videoId to sources
+        val prioritizeSyllableSync = AppSettings.prioritizeSyllableSync.value
+        val key = Triple(videoId, sources, prioritizeSyllableSync)
         if (lyricsFor == key) return
         lyricsFor = key
         _lyrics.value = null
@@ -209,9 +372,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         lyricsJob = viewModelScope.launch {
             val found =
-                LyricsRepository.lyrics(videoId, title, artist, durationMs, album, sources)
+                LyricsRepository.lyrics(
+                    videoId, title, artist, durationMs, album, sources, prioritizeSyllableSync,
+                )
             _lyrics.value = found?.lines
             _lyricsSource.value = found?.source
+            found?.lines?.let { lines ->
+                TrackLanguageResolver.rememberFromLyrics(videoId, lines)
+            }
             _lyricsChecked.value = true
         }
     }
@@ -247,7 +415,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     private val _likeOverrides = MutableStateFlow<Map<String, LikeStatus>>(emptyMap())
 
-    /** Every rating known for this account: the library's, then this session's. */
+    /** Persistent positive/blocked artist choices from the artist info panel. */
+    private val _artistPreferences = MutableStateFlow<Map<String, ArtistPreference>>(emptyMap())
+    val artistPreferences: StateFlow<Map<String, ArtistPreference>> = _artistPreferences.asStateFlow()
+
+    /** One serialized YouTube outbox worker per video id. */
+    private val youtubeRatingSyncJobs = mutableMapOf<String, Job>()
+    private var cloudRatingReconcileJob: Job? = null
+
+    /** Every rating known for this account: the library's, then Orb's durable overlay. */
     val likeStatuses: StateFlow<Map<String, LikeStatus>> =
         combine(_library, _likeOverrides) { library, overrides ->
             val liked = (library as? UiState.Success)?.data?.likedSongs
@@ -257,37 +433,408 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
 
     fun likeStatusOf(videoId: String): LikeStatus =
-        likeStatuses.value[videoId] ?: LikeStatus.INDIFFERENT
+        _likeOverrides.value[videoId]
+            ?: likeStatuses.value[videoId]
+            ?: LikeStatus.INDIFFERENT
 
     /**
-     * Sets (or clears) the thumbs rating on [videoId].
-     *
-     * Written to the screen first and rolled back if YouTube refuses. A rating
-     * is a one-tap, low-stakes action taken while a song is playing; waiting
-     * on a round trip before the heart fills reads as the tap not having
-     * registered, and people tap again.
+     * A recording alias lets the same catalogue recording keep its heart when
+     * YouTube returns another video id (single/album result, re-indexed row,
+     * etc.). Duration is bucketed only to avoid colliding same-title tracks by
+     * the same artist while tolerating tiny source-duration differences.
      */
-    fun setLike(videoId: String, status: LikeStatus) {
-        if (!requireSignIn()) return
-        val previous = likeStatusOf(videoId)
-        if (previous == status) return
-        _likeOverrides.value += (videoId to status)
-        viewModelScope.launch {
-            YtMusicRepository.rate(videoId, status).fold(
-                onSuccess = {
-                    // Liked Music is now out of date either way.
-                    libraryStale = true
-                    if (status != LikeStatus.LIKE) dropFromLikedLists(videoId)
-                    // Clearing the heart means forgetting the song, not
-                    // demoting it — see [forgetFromLibrary].
-                    val unliked = previous == LikeStatus.LIKE &&
-                        status == LikeStatus.INDIFFERENT
-                    if (unliked) forgetFromLibrary(videoId)
-                },
-                onFailure = {
-                    _likeOverrides.value += (videoId to previous)
-                },
+    fun likeStatusOf(
+        song: Song,
+        statuses: Map<String, LikeStatus> = likeStatuses.value,
+    ): LikeStatus {
+        val recordingKey = recordingLikeKey(song)
+        return recordingKey?.let(statuses::get)
+            ?: statuses[song.videoId]
+            ?: LikeStatus.INDIFFERENT
+    }
+
+    fun artistPreferenceOf(artistName: String): ArtistPreference =
+        _artistPreferences.value[ArtistPreferenceStore.artistKey(artistName)] ?: ArtistPreference.NEUTRAL
+
+    fun toggleArtistLike(artistName: String) {
+        val target = if (artistPreferenceOf(artistName) == ArtistPreference.LIKE) {
+            ArtistPreference.NEUTRAL
+        } else {
+            ArtistPreference.LIKE
+        }
+        setArtistPreference(artistName, target)
+    }
+
+    fun toggleArtistBlock(artistName: String) {
+        val target = if (artistPreferenceOf(artistName) == ArtistPreference.BLOCK) {
+            ArtistPreference.NEUTRAL
+        } else {
+            ArtistPreference.BLOCK
+        }
+        setArtistPreference(artistName, target)
+    }
+
+    private fun setArtistPreference(artistName: String, preference: ArtistPreference) {
+        val key = ArtistPreferenceStore.artistKey(artistName)
+        if (key.isBlank()) return
+        val updated = _artistPreferences.value.toMutableMap().apply {
+            if (preference == ArtistPreference.NEUTRAL) remove(key) else put(key, preference)
+        }
+        _artistPreferences.value = updated
+        ArtistPreferenceStore.set(artistPreferenceAccountKey(), artistName, preference)
+        // The Albums tab's lead carousel is keyed to explicit artist favorites.
+        // Re-entering the tab after changing this preference must rebuild it.
+        releasesHubRequested = false
+        releasesHubStale = true
+        pruneExcludedRecommendations()
+    }
+
+    /**
+     * One exclusion rule shared by AutoPlay, user queues and recommendation UI.
+     * Search intentionally does not call this: disliked/blocked music remains
+     * discoverable so the listener can inspect it or undo the preference.
+     */
+    fun shouldAvoidPlayback(song: Song): Boolean =
+        isDislikedRecording(song) || isBlockedArtistCredit(song.artist)
+
+    /**
+     * Be stricter than the visual heart when guarding transport. Catalogue
+     * surfaces can return the same recording under a different video id or
+     * without a duration; a recorded dislike still wins for the same normalized
+     * title + artist instead of letting that alternate upload re-enter AutoPlay.
+     */
+    private fun isDislikedRecording(song: Song): Boolean {
+        if (likeStatusOf(song) == LikeStatus.DISLIKE) return true
+        val title = normalizeRatingToken(song.title).takeIf { it.isNotBlank() } ?: return false
+        val artist = normalizeRatingToken(song.artist).takeIf { it.isNotBlank() } ?: return false
+        val prefix = "rec:v1:$title|$artist|"
+        return likeStatuses.value.any { (key, status) ->
+            key.startsWith(prefix) && status == LikeStatus.DISLIKE
+        }
+    }
+
+    private fun isBlockedArtistCredit(credit: String): Boolean {
+        val blocked = _artistPreferences.value
+            .filterValues { it == ArtistPreference.BLOCK }
+            .keys
+        if (blocked.isEmpty() || credit.isBlank()) return false
+        val resolved = ArtistCreditResolver.creditsForCounting(credit)
+        return resolved.any { ArtistPreferenceStore.artistKey(it) in blocked } ||
+            ArtistPreferenceStore.artistKey(credit) in blocked
+    }
+
+    /** Positive counterpart to the hard block: a mild local ranking signal. */
+    fun shouldPreferPlayback(song: Song): Boolean = isLikedArtistCredit(song.artist)
+
+    private fun isLikedArtistCredit(credit: String): Boolean {
+        val liked = _artistPreferences.value
+            .filterValues { it == ArtistPreference.LIKE }
+            .keys
+        if (liked.isEmpty() || credit.isBlank()) return false
+        val resolved = ArtistCreditResolver.creditsForCounting(credit)
+        return resolved.any { ArtistPreferenceStore.artistKey(it) in liked } ||
+            ArtistPreferenceStore.artistKey(credit) in liked
+    }
+
+    private fun shouldAvoidRecommendation(item: ShelfItem): Boolean {
+        if (item.type == BrowseType.ARTIST && isBlockedArtistCredit(item.title)) return true
+        item.videoId?.takeIf { it.isNotBlank() }?.let { videoId ->
+            val song = Song(
+                videoId = videoId,
+                title = item.title,
+                artist = item.subtitle,
+                thumbnailUrl = item.thumbnailUrl,
+                durationText = item.durationText,
+                artistId = item.artistId,
+                albumId = item.albumId,
+                albumName = item.albumName,
+                isVideo = item.isVideo,
+                isExplicit = item.isExplicit,
             )
+            if (shouldAvoidPlayback(song)) return true
+        }
+        if (item.type == BrowseType.ALBUM) {
+            val creditSegments = item.subtitle.split("•", "·")
+                .map(String::trim)
+                .filter(String::isNotBlank)
+            if (creditSegments.any(::isBlockedArtistCredit)) return true
+        }
+        return false
+    }
+
+    private fun shouldPreferRecommendation(item: ShelfItem): Boolean = when {
+        item.type == BrowseType.ARTIST -> isLikedArtistCredit(item.title)
+        !item.videoId.isNullOrBlank() -> isLikedArtistCredit(item.subtitle)
+        item.type == BrowseType.ALBUM -> item.subtitle
+            .split("•", "·")
+            .map(String::trim)
+            .filter(String::isNotBlank)
+            .any(::isLikedArtistCredit)
+        else -> false
+    }
+
+    private fun filterPersonalizedShelves(shelves: List<HomeShelf>): List<HomeShelf> = shelves
+        .map { shelf ->
+            val visible = shelf.items.filterNot(::shouldAvoidRecommendation)
+            // Keep YouTube's ordering intact except for a small explicit boost
+            // to artists the listener marked as liked in Orb. Kotlin's sort is
+            // stable, so equally ranked items stay in their original order.
+            shelf.copy(items = visible.sortedByDescending(::shouldPreferRecommendation))
+        }
+        .filter { it.items.isNotEmpty() }
+
+    private fun pruneExcludedRecommendations() {
+        val home = (_home.value as? UiState.Success)?.data
+        if (home != null) _home.value = UiState.Success(filterPersonalizedShelves(home))
+        _detailStack.value = _detailStack.value.map { page ->
+            if (page.suggestedSongs.isEmpty()) page
+            else page.copy(suggestedSongs = page.suggestedSongs.filterNot(::shouldAvoidPlayback))
+        }
+    }
+
+    private fun recordingLikeKey(song: Song): String? {
+        val title = normalizeRatingToken(song.title).takeIf { it.isNotBlank() } ?: return null
+        val artist = normalizeRatingToken(song.artist).takeIf { it.isNotBlank() } ?: return null
+        val durationBucket = parseDurationSeconds(song.durationText)?.let { seconds ->
+            ((seconds + 2) / 5) * 5
+        }
+        return buildString {
+            append("rec:v1:")
+            append(title)
+            append('|')
+            append(artist)
+            append('|')
+            append(durationBucket ?: "?")
+        }
+    }
+
+    private fun normalizeRatingToken(value: String): String =
+        Normalizer.normalize(value, Normalizer.Form.NFKC)
+            .lowercase(Locale.ROOT)
+            .trim()
+            .replace(Regex("\\s+"), " ")
+
+    private fun parseDurationSeconds(value: String?): Int? {
+        val parts = value?.trim()?.split(':') ?: return null
+        if (parts.isEmpty() || parts.any { it.toIntOrNull() == null }) return null
+        val seconds = when (parts.size) {
+            2 -> parts[0].toInt() * 60 + parts[1].toInt()
+            3 -> parts[0].toInt() * 3600 + parts[1].toInt() * 60 + parts[2].toInt()
+            else -> return null
+        }
+        return seconds.takeIf { it > 0 }
+    }
+
+    /**
+     * Sets Orb state first, then persists to Supabase and immediately mirrors to
+     * YouTube Music whenever that integration is active. Neither network target
+     * is allowed to roll the heart back on a transient failure.
+     */
+    fun setLike(song: Song, status: LikeStatus) = setLikeInternal(song, song.videoId, status)
+
+    /** Compatibility path for call sites that only have a video id. */
+    fun setLike(videoId: String, status: LikeStatus) = setLikeInternal(null, videoId, status)
+
+    private fun setLikeInternal(song: Song?, videoId: String, status: LikeStatus) {
+        if (!requireSignIn() || videoId.isBlank()) return
+        val previous = song?.let(::likeStatusOf) ?: likeStatusOf(videoId)
+        if (previous == status) return
+
+        val accountKey = likeAccountKey() ?: return
+        val recordingKey = song?.let(::recordingLikeKey)
+        val updatedAtMs = System.currentTimeMillis()
+        val localUpdates = buildMap {
+            put(videoId, status)
+            if (recordingKey != null) put(recordingKey, status)
+        }
+        _likeOverrides.value = _likeOverrides.value + localUpdates
+        LikeStatusStore.setMany(accountKey, localUpdates, updatedAtMs)
+
+        releasesHubStale = true
+        libraryStale = true
+        if (status != LikeStatus.LIKE) dropFromLikedLists(videoId)
+        if (status == LikeStatus.DISLIKE) pruneExcludedRecommendations()
+
+        persistRatingToOrbCloud(
+            song = song,
+            videoId = videoId,
+            recordingKey = recordingKey,
+            status = status,
+            updatedAtMs = updatedAtMs,
+        )
+
+        // The outbox is written before touching YouTube. If the integration is
+        // connected, start the request immediately; if it is disconnected, the
+        // same desired state is sent as soon as the integration becomes active.
+        LikeStatusStore.queueYoutube(
+            accountKey = accountKey,
+            videoId = videoId,
+            status = status,
+            forgetLibraryOnSuccess = previous == LikeStatus.LIKE && status == LikeStatus.INDIFFERENT,
+        )
+        startYoutubeRatingSync(videoId, accountKey)
+    }
+
+    private fun persistRatingToOrbCloud(
+        song: Song?,
+        videoId: String,
+        recordingKey: String?,
+        status: LikeStatus,
+        updatedAtMs: Long,
+    ) {
+        val mutation = OrbSongRatingMutation(
+            videoId = videoId,
+            recordingKey = recordingKey,
+            status = status.name,
+            title = song?.title,
+            artist = song?.artist,
+            album = song?.albumName,
+            durationText = song?.durationText,
+            updatedAt = Instant.ofEpochMilli(updatedAtMs).toString(),
+        )
+        viewModelScope.launch {
+            var retryMs = 750L
+            repeat(4) { attempt ->
+                val saved = runCatching { SocialRepository.setMySongRating(mutation) }.isSuccess
+                if (saved) return@launch
+                if (attempt < 3) {
+                    delay(retryMs)
+                    retryMs = (retryMs * 2).coerceAtMost(6_000L)
+                }
+            }
+            // The timestamped local copy remains authoritative. Startup/account
+            // reconciliation will retry any local row newer than the cloud.
+        }
+    }
+
+    /**
+     * Per-video serialized YouTube worker. Multiple rapid taps cannot finish out
+     * of order: while one request is in flight, a newer desired state replaces
+     * the outbox value and is sent immediately after the current request ends.
+     */
+    private fun startYoutubeRatingSync(videoId: String, accountKey: String? = likeAccountKey()) {
+        val syncAccountKey = accountKey ?: return
+        if (!youtubeLibraryBackendAvailable()) return
+        if (youtubeRatingSyncJobs[videoId]?.isActive == true) return
+
+        val job = viewModelScope.launch {
+            var retryMs = 1_000L
+            while (youtubeLibraryBackendAvailable()) {
+                val pending = LikeStatusStore.pendingYoutube(syncAccountKey)[videoId] ?: break
+                val result = YtMusicRepository.rate(videoId, pending.status)
+                if (result.isSuccess) {
+                    LikeStatusStore.clearYoutubeIfMatches(syncAccountKey, videoId, pending)
+                    if (
+                        pending.status == LikeStatus.INDIFFERENT &&
+                        pending.forgetLibraryOnSuccess
+                    ) {
+                        forgetFromLibrary(videoId)
+                    }
+                    retryMs = 1_000L
+                } else {
+                    delay(retryMs)
+                    retryMs = (retryMs * 2).coerceAtMost(60_000L)
+                }
+            }
+        }
+        youtubeRatingSyncJobs[videoId] = job
+        job.invokeOnCompletion {
+            viewModelScope.launch {
+                if (youtubeRatingSyncJobs[videoId] === job) {
+                    youtubeRatingSyncJobs.remove(videoId)
+                }
+                if (
+                    youtubeLibraryBackendAvailable() &&
+                    LikeStatusStore.pendingYoutube(syncAccountKey).containsKey(videoId)
+                ) {
+                    startYoutubeRatingSync(videoId, syncAccountKey)
+                }
+            }
+        }
+    }
+
+    private fun flushPendingYoutubeRatings() {
+        if (!youtubeLibraryBackendAvailable()) return
+        val accountKey = likeAccountKey() ?: return
+        LikeStatusStore.pendingYoutube(accountKey).keys.forEach { videoId ->
+            startYoutubeRatingSync(videoId, accountKey)
+        }
+    }
+
+    /**
+     * Pulls account ratings from Supabase and merges by timestamp. Old v1 local
+     * hearts are bulk-seeded into an empty/newer cloud only when the cloud does
+     * not already have a newer value for that exact video id.
+     */
+    private fun reconcileOrbRatingsFromCloud() {
+        if (!_signedIn.value) return
+        cloudRatingReconcileJob?.cancel()
+        cloudRatingReconcileJob = viewModelScope.launch {
+            val accountKey = likeAccountKey() ?: return@launch
+
+            // Supabase session restore can trail the local Google session by a
+            // fraction of a second after process start.
+            var userReady = SocialRepository.currentUserId() != null
+            var waitMs = 250L
+            var attempts = 0
+            while (!userReady && attempts < 6) {
+                delay(waitMs)
+                userReady = SocialRepository.currentUserId() != null
+                waitMs = (waitMs * 2).coerceAtMost(2_000L)
+                attempts++
+            }
+            if (!userReady) return@launch
+
+            val localBefore = LikeStatusStore.loadRecords(accountKey)
+            val remoteRows = runCatching { SocialRepository.mySongRatings() }.getOrNull()
+                ?: return@launch
+
+            fun parseUpdatedAt(value: String): Long =
+                runCatching { Instant.parse(value).toEpochMilli() }.getOrDefault(0L)
+
+            val remoteByKey = mutableMapOf<String, LikeStatusStore.StoredRating>()
+            val remoteExactUpdatedAt = mutableMapOf<String, Long>()
+            remoteRows.forEach { row ->
+                val status = runCatching { LikeStatus.valueOf(row.status) }.getOrNull()
+                    ?: return@forEach
+                val timestamp = parseUpdatedAt(row.updatedAt)
+                val stored = LikeStatusStore.StoredRating(status, timestamp)
+
+                val previousExact = remoteByKey[row.videoId]
+                if (previousExact == null || timestamp > previousExact.updatedAtMs) {
+                    remoteByKey[row.videoId] = stored
+                    remoteExactUpdatedAt[row.videoId] = timestamp
+                }
+                row.recordingKey?.takeIf { it.isNotBlank() }?.let { key ->
+                    val previousAlias = remoteByKey[key]
+                    if (previousAlias == null || timestamp > previousAlias.updatedAtMs) {
+                        remoteByKey[key] = stored
+                    }
+                }
+            }
+
+            val localToSeed = localBefore
+                .asSequence()
+                .filter { (key, value) ->
+                    !key.startsWith("rec:") &&
+                        value.updatedAtMs > (remoteExactUpdatedAt[key] ?: Long.MIN_VALUE)
+                }
+                .map { (videoId, value) ->
+                    OrbSongRatingMutation(
+                        videoId = videoId,
+                        status = value.status.name,
+                        updatedAt = Instant.ofEpochMilli(value.updatedAtMs.coerceAtLeast(0L)).toString(),
+                    )
+                }
+                .toList()
+
+            if (localToSeed.isNotEmpty()) {
+                runCatching { SocialRepository.setMySongRatings(localToSeed) }
+            }
+
+            LikeStatusStore.mergeRemote(accountKey, remoteByKey)
+            _likeOverrides.value = LikeStatusStore.load(accountKey)
+            pruneExcludedRecommendations()
         }
     }
 
@@ -348,12 +895,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** The heart: liked becomes neutral, anything else becomes liked. */
+    fun toggleLike(song: Song) = setLike(
+        song,
+        if (likeStatusOf(song) == LikeStatus.LIKE) LikeStatus.INDIFFERENT else LikeStatus.LIKE,
+    )
+
     fun toggleLike(videoId: String) = setLike(
         videoId,
         if (likeStatusOf(videoId) == LikeStatus.LIKE) LikeStatus.INDIFFERENT else LikeStatus.LIKE,
     )
 
     /** As [toggleLike], for the thumb-down. */
+    fun toggleDislike(song: Song) = setLike(
+        song,
+        if (likeStatusOf(song) == LikeStatus.DISLIKE) {
+            LikeStatus.INDIFFERENT
+        } else {
+            LikeStatus.DISLIKE
+        },
+    )
+
     fun toggleDislike(videoId: String) = setLike(
         videoId,
         if (likeStatusOf(videoId) == LikeStatus.DISLIKE) {
@@ -377,7 +938,38 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun toggleLibrary(browseId: String) {
         if (!requireSignIn()) return
-        val current = _detailStack.value.firstOrNull { it.browseId == browseId }?.library ?: return
+        val page = _detailStack.value.firstOrNull { it.browseId == browseId } ?: return
+
+        if (!youtubeLibraryBackendAvailable()) {
+            if (page.type != BrowseType.ALBUM && page.type != BrowseType.PLAYLIST) return
+            val context = getApplication<Application>()
+            val currentSaved = OrbLibraryStore.containsCollection(context, browseId)
+            val target = !currentSaved
+            OrbLibraryStore.setCollection(
+                context = context,
+                item = ShelfItem(
+                    title = page.title,
+                    subtitle = page.subtitle,
+                    thumbnailUrl = page.thumbnailUrl,
+                    videoId = null,
+                    browseId = page.browseId,
+                    isExplicit = page.isExplicit,
+                    type = page.type,
+                ),
+                saved = target,
+            )
+            _detailStack.value = _detailStack.value.map { current ->
+                if (current.browseId == browseId) {
+                    current.copy(library = LibraryState(playlistId = browseId, saved = target))
+                } else {
+                    current
+                }
+            }
+            publishOrbLibrary()
+            return
+        }
+
+        val current = page.library ?: return
         val target = !current.saved
         setSavedOnPage(browseId, target)
         viewModelScope.launch {
@@ -403,6 +995,72 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 page.copy(library = library.copy(saved = saved))
             }
         }
+        // A warmed first page carries the old library toggle state.
+        invalidateDetailWarm(browseId)
+    }
+
+    /**
+     * Adds/removes one track from whichever library backend is selected.
+     *
+     * The YouTube backend is used whenever its private account session is available.
+     * Otherwise the action falls back to Orb's on-device library, which deliberately
+     * does not require a YouTube connection. YouTube writes still fetch a fresh menu
+     * token because those opaque tokens are not reversible and become stale after a
+     * successful write.
+     */
+    fun toggleSongLibrary(song: Song) {
+        if (!youtubeLibraryBackendAvailable()) {
+            val context = getApplication<Application>()
+            val target = !OrbLibraryStore.containsSong(context, song.videoId)
+            OrbLibraryStore.setSong(context, song, target)
+            _songMenu.value = SongMenu(
+                likeStatus = null,
+                inLibrary = target,
+                addToLibraryToken = null,
+                removeFromLibraryToken = null,
+            )
+            songMenuFor = song.videoId
+            publishOrbLibrary()
+            OrbNoticeCenter.post(
+                OrbNotice(
+                    title = context.getString(
+                        if (target) R.string.notice_added_to_library
+                        else R.string.notice_removed_from_library,
+                    ),
+                    message = song.title,
+                    icon = OrbNoticeIcon.LIBRARY,
+                ),
+            )
+            return
+        }
+
+        // The sheet may still be finishing its initial menu lookup. Once the
+        // user acts, that stale read must not land after the write and restore
+        // the old library state in the UI.
+        songMenuJob?.cancel()
+        songMenuJob = null
+        viewModelScope.launch {
+            val menu = YtMusicRepository.songMenu(song.videoId).getOrNull() ?: return@launch
+            val target = !menu.inLibrary
+            val token = if (target) menu.addToLibraryToken else menu.removeFromLibraryToken
+            token ?: return@launch
+            if (YtMusicRepository.setLibraryStatus(token).isSuccess) {
+                _songMenu.value = menu.copy(inLibrary = target)
+                songMenuFor = song.videoId
+                libraryStale = true
+                val context = getApplication<Application>()
+                OrbNoticeCenter.post(
+                    OrbNotice(
+                        title = context.getString(
+                            if (target) R.string.notice_added_to_library
+                            else R.string.notice_removed_from_library,
+                        ),
+                        message = song.title,
+                        icon = OrbNoticeIcon.LIBRARY,
+                    ),
+                )
+            }
+        }
     }
 
     /**
@@ -413,6 +1071,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val songMenu: StateFlow<SongMenu?> = _songMenu.asStateFlow()
 
     private var songMenuJob: Job? = null
+    private var songMenuFor: String? = null
 
     /**
      * Loads the account state behind an opening track menu — the library
@@ -432,15 +1091,30 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun loadSongMenu(videoId: String?) {
         songMenuJob?.cancel()
         _songMenu.value = null
-        if (videoId == null || !_signedIn.value) return
+        songMenuFor = videoId
+        if (videoId == null) return
+
+        if (!youtubeLibraryBackendAvailable()) {
+            val saved = OrbLibraryStore.containsSong(getApplication<Application>(), videoId)
+            _songMenu.value = SongMenu(
+                likeStatus = null,
+                inLibrary = saved,
+                addToLibraryToken = null,
+                removeFromLibraryToken = null,
+            )
+            return
+        }
+
         songMenuJob = viewModelScope.launch {
             val menu = YtMusicRepository.songMenu(videoId).getOrNull() ?: return@launch
+            if (songMenuFor != videoId) return@launch
             _songMenu.value = menu
             val stated = menu.likeStatus
             if (stated != null && stated != LikeStatus.INDIFFERENT &&
                 videoId !in _likeOverrides.value
             ) {
                 _likeOverrides.value += (videoId to stated)
+                LikeStatusStore.set(likeAccountKey(), videoId, stated, updatedAtMs = 0L)
             }
         }
     }
@@ -452,12 +1126,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _playlistsLoading = MutableStateFlow(false)
     val playlistsLoading: StateFlow<Boolean> = _playlistsLoading.asStateFlow()
 
+    private val _playlistsLoaded = MutableStateFlow(false)
+    val playlistsLoaded: StateFlow<Boolean> = _playlistsLoaded.asStateFlow()
+
     /** Re-fetched rather than cached for the session: playlists are edited here. */
     fun loadPlaylists() {
         if (!_signedIn.value || _playlistsLoading.value) return
         _playlistsLoading.value = true
         viewModelScope.launch {
             YtMusicRepository.userPlaylists().onSuccess { _playlists.value = it }
+            _playlistsLoaded.value = true
             _playlistsLoading.value = false
         }
     }
@@ -472,8 +1150,34 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun addToPlaylist(playlist: UserPlaylist, song: Song) {
         if (!requireSignIn()) return
         viewModelScope.launch {
+            val context = getApplication<Application>()
+            val alreadyInPlaylist = YtMusicRepository
+                .playlistContains(playlist.browseId, song.videoId)
+                .getOrDefault(false)
+            if (alreadyInPlaylist) {
+                OrbNoticeCenter.post(
+                    OrbNotice(
+                        title = context.getString(R.string.notice_already_in_playlist),
+                        message = playlist.title,
+                        icon = OrbNoticeIcon.INFO,
+                    ),
+                )
+                return@launch
+            }
+
             YtMusicRepository.addToPlaylist(playlist.playlistId, listOf(song.videoId)).fold(
-                onSuccess = { libraryStale = true },
+                onSuccess = {
+                    SourceResolver.invalidatePlaylistBadges(playlist.browseId)
+                    invalidateDetailWarm(playlist.browseId)
+                    libraryStale = true
+                    OrbNoticeCenter.post(
+                        OrbNotice(
+                            title = context.getString(R.string.notice_added_to_playlist),
+                            message = playlist.title,
+                            icon = OrbNoticeIcon.PLAYLIST,
+                        ),
+                    )
+                },
                 onFailure = {},
             )
         }
@@ -493,8 +1197,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 privacy = privacy,
                 videoIds = listOfNotNull(song?.videoId),
             ).fold(
-                onSuccess = {
+                onSuccess = { playlistId ->
+                    SourceResolver.invalidatePlaylistBadges("VL$playlistId")
+                    invalidateDetailWarm("VL$playlistId")
                     libraryStale = true
+                    if (song != null) {
+                        val context = getApplication<Application>()
+                        OrbNoticeCenter.post(
+                            OrbNotice(
+                                title = context.getString(R.string.notice_added_to_playlist),
+                                message = name,
+                                icon = OrbNoticeIcon.PLAYLIST,
+                            ),
+                        )
+                    }
                     loadPlaylists()
                     refresh(Feed.LIBRARY)
                 },
@@ -517,16 +1233,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 listOf(setVideoId to song.videoId),
             ).fold(
                 onSuccess = {
+                    SourceResolver.invalidatePlaylistBadges(browseId)
+                    invalidateDetailWarm(browseId)
                     libraryStale = true
                     _detailStack.value = _detailStack.value.map { page ->
                         val songs = (page.songs as? UiState.Success)?.data
                         if (page.browseId != browseId || songs == null) {
                             page
                         } else {
+                            val remaining =
+                                songs.filterNot { it.setVideoId == setVideoId }
                             page.copy(
-                                songs = UiState.Success(
-                                    songs.filterNot { it.setVideoId == setVideoId },
-                                ),
+                                songs = UiState.Success(remaining),
+                                isExplicit = remaining.any { it.isExplicit },
                             )
                         }
                     }
@@ -548,6 +1267,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             YtMusicRepository.addToPlaylist(playlistId, listOf(song.videoId)).fold(
                 onSuccess = {
+                    SourceResolver.invalidatePlaylistBadges(browseId)
+                    invalidateDetailWarm(browseId)
                     libraryStale = true
                     _detailStack.value = _detailStack.value.map { page ->
                         if (page.browseId != browseId) {
@@ -556,6 +1277,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             page.copy(
                                 suggestedSongs = page.suggestedSongs
                                     .filterNot { it.videoId == song.videoId },
+                                isExplicit = page.isExplicit || song.isExplicit,
                             )
                         }
                     }
@@ -588,6 +1310,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             YtMusicRepository.deletePlaylist(playlist.playlistId).fold(
                 onSuccess = {
+                    SourceResolver.invalidatePlaylistBadges(playlist.browseId)
+                    invalidateDetailWarm(playlist.browseId)
                     _playlists.value = _playlists.value
                         .filterNot { it.playlistId == playlist.playlistId }
                     // Its page may be the one open; a deleted playlist has
@@ -613,7 +1337,33 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * hides them for guests — this is the backstop for a session that expired
      * between the menu opening and the tap.
      */
+    private fun likeAccountKey(): String? =
+        OrbGoogleAuth.storedAccount()?.email
+            ?.trim()
+            ?.lowercase()
+            ?.takeIf { it.isNotBlank() }
+            ?: SocialRepository.currentUserId()
+
+    private fun restorePersistedLikes() {
+        _likeOverrides.value = LikeStatusStore.load(likeAccountKey())
+    }
+
+    private fun artistPreferenceAccountKey(): String = likeAccountKey() ?: "local-device"
+
+    private fun restoreArtistPreferences() {
+        _artistPreferences.value = ArtistPreferenceStore.load(artistPreferenceAccountKey())
+    }
+
     private fun requireSignIn(): Boolean = _signedIn.value
+
+    /**
+     * YouTube Music library sync is usable only while a private account session
+     * is actually available. If Google OAuth is rejected by WEB_REMIX, Orb keeps
+     * working with its local library instead of forcing a browser login during
+     * onboarding or leaving the Library tab stuck loading forever.
+     */
+    private fun youtubeLibraryBackendAvailable(): Boolean =
+        AppSettings.useYouTubeMusicLibrary.value && Innertube.hasAccountSession
 
     /**
      * Whether the library needs re-fetching. Set by every write above and
@@ -623,27 +1373,68 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     private var libraryStale = false
 
-    /** Call when the library tab becomes visible. */
+    /**
+     * Call when the library tab becomes visible. Visibility is not an
+     * invalidation event: once loaded, the page stays exactly as the listener
+     * left it until a write updates it locally or the user pulls to refresh.
+     */
     fun onLibraryShown() {
-        loadPlaylists()
-        if (!libraryStale) return
-        libraryStale = false
-        if (_library.value is UiState.Success) refresh(Feed.LIBRARY)
+        if (!youtubeLibraryBackendAvailable()) {
+            if (_library.value !is UiState.Success) publishOrbLibrary()
+            return
+        }
+        if (!_signedIn.value) return
+        if (_library.value is UiState.Loading) return
     }
 
     init {
+        restorePersistedLikes()
+        restoreArtistPreferences()
+        if (_signedIn.value) {
+            reconcileOrbRatingsFromCloud()
+            flushPendingYoutubeRatings()
+        }
         startSearchPipeline()
         startSuggestPipeline()
+
+        // Home's curated sections are independent surfaces and must all begin
+        // loading at cold start. Suggestions paints from its local/progressive
+        // sources, while Listen Again/Recent arrive with Home and Library/Recaps
+        // come from their account-owned feeds. Serialising these requests made
+        // the lower shelves wait behind FEmusic_home even though none of them
+        // depends on it, so start the fan-out immediately and let each section
+        // publish as soon as its own response is ready.
         loadHome()
-        loadExplore()
-        if (_signedIn.value) {
+        if (Innertube.hasAccountSession) loadHomeYouTubeSections()
+        if (_signedIn.value || !AppSettings.useYouTubeMusicLibrary.value) {
             loadLibrary()
+        }
+        if (_signedIn.value) {
             loadAccount()
             loadPlaylists()
         }
         viewModelScope.launch {
+            AppSettings.useYouTubeMusicLibrary.drop(1).collectLatest { useYouTube ->
+                songMenuJob?.cancel()
+                songMenuFor = null
+                _songMenu.value = null
+
+                if (useYouTube) {
+                    if (_signedIn.value) loadLibrary() else _library.value = UiState.Loading
+                    flushPendingYoutubeRatings()
+                } else {
+                    publishOrbLibrary()
+                }
+                refreshOpenDetailLibraryStates(useYouTube && Innertube.hasAccountSession)
+            }
+        }
+        viewModelScope.launch {
             // drop(1): the current value is just the count so far, not a play.
-            PlaybackTracker.registeredPlays.drop(1).collect { homeStale = true }
+            PlaybackTracker.registeredPlays.drop(1).collect {
+                homeStale = true
+                releasesHubStale = true
+                discoverHubStale = true
+            }
         }
         viewModelScope.launch { AppUpdateChecker.check() }
     }
@@ -658,18 +1449,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     private var homeStale = false
 
-    /** Call when the home tab becomes visible. */
-    fun onHomeShown() {
-        if (!homeStale) return
-        homeStale = false
-        // A first load already in flight will pick the new play up by itself.
-        if (_home.value is UiState.Success) refresh(Feed.HOME)
-    }
+    /**
+     * Call when Home becomes visible. Returning to a cached page must not
+     * trigger a network request; pull-to-refresh is the explicit update path.
+     */
+    fun onHomeShown() = Unit
 
     private fun loadAccount() {
-        viewModelScope.launch {
-            _account.value = YtMusicRepository.account().getOrNull()
-        }
+        // The account shown by Orb is always the central Google identity. The
+        // active YouTube channel is a linked profile and is surfaced separately
+        // in Account & Integrations, so switching a Brand channel never changes
+        // who the Orb/Supabase user is.
+        _account.value = OrbGoogleAuth.storedAccount()
+        viewModelScope.launch { OrbGoogleAuth.refreshYoutubeAccount() }
     }
 
     /**
@@ -677,7 +1469,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * as one flag: a pull on Library while Home is still refreshing in the
      * background shouldn't leave the wrong tab showing a loader.
      */
-    enum class Feed { HOME, EXPLORE, LIBRARY }
+    enum class Feed { HOME, RELEASES, TRENDING, EXPLORE, DISCOVER, COMMUNITY_PLAYLISTS, LIBRARY }
 
     private val _refreshing = MutableStateFlow(emptySet<Feed>())
     val refreshing: StateFlow<Set<Feed>> = _refreshing.asStateFlow()
@@ -690,15 +1482,338 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun refresh(feed: Feed) {
         if (feed in _refreshing.value) return
-        if (feed == Feed.LIBRARY && !_signedIn.value) return
+        if (feed == Feed.LIBRARY && AppSettings.useYouTubeMusicLibrary.value && !_signedIn.value) return
         _refreshing.value = _refreshing.value + feed
         viewModelScope.launch {
-            when (feed) {
-                Feed.HOME -> fetchHome()
-                Feed.EXPLORE -> fetchExplore()
-                Feed.LIBRARY -> fetchLibrary()
+            try {
+                when (feed) {
+                    Feed.HOME -> fetchHome(preserveExisting = true)
+                    Feed.RELEASES -> fetchReleasesHub()
+                    Feed.TRENDING -> fetchTrendingHub()
+                    Feed.EXPLORE -> fetchExplore()
+                    Feed.DISCOVER -> fetchDiscoverHub()
+                    Feed.COMMUNITY_PLAYLISTS -> fetchCommunityPlaylistsHub()
+                    Feed.LIBRARY -> fetchLibrary()
+                }
+            } finally {
+                _refreshing.value = _refreshing.value - feed
             }
-            _refreshing.value = _refreshing.value - feed
+        }
+    }
+
+    /**
+     * Starts (or joins) the first-page/header warm-up for one album/playlist.
+     *
+     * The same Deferred is shared by feed warm-up and openDetail(), so a tap
+     * while the background request is still running never launches a duplicate
+     * browse call. Crucially, this foreground path stops at the first browse
+     * response: optional album metadata enrichment must never hold the track
+     * list behind a second network lookup.
+     */
+    private fun detailWarmup(
+        browseId: String,
+        title: String,
+        subtitle: String,
+        type: BrowseType,
+    ): Deferred<DetailWarmEntry> {
+        detailWarmCache.get(browseId)?.let { cached ->
+            return viewModelScope.async { cached }
+        }
+
+        synchronized(detailWarmups) {
+            detailWarmCache.get(browseId)?.let { cached ->
+                return viewModelScope.async { cached }
+            }
+            detailWarmups[browseId]?.let { return it }
+
+            val started = viewModelScope.async {
+                // Feed workers already start only while foreground detail
+                // priority is idle. Do not re-check that priority from inside
+                // the request itself: when the listener taps the exact card
+                // being warmed we preserve and join this request instead of
+                // cancelling a nearly-finished browse and starting from zero.
+                backgroundDetailWarmupGate.withPermit {
+                    coroutineScope {
+                        val pageJob = async {
+                            YtMusicRepository.browseSongs(browseId)
+                        }
+                        val pageResult = pageJob.await()
+                        val page = pageResult.getOrNull()
+
+                        // Publish whatever canonical metadata arrived in the
+                        // same browse response. If an old response shape omitted a
+                        // year/credit, openDetail() enriches that later, after the
+                        // first tracks are already on screen.
+                        val canonicalSubtitle = if (type == BrowseType.ALBUM) {
+                            page?.releaseSubtitle?.takeIf { it.isNotBlank() }
+                        } else {
+                            null
+                        }
+
+                        DetailWarmEntry(
+                            page = page,
+                            pageError = pageResult.exceptionOrNull(),
+                            canonicalSubtitle = canonicalSubtitle,
+                        )
+                    }
+                }.also { warmed ->
+                    if (warmed.page != null) {
+                        detailWarmCache.put(browseId, warmed)
+                    }
+                }
+            }
+            detailWarmups[browseId] = started
+            started.invokeOnCompletion {
+                synchronized(detailWarmups) {
+                    if (detailWarmups[browseId] === started) {
+                        detailWarmups.remove(browseId)
+                    }
+                }
+            }
+            return started
+        }
+    }
+
+    /**
+     * Cancels speculative collection browses except the card the listener just
+     * opened. Preserving that exact request matters on mobile data: cancelling
+     * a browse after it already spent several seconds on the wire was the main
+     * reason an album/playlist tap could restart the full timeout window.
+     */
+    private fun cancelSpeculativeDetailWarmups(exceptBrowseId: String? = null) {
+        val pending = synchronized(detailWarmups) {
+            val cancelled = detailWarmups
+                .filterKeys { it != exceptBrowseId }
+                .values
+                .toList()
+            detailWarmups.keys
+                .filter { it != exceptBrowseId }
+                .toList()
+                .forEach(detailWarmups::remove)
+            cancelled
+        }
+        pending.forEach { it.cancel() }
+    }
+
+    /** Same policy for artist landing-page warmups. */
+    private fun cancelSpeculativeArtistWarmups(exceptBrowseId: String? = null) {
+        val pending = synchronized(artistWarmups) {
+            val cancelled = artistWarmups
+                .filterKeys { it != exceptBrowseId }
+                .values
+                .toList()
+            artistWarmups.keys
+                .filter { it != exceptBrowseId }
+                .toList()
+                .forEach(artistWarmups::remove)
+            cancelled
+        }
+        pending.forEach { it.cancel() }
+    }
+
+    /**
+     * First-page load for a page the user actually opened. Unlike speculative
+     * feed warm-up this never waits for the background semaphore. Any queued
+     * prefetches are cancelled first so the tap cannot sit behind a wall of
+     * album-card work. A completed warm cache still wins and costs no network.
+     */
+    private suspend fun foregroundDetailWarmup(
+        browseId: String,
+        title: String,
+        subtitle: String,
+        type: BrowseType,
+    ): DetailWarmEntry {
+        detailWarmCache.get(browseId)?.let { return it }
+
+        // Never wait for/join speculative work here. The video that exposed
+        // this regression showed a background card warm-up holding the detail
+        // screen for several seconds before the real foreground request even
+        // started. Cancel it and issue the short fast-read immediately.
+        cancelSpeculativeDetailWarmups()
+
+        val pageResult = YtMusicRepository.browseSongsForeground(browseId)
+        val page = pageResult.getOrNull()
+        val warmed = DetailWarmEntry(
+            page = page,
+            pageError = pageResult.exceptionOrNull(),
+            canonicalSubtitle = if (type == BrowseType.ALBUM) {
+                page?.releaseSubtitle?.takeIf { it.isNotBlank() }
+            } else {
+                null
+            },
+        )
+        if (page != null) detailWarmCache.put(browseId, warmed)
+        return warmed
+    }
+
+    private fun artistWarmup(browseId: String): Deferred<ArtistPage?> {
+        artistWarmCache.get(browseId)?.let { cached ->
+            return viewModelScope.async { cached }
+        }
+        synchronized(artistWarmups) {
+            artistWarmCache.get(browseId)?.let { cached ->
+                return viewModelScope.async { cached }
+            }
+            artistWarmups[browseId]?.let { return it }
+            val started = viewModelScope.async {
+                backgroundArtistWarmupGate.withPermit {
+                    YtMusicRepository.artistLandingPage(browseId).getOrNull()
+                }?.also { artistWarmCache.put(browseId, it) }
+            }
+            artistWarmups[browseId] = started
+            started.invokeOnCompletion {
+                synchronized(artistWarmups) {
+                    if (artistWarmups[browseId] === started) artistWarmups.remove(browseId)
+                }
+            }
+            return started
+        }
+    }
+
+    /**
+     * Foreground artist landing. Join an existing card warmup when possible;
+     * otherwise use the short foreground browse policy so a dead mobile socket
+     * does not hold the hero/header for the global 30-second timeout.
+     */
+    private suspend fun foregroundArtistLanding(browseId: String): Result<ArtistPage> {
+        artistWarmCache.get(browseId)?.let { return Result.success(it) }
+
+        // Same rule as album/playlist: a tap must not inherit the latency of a
+        // background prefetch. Start the anonymous/public catalogue fast-read
+        // immediately; repository code falls back to authenticated browse only
+        // when the fast answer cannot describe this artist.
+        cancelSpeculativeArtistWarmups()
+        return YtMusicRepository.artistLandingPageForeground(browseId).onSuccess {
+            artistWarmCache.put(browseId, it)
+        }
+    }
+
+    /**
+     * Collection headers are latency-sensitive, so they get their own queue
+     * instead of waiting behind track Lossless probes from earlier shelves
+     * (Recently played is commonly first on Home). The badge worker below joins
+     * these same Deferreds when it reaches the collection, so this does not
+     * duplicate the browse request.
+     */
+    private fun warmFeedDetails(shelves: List<HomeShelf>) {
+        // Deliberately no speculative browse requests.
+        //
+        // BitChord's fast detail navigation comes from doing the browse the
+        // user actually asked for, not from opening dozens of album/playlist/
+        // artist pages behind Home. Orb's previous warm-up could occupy shared
+        // sockets and, worse, an explicit tap could join a stalled warm request.
+        // Keep image/card data already on the feed; detail catalogue I/O begins
+        // only when the page is opened.
+        @Suppress("UNUSED_VARIABLE")
+        val keepSignatureStable = shelves
+    }
+
+    private fun invalidateDetailWarm(browseId: String) {
+        detailWarmCache.remove(browseId)
+        synchronized(detailWarmups) {
+            detailWarmups.remove(browseId)?.cancel()
+        }
+    }
+
+    /**
+     * Resolves one feed card all the way to the badge state the Composable is
+     * allowed to expose. Keeping this as the single primitive lets Home run it
+     * in priority batches while Explore/Library can still warm whole shelves.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    private suspend fun prepareFeedItemBadges(item: ShelfItem, force: Boolean) {
+        runCatching {
+            // Feed enrichment must never browse a collection merely to discover
+            // a badge. That turns every album/playlist card into hidden network
+            // work competing with the page the listener actually opens.
+            //
+            // Explicit metadata already present on an album card is local.
+            // Quality is learned from playback/download, never catalogue browsing.
+            if (item.type == BrowseType.ALBUM && item.isExplicit) {
+                SourceResolver.cacheReleaseExplicit(
+                    title = item.title,
+                    subtitle = item.subtitle,
+                    browseId = item.browseId,
+                    explicit = true,
+                )
+            }
+
+            // Catalogue cards use cached quality only; audio resolves on playback/download.
+        }
+    }
+
+    /** Background enrichment yields while an opened collection owns priority. */
+    private suspend fun awaitForegroundDetailBadges() {
+        if (detailBadgePriorityCount.value == 0) return
+        // Safety ceiling: a broken source must never starve every background
+        // feed forever. The foreground pass itself remains free to continue.
+        withTimeoutOrNull(DETAIL_BADGE_PRIORITY_GRACE_MS) {
+            detailBadgePriorityCount.first { it == 0 }
+        }
+    }
+
+    /** Badge-capable cards in one small visual batch are prepared concurrently. */
+    private suspend fun warmFeedBadgeBatch(
+        items: List<ShelfItem>,
+        force: Boolean = false,
+    ) {
+        awaitForegroundDetailBadges()
+        val targets = items
+            .filter { item ->
+                !item.videoId.isNullOrBlank() ||
+                        item.type == BrowseType.ALBUM ||
+                        (item.type == BrowseType.PLAYLIST && !item.browseId.isNullOrBlank())
+            }
+            .distinctBy { item ->
+                when {
+                    !item.videoId.isNullOrBlank() -> "track:${item.videoId}"
+                    item.type == BrowseType.PLAYLIST -> "playlist:${item.browseId}"
+                    else -> "album:${item.title.lowercase()}|${item.subtitle.lowercase()}"
+                }
+            }
+        if (targets.isEmpty()) return
+
+        coroutineScope {
+            targets.map { item ->
+                async { prepareFeedItemBadges(item, force) }
+            }.forEach { it.await() }
+        }
+    }
+
+    /**
+     * Non-Home feeds are useful to prewarm, but they should not consume the
+     * same TIDAL/detail probes while the priority Home pass is still running.
+     * The grace timeout prevents a broken Home request from starving Explore
+     * or Library indefinitely.
+     */
+    private suspend fun awaitHomePriorityPass() {
+        if (homePriorityPassReady.value || _home.value is UiState.Error) return
+        withTimeoutOrNull(HOME_PRIORITY_PASS_GRACE_MS) {
+            homePriorityPassReady.first { it }
+        }
+    }
+
+    /**
+     * Eager warm-up used outside Home. Home itself is deliberately progressive
+     * and therefore calls [warmFeedBadgeBatch] directly in visual order.
+     */
+    private suspend fun warmFeedBadges(
+        shelves: List<HomeShelf>,
+        force: Boolean = false,
+        yieldToHomePriority: Boolean = false,
+    ) {
+        if (yieldToHomePriority) awaitHomePriorityPass()
+
+        // Once Home owns the critical path, other feeds can prepare collection
+        // headers broadly again; taps then benefit from the larger warm cache.
+        warmFeedDetails(shelves)
+
+        val targets = shelves
+            .asSequence()
+            .flatMap { shelf -> shelf.items.asSequence() }
+            .toList()
+        targets.chunked(BADGE_WARMUP_CONCURRENCY).forEach { batch ->
+            warmFeedBadgeBatch(batch, force = force)
         }
     }
 
@@ -710,107 +1825,511 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun fetchExplore() {
         _explore.value = YtMusicRepository.explore().fold(
             onSuccess = { shelves ->
-                if (shelves.isEmpty()) UiState.Error("Nothing to explore right now")
-                else UiState.Success(shelves)
+                if (shelves.isEmpty()) {
+                    UiState.Error("Nothing to explore right now")
+                } else {
+                    // Explore keeps its previous eager behavior; the strict
+                    // content+badge publication rule is specific to Home.
+                    viewModelScope.launch { warmFeedBadges(shelves, yieldToHomePriority = true) }
+                    UiState.Success(shelves)
+                }
             },
             onFailure = { UiState.Error(it.friendly()) },
         )
     }
 
-    /** Tapping a tab should leave any pushed page behind. */
+    fun loadReleasesHub(force: Boolean = false) {
+        if (!force && releasesHubRequested) return
+        releasesHubRequested = true
+        if (_releasesHub.value !is UiState.Success) _releasesHub.value = UiState.Loading
+        viewModelScope.launch { fetchReleasesHub() }
+    }
+
+    private suspend fun fetchReleasesHub() {
+        val favoriteArtists = _artistPreferences.value
+            .filterValues { it == ArtistPreference.LIKE }
+            .keys
+        _releasesHub.value = YtMusicRepository.releasesHub(favoriteArtists).fold(
+            onSuccess = { shelves ->
+                releasesHubStale = false
+                if (shelves.isNotEmpty()) {
+                    warmFeedDetails(shelves)
+                    viewModelScope.launch { warmFeedBadges(shelves, yieldToHomePriority = true) }
+                }
+                // The Albums page can still show the listener's locally ranked
+                // favorite albums even when YouTube returns no network shelves.
+                UiState.Success(shelves)
+            },
+            onFailure = { UiState.Error(it.friendly()) },
+        )
+    }
+
+    fun loadTrendingHub(force: Boolean = false) {
+        if (!force && trendingHubRequested) return
+        trendingHubRequested = true
+        if (_trendingHub.value !is UiState.Success) _trendingHub.value = UiState.Loading
+        viewModelScope.launch { fetchTrendingHub() }
+    }
+
+    private suspend fun fetchTrendingHub() {
+        _trendingHub.value = YtMusicRepository.trendingHub().fold(
+            onSuccess = { shelves ->
+                trendingHubStale = false
+                if (shelves.isEmpty()) {
+                    UiState.Error("No chart data found right now")
+                } else {
+                    viewModelScope.launch { warmFeedBadges(shelves, yieldToHomePriority = true) }
+                    UiState.Success(shelves)
+                }
+            },
+            onFailure = { UiState.Error(it.friendly()) },
+        )
+    }
+
+    fun loadDiscoverHub(force: Boolean = false) {
+        if (!force && discoverHubRequested) return
+        discoverHubRequested = true
+        if (_discoverHub.value !is UiState.Success) _discoverHub.value = UiState.Loading
+        viewModelScope.launch { fetchDiscoverHub() }
+    }
+
+    private suspend fun fetchDiscoverHub() {
+        _discoverHub.value = YtMusicRepository.discoverHub().fold(
+            onSuccess = { shelves ->
+                discoverHubStale = false
+                if (shelves.isEmpty()) {
+                    UiState.Error("Nothing new to discover right now")
+                } else {
+                    viewModelScope.launch { warmFeedBadges(shelves, yieldToHomePriority = true) }
+                    UiState.Success(shelves)
+                }
+            },
+            onFailure = { UiState.Error(it.friendly()) },
+        )
+    }
+
+    fun loadCommunityPlaylistsHub(force: Boolean = false) {
+        if (!force && communityPlaylistsHubRequested) return
+        communityPlaylistsHubRequested = true
+        if (_communityPlaylistsHub.value !is UiState.Success) {
+            _communityPlaylistsHub.value = UiState.Loading
+        }
+        viewModelScope.launch { fetchCommunityPlaylistsHub() }
+    }
+
+    private suspend fun fetchCommunityPlaylistsHub() {
+        _communityPlaylistsHub.value = YtMusicRepository.communityPlaylistsHub().fold(
+            onSuccess = { shelves ->
+                communityPlaylistsHubStale = false
+                if (shelves.isEmpty()) {
+                    UiState.Error("No community playlists found right now")
+                } else {
+                    viewModelScope.launch { warmFeedBadges(shelves, yieldToHomePriority = true) }
+                    UiState.Success(shelves)
+                }
+            },
+            onFailure = { UiState.Error(it.friendly()) },
+        )
+    }
+
+    /** Orb v1.5.1: tapping a tab simply leaves every pushed detail page behind. */
     fun clearDetail() {
         if (_detailStack.value.isNotEmpty()) _detailStack.value = emptyList()
     }
 
-    fun loadHome() {
-        _home.value = UiState.Loading
-        viewModelScope.launch { fetchHome() }
+    private fun cacheDetailPage(page: DetailPage) {
+        if (page.songs is UiState.Success) detailPageCache.put(page.browseId, page)
     }
 
-    private suspend fun fetchHome() {
-        homeContinuation = null
-        homeSeenTitles.clear()
-        _home.value = YtMusicRepository.home().fold(
-            onSuccess = { feed ->
-                homeContinuation = feed.continuation
-                val shelves = feed.shelves.filter { homeSeenTitles.add(it.title.lowercase()) }
-                if (shelves.isEmpty()) UiState.Error("No results from YouTube Music")
-                else UiState.Success(shelves)
-            },
-            onFailure = { UiState.Error(it.friendly()) },
-        )
+    fun loadHome() {
+        _home.value = UiState.Loading
+        homePriorityPassReady.value = false
+        viewModelScope.launch { fetchHome(preserveExisting = false) }
     }
 
     /**
-     * Called as the Home list nears its end. A no-op while a page is already
-     * in flight, once the feed is exhausted, or before the first page has
-     * loaded — [homeContinuation] covers all three by construction.
+     * Refreshes only Home's listening-history shelf.
+     *
+     * The remaining Home shelves, their scroll state and their warmed quality
+     * metadata stay untouched. A full Home refresh that starts while this
+     * request is in flight wins through [homeGeneration].
+     */
+    fun refreshRecentlyPlayed() {
+        if (recentlyPlayedRefreshJob?.isActive == true) return
+        if (_home.value !is UiState.Success) return
+
+        val generation = homeGeneration.get()
+        recentlyPlayedRefreshJob = viewModelScope.launch {
+            try {
+                val refreshed = YtMusicRepository.recentlyPlayedShelf().getOrNull()
+                    ?: return@launch
+                if (generation != homeGeneration.get()) return@launch
+
+                val current = (_home.value as? UiState.Success)?.data
+                    ?: return@launch
+                val existingIndex = current.indexOfFirst {
+                    it.title.equals(refreshed.title, ignoreCase = true)
+                }
+                if (existingIndex >= 0 && current[existingIndex] == refreshed) {
+                    return@launch
+                }
+
+                val updated = if (existingIndex >= 0) {
+                    current.toMutableList().apply {
+                        this[existingIndex] = refreshed
+                    }
+                } else {
+                    listOf(refreshed) + current
+                }
+
+                homeSeenTitles.add(refreshed.title.lowercase())
+                _home.value = UiState.Success(updated)
+
+                // Only new history cards need quality/detail enrichment.
+                warmHomeShelvesProgressively(
+                    shelves = listOf(refreshed),
+                    generation = generation,
+                    force = false,
+                )
+            } finally {
+                recentlyPlayedRefreshJob = null
+            }
+        }
+    }
+
+    /**
+     * Warms Home badge/cache state in visual order without gating visibility.
+     *
+     * Home content is now catalogue-first: shelves paint as soon as YouTube
+     * returns them, while Lossless is enrichment. The first visible cards still
+     * get first claim on TIDAL/detail work, and everything proven here remains
+     * in SourceResolver/detail caches for the rest of the process.
+     */
+    private suspend fun warmHomeShelvesProgressively(
+        shelves: List<HomeShelf>,
+        generation: Long,
+        force: Boolean,
+    ) {
+        val usable = shelves.filter { it.items.isNotEmpty() }
+
+        // Pass 1: vertical viewport priority. Resolve a few cards from each top
+        // shelf before spending time on horizontally off-screen items.
+        usable.forEachIndexed { index, shelf ->
+            if (generation != homeGeneration.get()) return
+            val firstSize = if (index == 0) HOME_TOP_HERO_BATCH_SIZE else HOME_SHELF_FIRST_BATCH_SIZE
+            warmFeedBadgeBatch(
+                shelf.items.take(firstSize),
+                force = force,
+            )
+        }
+
+        // Pass 2: fill the rest in bounded batches. No UI waits on this pass.
+        usable.forEachIndexed { index, shelf ->
+            var offset = if (index == 0) HOME_TOP_HERO_BATCH_SIZE else HOME_SHELF_FIRST_BATCH_SIZE
+            offset = offset.coerceAtMost(shelf.items.size)
+            while (offset < shelf.items.size) {
+                if (generation != homeGeneration.get()) return
+                val end = (offset + HOME_BADGE_BATCH_SIZE).coerceAtMost(shelf.items.size)
+                warmFeedBadgeBatch(shelf.items.subList(offset, end), force = force)
+                offset = end
+            }
+        }
+    }
+
+    /**
+     * Fetches New Releases below the personalised feed. The shelves are appended
+     * immediately; their Lossless enrichment continues afterward.
+     */
+    private suspend fun prefetchHomeSupplemental(
+        current: List<HomeShelf>,
+        generation: Long,
+    ): List<HomeShelf> {
+        if (generation != homeGeneration.get()) return current
+        val fetched = YtMusicRepository.homeSupplemental().getOrDefault(emptyList())
+        if (generation != homeGeneration.get()) return current
+        val shelves = filterPersonalizedShelves(fetched)
+            .filter { homeSeenTitles.add(it.title.lowercase()) }
+        if (shelves.isEmpty()) return current
+
+        val ready = current + shelves
+        _home.value = UiState.Success(ready)
+        warmHomeShelvesProgressively(shelves, generation, force = false)
+        return ready
+    }
+
+    private suspend fun fetchHome(preserveExisting: Boolean = false) {
+        val generation = homeGeneration.incrementAndGet()
+        homeBadgeWarmJob?.cancel()
+        if (!preserveExisting) homePriorityPassReady.value = false
+
+        val existing = (_home.value as? UiState.Success)?.data.orEmpty()
+        _homeLoadingMore.value = true
+        try {
+            val result = YtMusicRepository.home()
+            if (generation != homeGeneration.get()) return
+
+            result.fold(
+                onSuccess = { feed ->
+                    homeSeenTitles.clear()
+                    var shelves = filterPersonalizedShelves(feed.shelves)
+                        .filter { homeSeenTitles.add(it.title.lowercase()) }
+                    homeContinuation = feed.continuation
+                    var supplementalUsedAsFallback = false
+
+                    if (shelves.isEmpty()) {
+                        val fallback = YtMusicRepository.homeSupplemental().getOrDefault(emptyList())
+                        if (generation != homeGeneration.get()) return@fold
+                        shelves = filterPersonalizedShelves(fallback)
+                            .filter { homeSeenTitles.add(it.title.lowercase()) }
+                        supplementalUsedAsFallback = shelves.isNotEmpty()
+                    }
+
+                    if (shelves.isEmpty()) {
+                        if (!preserveExisting || existing.isEmpty()) {
+                            _home.value = UiState.Error("No results from YouTube Music")
+                        }
+                        homePriorityPassReady.value = true
+                        return@fold
+                    }
+
+                    // Critical change: catalogue content paints immediately.
+                    // Explicit metadata already present on the row paints with
+                    // it; Lossless arrives whenever its asynchronous proof is
+                    // ready and is then session-cached.
+                    _home.value = UiState.Success(shelves)
+                    homePriorityPassReady.value = true
+                    // Detail first pages/photos are cheaper and more visible
+                    // than quality badges. Start warming them immediately so a
+                    // tap on an album, playlist or artist can open with content.
+                    warmFeedDetails(shelves)
+
+                    homeBadgeWarmJob = viewModelScope.launch {
+                        warmHomeShelvesProgressively(
+                            shelves = shelves,
+                            generation = generation,
+                            force = preserveExisting,
+                        )
+                        if (generation != homeGeneration.get()) return@launch
+
+                        // Useful idle work survives navigation because it is
+                        // ViewModel-owned, not tied to the Home Composable.
+                        if (!supplementalUsedAsFallback) {
+                            prefetchHomeSupplemental(shelves, generation)
+                        }
+                    }
+                },
+                onFailure = { failure ->
+                    if (!preserveExisting || existing.isEmpty()) {
+                        _home.value = UiState.Error(failure.friendly())
+                    }
+                    homePriorityPassReady.value = true
+                },
+            )
+        } finally {
+            if (generation == homeGeneration.get()) _homeLoadingMore.value = false
+        }
+    }
+
+    private fun loadHomeYouTubeSections(force: Boolean = false) {
+        if (!Innertube.hasAccountSession) {
+            homeYouTubeSectionsJob?.cancel()
+            homeYouTubeSectionsJob = null
+            homeYouTubeSectionsLoaded = false
+            _homeYouTubeSections.value = emptyList()
+            return
+        }
+        if (!force && (homeYouTubeSectionsLoaded || homeYouTubeSectionsJob?.isActive == true)) return
+
+        homeYouTubeSectionsJob?.cancel()
+        if (force) homeYouTubeSectionsLoaded = false
+        homeYouTubeSectionsJob = viewModelScope.launch {
+            try {
+                // Library and Recaps are independent endpoints. Publish each
+                // shelf the instant it finishes instead of waiting for the
+                // slower sibling request before either can appear on Home.
+                supervisorScope {
+                    launch {
+                        YtMusicRepository.forYouYouTubeLibrarySection()
+                            .getOrNull()
+                            ?.let { shelf ->
+                                _homeYouTubeSections.value =
+                                    _homeYouTubeSections.value
+                                        .filterNot { it.title.equals(shelf.title, ignoreCase = true) } + shelf
+                                warmHomeShelvesProgressively(
+                                    shelves = listOf(shelf),
+                                    generation = homeGeneration.get(),
+                                    force = false,
+                                )
+                            }
+                    }
+                    launch {
+                        YtMusicRepository.forYouRecapsSection()
+                            .getOrNull()
+                            ?.let { shelf ->
+                                _homeYouTubeSections.value =
+                                    _homeYouTubeSections.value
+                                        .filterNot { it.title.equals(shelf.title, ignoreCase = true) } + shelf
+                                warmHomeShelvesProgressively(
+                                    shelves = listOf(shelf),
+                                    generation = homeGeneration.get(),
+                                    force = false,
+                                )
+                            }
+                    }
+                }
+                homeYouTubeSectionsLoaded = true
+            } finally {
+                homeYouTubeSectionsJob = null
+            }
+        }
+    }
+
+    /**
+     * Continuation pages also paint immediately and warm their badges afterward.
      */
     fun loadMoreHome() {
         val token = homeContinuation ?: return
-        if (_homeLoadingMore.value) return
+        if (_homeLoadingMore.value || Feed.HOME in _refreshing.value) return
+        val generation = homeGeneration.get()
         _homeLoadingMore.value = true
+
         viewModelScope.launch {
-            YtMusicRepository.moreHome(token).onSuccess { feed ->
-                val added = feed.shelves.filter { homeSeenTitles.add(it.title.lowercase()) }
-                // A page with nothing new signals the feed has looped back on
-                // itself rather than run dry with a token still attached —
-                // treat it the same as exhausted so scrolling can't spin here.
+            try {
+                val feed = YtMusicRepository.moreHome(token).getOrNull() ?: return@launch
+                if (generation != homeGeneration.get()) return@launch
+
+                val added = filterPersonalizedShelves(feed.shelves)
+                    .filter { homeSeenTitles.add(it.title.lowercase()) }
                 homeContinuation = feed.continuation.takeIf { added.isNotEmpty() }
-                if (added.isNotEmpty()) {
-                    val existing = (_home.value as? UiState.Success)?.data ?: emptyList()
-                    _home.value = UiState.Success(existing + added)
+                if (added.isEmpty()) return@launch
+
+                val existing = (_home.value as? UiState.Success)?.data.orEmpty()
+                _home.value = UiState.Success(existing + added)
+                viewModelScope.launch {
+                    warmHomeShelvesProgressively(
+                        shelves = added,
+                        generation = generation,
+                        force = false,
+                    )
                 }
+            } finally {
+                if (generation == homeGeneration.get()) _homeLoadingMore.value = false
             }
-            _homeLoadingMore.value = false
         }
     }
 
     fun loadLibrary() {
-        if (!_signedIn.value) return
+        if (AppSettings.useYouTubeMusicLibrary.value && !_signedIn.value) return
         _library.value = UiState.Loading
         viewModelScope.launch { fetchLibrary() }
     }
 
     private suspend fun fetchLibrary() {
+        if (!youtubeLibraryBackendAvailable()) {
+            publishOrbLibrary()
+            return
+        }
+        if (!_signedIn.value) {
+            _library.value = UiState.Loading
+            return
+        }
         _library.value = YtMusicRepository.library().fold(
             onSuccess = { page ->
-                if (page.isEmpty) UiState.Error("Nothing in your library yet")
-                else UiState.Success(page)
+                if (page.isEmpty) {
+                    UiState.Error("Nothing in your library yet")
+                } else {
+                    viewModelScope.launch { warmFeedBadges(page.shelves, yieldToHomePriority = true) }
+                    UiState.Success(page)
+                }
             },
             onFailure = { UiState.Error(it.friendly()) },
         )
     }
 
+    /** Publishes the device-local Orb library immediately after every local write. */
+    private fun publishOrbLibrary() {
+        val context = getApplication<Application>()
+        val page = OrbLibraryStore.page(context)
+        if (!page.isEmpty) {
+            viewModelScope.launch {
+                warmFeedBadges(page.shelves, yieldToHomePriority = true)
+            }
+        }
+        _library.value = UiState.Success(page)
+    }
+
+    /**
+     * Rebinds save-state controls on already-open pages when the Settings switch
+     * changes library backend. The Google account remains signed in; only the
+     * destination represented by the +/check control changes.
+     */
+    private fun refreshOpenDetailLibraryStates(useYouTube: Boolean) {
+        val context = getApplication<Application>()
+        if (!useYouTube) {
+            _detailStack.value = _detailStack.value.map { page ->
+                if (page.type == BrowseType.ALBUM || page.type == BrowseType.PLAYLIST) {
+                    page.copy(
+                        library = LibraryState(
+                            playlistId = page.browseId,
+                            saved = OrbLibraryStore.containsCollection(context, page.browseId),
+                        ),
+                    )
+                } else {
+                    page
+                }
+            }
+            return
+        }
+
+        if (!_signedIn.value) {
+            _detailStack.value = _detailStack.value.map { page ->
+                if (page.type == BrowseType.ALBUM || page.type == BrowseType.PLAYLIST) {
+                    page.copy(library = null)
+                } else page
+            }
+            return
+        }
+
+        _detailStack.value
+            .filter { it.type == BrowseType.ALBUM || it.type == BrowseType.PLAYLIST }
+            .map { it.browseId }
+            .distinct()
+            .forEach { browseId ->
+                viewModelScope.launch {
+                    val remote = YtMusicRepository.browseSongs(browseId).getOrNull()?.library ?: return@launch
+                    _detailStack.value = _detailStack.value.map { page ->
+                        if (page.browseId == browseId) page.copy(library = remote) else page
+                    }
+                }
+            }
+    }
+
     /** Recent searches, kept on device. */
-    val searchHistory: StateFlow<List<String>> = SearchHistory.recent
+    val searchHistory: StateFlow<List<SearchHistoryEntry>> = SearchHistory.recent
 
     fun onQueryChange(value: String) {
         val previous = _query.value
         _query.value = value
         if (value.isBlank()) {
-            // Emptying the field is how the recent searches are got back to,
-            // so it takes down the suggestions and the results together.
-            // Nothing in flight can still be waiting to overwrite the latter:
-            // the id it would be checked against has already moved past it.
+            // Emptying the fixed Explore field returns to recent searches and
+            // discovery. No second in-content search row is ever created.
+            suggestionWantedFor = null
             newestRequestId.incrementAndGet()
             _results.value = null
             _suggestions.value = emptyList()
             return
         }
-        // The previous keystroke's completions are left up beneath the new
-        // lead row while the fresh ones are fetched — the same reasoning as
-        // [prefixMatch]: they were right a letter ago, and a list that
-        // collapses to one row on every letter is what makes a typeahead feel
-        // broken. Text that isn't a continuation of what they were for (the
-        // whole field replaced at once, say) drops them instead of showing
-        // completions of a query that's gone.
+
+        suggestionWantedFor = value
+        // Keep only real completions that are still plausible while the fresh
+        // typeahead request runs. Older builds inserted the raw query itself as
+        // row zero, which looked like a second search bar under the fixed one.
         val stale = if (value.startsWith(previous, true) || previous.startsWith(value, true)) {
-            _suggestions.value.drop(1)
+            _suggestions.value
         } else {
             emptyList()
         }
-        _suggestions.value = listOf(value) + stale.filterNot { it.equals(value, true) }
+        _suggestions.value = stale.filterNot { it.equals(value, true) }
         suggestRequests.tryEmit(value)
     }
 
@@ -822,6 +2341,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun recordSearch() = SearchHistory.record(_query.value)
 
+    fun recordSearch(song: Song) = SearchHistory.record(
+        query = _query.value,
+        thumbnailUrl = song.thumbnailUrl,
+    )
+
+    fun recordSearch(item: BrowseItem) = SearchHistory.record(
+        query = _query.value,
+        thumbnailUrl = if (item.type == BrowseType.ALBUM || item.type == BrowseType.ARTIST) {
+            item.thumbnailUrl
+        } else {
+            null
+        },
+    )
+
     /**
      * The search button — the keyboard's search action, or the magnifier in
      * the field. The only thing that runs a search for text the user typed:
@@ -831,6 +2364,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun submitSearch() {
         recordSearch()
+        suggestionWantedFor = null
         _suggestions.value = emptyList()
         runSearch()
     }
@@ -843,6 +2377,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun searchFor(term: String) {
         _query.value = term
+        suggestionWantedFor = null
         _suggestions.value = emptyList()
         SearchHistory.record(term)
         runSearch()
@@ -858,6 +2393,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         runSearch()
     }
 
+    /** Adds the first concrete result artwork to the recent-search entry. */
+    private fun rememberSearchArtwork(
+        query: String,
+        filter: SearchFilter,
+        rows: List<SearchResult>,
+    ) {
+        val thumbnail = when (filter) {
+            SearchFilter.SONGS -> rows.filterIsInstance<SearchResult.Track>()
+                .firstOrNull()?.song?.thumbnailUrl
+
+            SearchFilter.ALBUMS -> rows.filterIsInstance<SearchResult.Browse>()
+                .firstOrNull { it.item.type == BrowseType.ALBUM }?.item?.thumbnailUrl
+
+            SearchFilter.ARTISTS -> rows.filterIsInstance<SearchResult.Browse>()
+                .firstOrNull { it.item.type == BrowseType.ARTIST }?.item?.thumbnailUrl
+
+            SearchFilter.PLAYLISTS -> null
+        }
+        if (!thumbnail.isNullOrBlank()) SearchHistory.record(query, thumbnail)
+    }
+
     /**
      * A search asked for, as a request the pipeline below decides what to do
      * with.
@@ -869,6 +2425,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val query: String,
         val filter: SearchFilter,
         val requestId: Long,
+        val force: Boolean = false,
     )
 
     private fun cacheKey(query: String, filter: SearchFilter) = "${filter.name}:$query"
@@ -898,6 +2455,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         searchRequests.tryEmit(SearchRequest(query, _filter.value, id))
     }
 
+    /** Re-runs the visible search without clearing its cached rows first. */
+    fun refreshSearch() {
+        val query = _query.value.trim()
+        if (query.isBlank() || _searchRefreshing.value) return
+        val id = newestRequestId.incrementAndGet()
+        _searchRefreshing.value = true
+        searchRequests.tryEmit(SearchRequest(query, _filter.value, id, force = true))
+    }
+
     /**
      * The search pipeline, started once and left running for the lifetime of
      * the view model.
@@ -920,32 +2486,59 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun startSearchPipeline() = viewModelScope.launch {
         searchRequests
             .collectLatest { request ->
-                val key = cacheKey(request.query, request.filter)
-                // Something to look at immediately: the exact answer if this
-                // query has been run before, otherwise the closest earlier
-                // one. Only fall back to a spinner with neither.
-                val exact = searchCache.get(key)
-                val cached = exact ?: prefixMatch(request.query, request.filter)
-                _results.value = cached?.let { UiState.Success(it) } ?: UiState.Loading
-                if (exact != null) return@collectLatest
+                try {
+                    val key = cacheKey(request.query, request.filter)
+                    // Something to look at immediately: the exact answer if this
+                    // query has been run before, otherwise the closest earlier
+                    // one. Manual refresh deliberately bypasses this early return.
+                    val exact = searchCache.get(key)
+                    if (exact != null && !request.force) {
+                        // Search rows are cached as soon as YouTube returns them. Badge
+                        // enrichment is deliberately a second, background phase, so
+                        // switching Songs -> Artists -> Songs restores the already-found
+                        // Songs page instantly instead of starting another network search.
+                        if (request.requestId == newestRequestId.get()) {
+                            _results.value = UiState.Success(exact)
+                            rememberSearchArtwork(request.query, request.filter, exact)
+                            prefetchTopResult(exact)
+                            warmSearchRowsInBackground(exact)
+                        }
+                        return@collectLatest
+                    }
+                    // A manual refresh keeps the current page painted. Only a first
+                    // uncached search falls back to the loading skeleton.
+                    if (!request.force) _results.value = UiState.Loading
 
-                // Search is YouTube's alone. A module is a *substitution*
-                // layer, not a catalogue to browse: it never has cover art,
-                // radio, related tracks or an album page, so its rows arrived
-                // in the results list looking like YouTube's and then behaved
-                // nothing like them. Every track found here takes the ordinary
-                // YouTube path and is handed to the module at playback time —
-                // see [SourceResolver.substituteForYouTube] — which upgrades
-                // the ones it holds without any of them having to be a
-                // separate row to pick between.
-                val result = YtMusicRepository.search(request.query, request.filter)
-                // A search that has been superseded shouldn't land on screen,
-                // whether it succeeded or failed.
-                if (request.requestId != newestRequestId.get()) return@collectLatest
-                _results.value = result.fold(
-                    onSuccess = { rows -> published(rows, key) },
-                    onFailure = { failure -> UiState.Error(failure.friendly()) },
-                )
+                    // Search is YouTube's alone. A module is a *substitution*
+                    // layer, not a catalogue to browse: it never has cover art,
+                    // radio, related tracks or an album page, so its rows arrived
+                    // in the results list looking like YouTube's and then behaved
+                    // nothing like them. Every track found here takes the ordinary
+                    // YouTube path and is handed to the module at playback time.
+                    val result = YtMusicRepository.search(request.query, request.filter)
+                    // A search that has been superseded shouldn't land on screen,
+                    // whether it succeeded or failed.
+                    if (request.requestId != newestRequestId.get()) return@collectLatest
+                    result.fold(
+                        onSuccess = { rows ->
+                            rememberSearchArtwork(request.query, request.filter, rows)
+                            publishSearchProgressively(
+                                rows = rows,
+                                key = key,
+                                requestId = request.requestId,
+                            )
+                        },
+                        onFailure = { failure ->
+                            // Refresh failure keeps the cached rows instead of
+                            // replacing a usable page with an error state.
+                            if (!request.force && request.requestId == newestRequestId.get()) {
+                                _results.value = UiState.Error(failure.friendly())
+                            }
+                        },
+                    )
+                } finally {
+                    if (request.force) _searchRefreshing.value = false
+                }
             }
     }
 
@@ -974,7 +2567,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // and a late answer writing to it would reopen the suggestions over
         // the results the user is by then reading.
         fun stillWanted(input: String) =
-            _query.value == input && _suggestions.value.isNotEmpty()
+            _query.value == input && suggestionWantedFor == input
 
         suggestRequests
             .debounce(SUGGEST_DEBOUNCE_MS)
@@ -984,17 +2577,91 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     ?: return@collectLatest
                 // Asked again on the way back; the field is live throughout.
                 if (!stillWanted(input)) return@collectLatest
-                _suggestions.value = listOf(input) +
-                    fetched.filterNot { it.equals(input, ignoreCase = true) }
+                _suggestions.value = fetched
+                    .filterNot { it.equals(input, ignoreCase = true) }
+                    .distinctBy { it.lowercase() }
             }
     }
 
-    /** Caches and publishes one result list. */
-    private fun published(rows: List<SearchResult>, key: String): UiState<List<SearchResult>> {
-        if (rows.isEmpty()) return UiState.Error("No results")
+    /**
+     * Resolves only the badge work belonging to one search row. The search
+     * pipeline publishes that row immediately after this returns instead of
+     * waiting for the rest of the page.
+     */
+    private suspend fun prepareSearchRow(row: SearchResult) {
+        awaitForegroundDetailBadges()
+        runCatching {
+            when (row) {
+                is SearchResult.Track ->
+                    SourceResolver.cachedTrackPlayableBadge(row.song)
+
+                is SearchResult.Browse -> {
+                    // Search already has everything required to paint a browse
+                    // card. Never open that album/playlist invisibly just to
+                    // validate a quality badge; the actual detail tap owns the
+                    // first browse request. Album Explicit metadata from the
+                    // search row itself remains cheap to cache.
+                    if (row.item.type == BrowseType.ALBUM && row.item.isExplicit) {
+                        SourceResolver.cacheReleaseExplicit(
+                            title = row.item.title,
+                            subtitle = row.item.subtitle,
+                            browseId = row.item.browseId,
+                            explicit = true,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Publishes search results progressively.
+     *
+     * YouTube returns a result page as one response, but the expensive part of
+     * Orb's search is per-row enrichment (collection details + Explicit/Lossless).
+     * Previously the whole page was hidden until the slowest row finished. Now
+     * rows are prepared in small top-first batches and each completed row is
+     * released immediately. The visible subset is kept in YouTube relevance
+     * order, so a slower earlier row can slot into its proper place later.
+     */
+    private suspend fun publishSearchProgressively(
+        rows: List<SearchResult>,
+        key: String,
+        requestId: Long,
+    ) {
+        if (rows.isEmpty()) {
+            if (requestId == newestRequestId.get()) {
+                _results.value = UiState.Error("No results")
+            }
+            return
+        }
+        if (requestId != newestRequestId.get()) return
+
+        // Catalogue first, enrichment second. The YouTube response is already a
+        // complete, useful search page, so publish and cache it immediately.
+        // Explicit/Lossless then fill themselves from SourceResolver/detail caches
+        // as the background pass completes. This removes the old wait where the
+        // slowest badge probe decided when a result was allowed to appear.
         searchCache.put(key, rows)
+        _results.value = UiState.Success(rows)
         prefetchTopResult(rows)
-        return UiState.Success(rows)
+        warmSearchRowsInBackground(rows)
+    }
+
+    /**
+     * Enriches search rows after they are already visible. This job belongs to
+     * the ViewModel rather than the currently selected filter, so changing tabs
+     * does not cancel the work and returning to a cached result keeps both the
+     * rows and any badges already resolved.
+     */
+    private fun warmSearchRowsInBackground(rows: List<SearchResult>) {
+        viewModelScope.launch {
+            rows.chunked(SEARCH_PROGRESSIVE_BATCH_SIZE).forEach { batch ->
+                coroutineScope {
+                    batch.map { row -> async { prepareSearchRow(row) } }.awaitAll()
+                }
+            }
+        }
     }
 
     /**
@@ -1060,6 +2727,42 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private companion object {
+        /** Maximum number of speculative badge/source probes prepared in parallel. */
+        const val BADGE_WARMUP_CONCURRENCY = 2
+
+        /**
+         * Search rows are prepared top-first in small batches. Four keeps enough
+         * I/O in flight for quick first paint without letting a long result page
+         * flood TIDAL/detail requests and starve playback/Home work.
+         */
+        const val SEARCH_PROGRESSIVE_BATCH_SIZE = 4
+
+        /** The hero row only exposes about one card at a time; warm two first. */
+        const val HOME_TOP_HERO_BATCH_SIZE = 2
+
+        /** Compact shelves expose roughly two-to-three cards on a phone. */
+        const val HOME_SHELF_FIRST_BATCH_SIZE = 3
+
+        /** Follow-up chunks stay small so the next shelf can begin promptly. */
+        const val HOME_BADGE_BATCH_SIZE = 4
+
+        /** Other feed badge work yields briefly while Home owns the startup I/O budget. */
+        const val HOME_PRIORITY_PASS_GRACE_MS = 5_000L
+
+        /** Weighted row budgets: large pages consume multiple units, not one slot. */
+        const val DETAIL_WARM_CACHE_ENTRIES = 48
+        const val ARTIST_WARM_CACHE_ENTRIES = 24
+        const val DETAIL_PAGE_CACHE_ENTRIES = 24
+
+        /** Background work may wait this long for an opened collection's badges. */
+        const val DETAIL_BADGE_PRIORITY_GRACE_MS = 15_000L
+
+        /** Collection first pages prepared at once, independently of badge probes. */
+        // Two speculative browse calls are enough to make nearby cards warm
+        // without competing with foreground navigation for the network.
+        const val DETAIL_WARMUP_CONCURRENCY = 2
+        const val ARTIST_WARMUP_CONCURRENCY = 2
+
         /**
          * How long a keystroke waits before the typeahead is asked about it.
          *
@@ -1071,7 +2774,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
          */
         const val SUGGEST_DEBOUNCE_MS = 180L
 
-        const val SEARCH_CACHE_ENTRIES = 100
+        const val SEARCH_CACHE_ENTRIES = 40
 
         /**
          * How long any one source gets to answer a search.
@@ -1094,7 +2797,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         subtitle: String = "",
         thumbnailUrl: String? = null,
         type: BrowseType = BrowseType.OTHER,
+        isExplicit: Boolean = false,
     ) {
+        _refreshingDetails.value = _refreshingDetails.value - browseId
+        detailOpeningJobs.remove(browseId)?.cancel()
+        detailContinuationJobs.remove(browseId)?.cancel()
+        detailArtistVersionsJobs.remove(browseId)?.cancel()
         val resolved = typeOf(browseId, type)
         _detailStack.value += DetailPage(
             browseId = browseId,
@@ -1103,26 +2811,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             thumbnailUrl = thumbnailUrl,
             songs = UiState.Loading,
             type = resolved,
+            // Compatibility-only field added after v1.5.1. It is carried from
+            // the already-known card and performs no work during page opening.
+            isExplicit = isExplicit,
         )
-        viewModelScope.launch {
+        val openedAt = android.os.SystemClock.elapsedRealtime()
+        detailOpeningJobs[browseId] = viewModelScope.launch {
             var sections = emptyList<HomeShelf>()
-            // Callers that open an artist from a track — the player, the
-            // long-press menu — only have that track's cover art and its full
-            // credit ("A, B & C") to hand, so the page swaps in the artist's
-            // own picture and name once they arrive.
             var artwork: String? = null
             var name: String? = null
-            /** Set when the track list carries on past its first response. */
+            var credit = subtitle
+            var audience: String? = null
+            var artists = emptyList<ArtistLink>()
             var more: String? = null
-            /** Tracks YouTube offers to round the playlist out — see [DetailPage.suggestedSongs]. */
             var suggested: List<Song> = emptyList()
-            /** Whether this release is already saved — see [DetailPage.library]. */
             var library: LibraryState? = null
             val state = when {
                 browseId == "local:downloads" -> {
                     val context = getApplication<Application>()
                     val songs = LocalMediaRepository.getDownloadedSongs(context)
-                    if (songs.isEmpty()) UiState.Error("No downloaded tracks in Music/BitChord")
+                    if (songs.isEmpty()) UiState.Error(context.getString(R.string.library_downloads_empty))
                     else UiState.Success(songs)
                 }
                 browseId == "local:all" -> {
@@ -1136,12 +2844,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
                 resolved == BrowseType.ARTIST -> {
-                    YtMusicRepository.artistPage(browseId).fold(
+                    YtMusicRepository.artistPageV151(browseId).fold(
                         onSuccess = { page ->
                             sections = page.sections
                             artwork = page.thumbnailUrl
                             name = page.name
-                            if (page.songs.isEmpty()) {
+                            audience = page.monthlyAudience
+                            page.name?.let { artistName ->
+                                page.thumbnailUrl?.let { ArtistArtworkRepository.remember(artistName, it) }
+                            }
+                            if (page.songs.isEmpty() && page.sections.isEmpty()) {
                                 UiState.Error("No tracks here")
                             } else {
                                 UiState.Success(page.songs.withArtwork(thumbnailUrl))
@@ -1151,11 +2863,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
                 else -> {
-                    YtMusicRepository.browseSongs(browseId).fold(
+                    YtMusicRepository.browseSongsV151(browseId).fold(
                         onSuccess = { page ->
                             if (page.songs.isEmpty()) {
                                 UiState.Error("No tracks here")
                             } else {
+                                // Some playlist cards arrive without artwork (notably restored/
+                                // shared entries). The browse response has the authoritative
+                                // collection header, so backfill it before songs are queued. This
+                                // also makes Stats persist the playlist cover instead of a null.
+                                artwork = page.thumbnailUrl ?: artwork
+                                credit = page.releaseSubtitle?.takeIf { it.isNotBlank() } ?: credit
+                                artists = page.headerArtists
+                                if (resolved == BrowseType.ALBUM) sections = page.sections
                                 more = page.continuation
                                 suggested = page.suggested.withArtwork(thumbnailUrl)
                                 library = page.library
@@ -1166,25 +2886,402 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
             }
-            // Update by id — the user may have pushed another page meanwhile.
-            _detailStack.value = _detailStack.value.map {
-                if (it.browseId == browseId && it.songs is UiState.Loading) {
-                    it.copy(
-                        songs = state,
-                        sections = sections,
-                        thumbnailUrl = artwork ?: it.thumbnailUrl,
-                        title = name ?: it.title,
-                        suggestedSongs = suggested,
-                        library = library,
+            val validatedSongs = (state as? UiState.Success)?.data.orEmpty()
+            val validatedExplicit = isExplicit || validatedSongs.any { it.isExplicit }
+            if (validatedExplicit) {
+                when (resolved) {
+                    BrowseType.ALBUM -> SourceResolver.cacheReleaseExplicit(
+                        title = name ?: title,
+                        subtitle = credit,
+                        browseId = browseId,
+                        explicit = true,
                     )
-                } else {
-                    it
+                    BrowseType.PLAYLIST -> SourceResolver.playlistBadges(
+                        browseId = browseId,
+                        explicitHint = true,
+                        knownSongs = validatedSongs,
+                    )
+                    else -> Unit
                 }
             }
-            // Only once the first page is on screen: [fillIn] appends to it,
-            // and has nothing to append to before this.
-            more?.let { fillIn(browseId, it, thumbnailUrl) }
+
+            _detailStack.value = _detailStack.value.map { current ->
+                if (current.browseId == browseId && current.songs is UiState.Loading) {
+                    current.copy(
+                        songs = state,
+                        sections = sections,
+                        thumbnailUrl = artwork ?: current.thumbnailUrl,
+                        title = name ?: current.title,
+                        subtitle = credit,
+                        monthlyAudience = audience,
+                        headerArtists = artists,
+                        suggestedSongs = suggested,
+                        library = library,
+                        isExplicit = current.isExplicit || validatedExplicit,
+                    )
+                } else {
+                    current
+                }
+            }
+            if (resolved == BrowseType.ARTIST && artwork.isNullOrBlank()) {
+                val artistName = name ?: title
+                launch {
+                    val resolvedArtwork = ArtistArtworkRepository.resolve(artistName, browseId) ?: return@launch
+                    _detailStack.value = _detailStack.value.map { current ->
+                        if (current.browseId == browseId && current.thumbnailUrl.isNullOrBlank()) {
+                            current.copy(thumbnailUrl = resolvedArtwork)
+                        } else current
+                    }
+                }
+            }
+            android.util.Log.d("OrbDetail", "first result $browseId in ${android.os.SystemClock.elapsedRealtime() - openedAt}ms")
+            if (resolved == BrowseType.ARTIST && state is UiState.Success) {
+                enrichArtistReleaseVersions(browseId, sections)
+            }
+            more?.let { fillInV151(browseId, it, thumbnailUrl) }
         }
+    }
+
+    /**
+     * Expands the artist's release shelves after the visible landing page is on screen.
+     *
+     * YouTube Music inlines only a carousel-sized preview in the artist browse. The
+     * shelf header points at a fully paged Albums / Singles destination, so fetch that
+     * destination in the background and replace the preview with the complete list.
+     *
+     * Artist pages intentionally show one canonical release only. Standard/deluxe/
+     * extended/expanded siblings belong on the album page's existing "Other versions"
+     * shelf. We use YouTube's own Other versions relation as the authority, then choose
+     * the least edition-like / shortest title in each relation cluster. This also
+     * catches renamed editions that do not literally contain the word "Deluxe".
+     */
+    private fun enrichArtistReleaseVersions(browseId: String, seedSections: List<HomeShelf>) {
+        detailArtistVersionsJobs.remove(browseId)?.cancel()
+
+        fun normalized(value: String): String =
+            Normalizer.normalize(value.lowercase(Locale.ROOT), Normalizer.Form.NFD)
+                .replace(Regex("\\p{M}+"), "")
+                .replace('’', '\'')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+        val editionWords = listOf(
+            "deluxe", "extended", "expanded", "anniversary", "special edition",
+            "bonus track", "bonus tracks", "super deluxe", "collector edition",
+            "collector's edition", "tour edition", "complete edition", "remaster",
+            "remastered", "digital deluxe", "ultimate edition", "platinum edition",
+            "legacy edition", "edition deluxe", "edicao deluxe", "edicion deluxe",
+            "versao deluxe", "version deluxe", "edicao especial", "edicion especial",
+        )
+
+        fun editionPenalty(title: String): Int {
+            val text = normalized(title)
+            return editionWords.count { it in text }
+        }
+
+        fun releaseFamilyKey(title: String): String {
+            var text = normalized(title)
+            // Strip only explicit edition qualifiers here. YouTube's own Other
+            // versions graph below handles aliases whose title changed entirely.
+            val marker = "deluxe|extended|expanded|anniversary|special edition|bonus tracks?|super deluxe|digital deluxe|ultimate edition|platinum edition|legacy edition|collector(?:'s)? edition|tour edition|complete edition|remaster(?:ed)?|edicao deluxe|edicion deluxe|versao deluxe|version deluxe|edicao especial|edicion especial"
+            text = Regex("\\s*[\\(\\[][^)\\]]*(?:$marker)[^)\\]]*[\\)\\]]\\s*").replace(text, " ")
+            text = Regex("\\s*[-–—:]\\s*(?:$marker).*$").replace(text, "")
+            return text
+                .replace(Regex("[^a-z0-9]+"), " ")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+                .ifBlank { normalized(title) }
+        }
+
+        fun canonicalRelease(items: List<ShelfItem>): ShelfItem? = items
+            .filter { it.type == BrowseType.ALBUM && !it.browseId.isNullOrBlank() }
+            .minWithOrNull(
+                compareBy<ShelfItem> { editionPenalty(it.title) }
+                    .thenBy { normalized(it.title).length }
+                    .thenBy { it.title },
+            )
+
+        fun canonicalizeByTitle(items: List<ShelfItem>): List<ShelfItem> {
+            val groups = LinkedHashMap<String, MutableList<ShelfItem>>()
+            items.forEach { item ->
+                if (item.type != BrowseType.ALBUM || item.browseId.isNullOrBlank()) return@forEach
+                groups.getOrPut(releaseFamilyKey(item.title)) { mutableListOf() }.add(item)
+            }
+            return groups.values.mapNotNull(::canonicalRelease)
+        }
+
+        fun isReleaseShelf(shelf: HomeShelf): Boolean {
+            if (shelf.items.any { it.type == BrowseType.ALBUM }) return true
+            val title = normalized(shelf.title)
+            return title.contains("album") || title.contains("albun") ||
+                title.contains("single") || title.contains(" ep") ||
+                title.startsWith("ep") || title.contains("release") ||
+                title.contains("lancamento") || title.contains("lanzamiento")
+        }
+
+        val releaseShelfIndexes = seedSections.indices.filter { isReleaseShelf(seedSections[it]) }
+        val seedAlbums = releaseShelfIndexes.flatMap { seedSections[it].items }
+            .filter { it.type == BrowseType.ALBUM && !it.browseId.isNullOrBlank() }
+            .distinctBy { it.browseId }
+        if (releaseShelfIndexes.isEmpty() && !AppSettings.prioritizeAlbumVersions.value) return
+
+        detailArtistVersionsJobs[browseId] = viewModelScope.launch {
+            val gate = Semaphore(3)
+
+            // Phase 1: replace each carousel preview with the complete paged shelf.
+            val expandedByIndex = coroutineScope {
+                releaseShelfIndexes.map { index ->
+                    async {
+                        val shelf = seedSections[index]
+                        val expanded = shelf.browseId?.let { shelfBrowseId ->
+                            gate.withPermit {
+                                YtMusicRepository.artistReleaseShelfItemsV151(
+                                    shelfBrowseId,
+                                    shelf.browseParams,
+                                ).getOrDefault(emptyList())
+                            }
+                        }.orEmpty()
+                        index to (expanded.takeIf { it.isNotEmpty() } ?: shelf.items)
+                    }
+                }.awaitAll().toMap()
+            }
+
+            val allAlbums = expandedByIndex.values.flatten()
+                .filter { it.type == BrowseType.ALBUM && !it.browseId.isNullOrBlank() }
+                .distinctBy { it.browseId }
+                .ifEmpty { seedAlbums }
+
+            // Phase 2: ask each release which ids YouTube itself considers alternate
+            // editions. Instead of appending those siblings to the artist page, map
+            // every sibling back to one canonical standard release.
+            val canonicalById = coroutineScope {
+                allAlbums.map { album ->
+                    async {
+                        val albumId = album.browseId!!
+                        val variants = gate.withPermit {
+                            YtMusicRepository.albumOtherVersionsV151(albumId)
+                                .getOrDefault(emptyList())
+                        }
+                        val related = (listOf(album) + variants)
+                            .filter { it.type == BrowseType.ALBUM && !it.browseId.isNullOrBlank() }
+                            .distinctBy { it.browseId }
+                        val canonical = canonicalRelease(related) ?: album
+                        related.mapNotNull { sibling -> sibling.browseId?.let { it to canonical } }
+                    }
+                }.awaitAll().flatten().toMap()
+            }
+
+            val current = _detailStack.value.lastOrNull { it.browseId == browseId } ?: return@launch
+            val currentSongs = (current.songs as? UiState.Success)?.data.orEmpty()
+            val preferredTop = if (AppSettings.prioritizeAlbumVersions.value) {
+                coroutineScope {
+                    currentSongs.take(8).map { song ->
+                        async {
+                            gate.withPermit { YtMusicRepository.resolvePreferredPlaybackVersion(song) }
+                        }
+                    }.awaitAll()
+                }
+            } else {
+                emptyList()
+            }
+
+            _detailStack.value = _detailStack.value.map { page ->
+                if (page.browseId != browseId) return@map page
+
+                val cleanedSections = page.sections
+                    .filterNot { it.title.isOtherVersionsShelf() }
+                    .mapIndexed { index, shelf ->
+                        if (index !in releaseShelfIndexes && !isReleaseShelf(shelf)) return@mapIndexed shelf
+                        val raw = expandedByIndex[index] ?: shelf.items
+                        val replaced = raw.map { item ->
+                            item.browseId?.let(canonicalById::get) ?: item
+                        }.distinctBy { it.browseId ?: "${it.title}|${it.subtitle}" }
+                        shelf.copy(items = canonicalizeByTitle(replaced))
+                    }
+
+                val songs = (page.songs as? UiState.Success)?.data
+                val enrichedSongs = if (songs != null && preferredTop.isNotEmpty()) {
+                    UiState.Success(
+                        songs.mapIndexed { index, song -> preferredTop.getOrNull(index) ?: song },
+                    )
+                } else {
+                    page.songs
+                }
+                page.copy(sections = cleanedSections, songs = enrichedSongs)
+            }
+        }
+    }
+
+    private fun String.isOtherVersionsShelf(): Boolean {
+        val value = Normalizer.normalize(lowercase(Locale.ROOT), Normalizer.Form.NFD)
+            .replace(Regex("\\p{M}+"), "")
+        return value.contains("other version") || value.contains("outras vers") || value.contains("otras version")
+    }
+
+    /** Append metadata pages after the first visible response. */
+    private fun fillInV151(browseId: String, token: String, artworkFallback: String?) {
+        detailContinuationJobs.remove(browseId)?.cancel()
+        detailContinuationJobs[browseId] = viewModelScope.launch {
+            var next: String? = token
+            var page = 1
+            while (next != null && page++ < YtMusicRepository.MAX_PAGES) {
+                val requested = next ?: return@launch
+                val fetched = YtMusicRepository.moreSongsV151(requested).getOrNull()
+                    ?: return@launch
+                val stack = _detailStack.value
+                val index = stack.indexOfFirst { it.browseId == browseId }
+                if (index < 0) return@launch
+                val current = stack[index]
+                val existing = (current.songs as? UiState.Success)?.data ?: return@launch
+                val known = existing.mapTo(HashSet()) { it.videoId }
+                val added = fetched.songs
+                    .filter { known.add(it.videoId) }
+                    .withArtwork(artworkFallback)
+                val knownSuggested = current.suggestedSongs.mapTo(HashSet()) { it.videoId }
+                val addedSuggested = fetched.suggested
+                    .filter { it.videoId !in known && knownSuggested.add(it.videoId) }
+                    .withArtwork(artworkFallback)
+                if (added.isEmpty() && addedSuggested.isEmpty()) return@launch
+                _detailStack.value = stack.toMutableList().also { pages ->
+                    pages[index] = current.copy(
+                        songs = UiState.Success(existing + added),
+                        suggestedSongs = current.suggestedSongs + addedSuggested,
+                    )
+                }
+                next = fetched.continuation
+            }
+        }
+    }
+
+    /**
+     * Explicit pull-to-refresh for an already loaded detail page. The old page
+     * remains on screen while the request runs and is only replaced by a
+     * successful response, so refresh never turns a usable page back into a
+     * loading skeleton or an error card.
+     */
+    fun refreshDetail(browseId: String) {
+        if (browseId in _refreshingDetails.value) return
+        val existing = _detailStack.value.lastOrNull { it.browseId == browseId } ?: return
+        detailOpeningJobs.remove(browseId)?.cancel()
+        detailContinuationJobs.remove(browseId)?.cancel()
+        detailArtistVersionsJobs.remove(browseId)?.cancel()
+        _refreshingDetails.value = _refreshingDetails.value + browseId
+
+        val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            val owner = coroutineContext[Job]
+            try {
+                val resolved = typeOf(browseId, existing.type)
+                var sections = existing.sections
+                var artwork = existing.thumbnailUrl
+                var title = existing.title
+                var subtitle = existing.subtitle
+                var monthlyAudience = existing.monthlyAudience
+                var headerArtists = existing.headerArtists
+                var suggested = existing.suggestedSongs
+                var library = existing.library
+                var more: String? = null
+
+                val refreshedSongs: List<Song>? = when {
+                    browseId == "local:downloads" ->
+                        LocalMediaRepository.getDownloadedSongs(getApplication<Application>())
+
+                    browseId == "local:all" -> {
+                        val context = getApplication<Application>()
+                        if (!LocalMediaRepository.hasStoragePermission(context)) null
+                        else LocalMediaRepository.getLocalMusic(context)
+                    }
+
+                    resolved == BrowseType.ARTIST -> {
+                        YtMusicRepository.artistPageV151(browseId).getOrNull()?.let { artist ->
+                            sections = artist.sections
+                            artwork = artist.thumbnailUrl ?: artwork
+                            title = artist.name ?: title
+                            monthlyAudience = artist.monthlyAudience ?: monthlyAudience
+                            artist.songs.withArtwork(artwork)
+                        }
+                    }
+
+                    resolved == BrowseType.ALBUM || resolved == BrowseType.PLAYLIST -> {
+                        YtMusicRepository.browseSongsV151(browseId).getOrNull()?.let { page ->
+                            subtitle = page.releaseSubtitle?.takeIf { it.isNotBlank() } ?: subtitle
+                            if (resolved == BrowseType.ALBUM) sections = page.sections
+                            more = page.continuation
+                            suggested = page.suggested.withArtwork(artwork).filterNot(::shouldAvoidPlayback)
+                            headerArtists = page.headerArtists
+                            library = if (youtubeLibraryBackendAvailable()) {
+                                page.library
+                            } else {
+                                LibraryState(
+                                    playlistId = browseId,
+                                    saved = OrbLibraryStore.containsCollection(
+                                        getApplication<Application>(),
+                                        browseId,
+                                    ),
+                                )
+                            }
+                            page.songs.withArtwork(artwork)
+                        }
+                    }
+
+                    else -> {
+                        YtMusicRepository.browseSongsV151(browseId).getOrNull()?.let { page ->
+                            more = page.continuation
+                            suggested = page.suggested.withArtwork(artwork).filterNot(::shouldAvoidPlayback)
+                            headerArtists = page.headerArtists
+                            library = page.library
+                            page.songs.withArtwork(artwork)
+                        }
+                    }
+                }
+
+                if (refreshedSongs != null) {
+                    val refreshed = existing.copy(
+                        title = title,
+                        subtitle = subtitle,
+                        thumbnailUrl = artwork,
+                        songs = if (refreshedSongs.isEmpty()) {
+                            existing.songs
+                        } else {
+                            UiState.Success(refreshedSongs)
+                        },
+                        sections = sections,
+                        monthlyAudience = monthlyAudience,
+                        headerArtists = headerArtists,
+                        continuation = more,
+                        suggestedSongs = suggested,
+                        library = library,
+                        isExplicit = existing.isExplicit || refreshedSongs.any { it.isExplicit },
+                    )
+                    _detailStack.value = _detailStack.value.map { page ->
+                        if (page.browseId == browseId) refreshed else page
+                    }
+                    cacheDetailPage(refreshed)
+                    if (resolved == BrowseType.ARTIST) {
+                        enrichArtistReleaseVersions(browseId, sections)
+                    }
+                    val continuationAfterRefresh = more
+                    if (
+                        continuationAfterRefresh != null &&
+                        (resolved == BrowseType.ALBUM || resolved == BrowseType.PLAYLIST)
+                    ) {
+                        fillInV151(
+                            browseId = browseId,
+                            token = continuationAfterRefresh,
+                            artworkFallback = artwork,
+                        )
+                    }
+                    // The refresh indicator ends with the first useful response.
+                    _refreshingDetails.value = _refreshingDetails.value - browseId
+                }
+            } finally {
+                if (detailOpeningJobs[browseId] === owner) {
+                    _refreshingDetails.value = _refreshingDetails.value - browseId
+                    detailOpeningJobs.remove(browseId)
+                }
+            }
+        }
+        detailOpeningJobs[browseId] = job
+        job.start()
     }
 
     fun reloadLocalDetail(browseId: String) {
@@ -1193,7 +3290,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val state: UiState<List<Song>> = when (browseId) {
                 "local:downloads" -> {
                     val songs = LocalMediaRepository.getDownloadedSongs(context)
-                    if (songs.isEmpty()) UiState.Error("No downloaded tracks in Music/BitChord")
+                    if (songs.isEmpty()) UiState.Error(context.getString(R.string.library_downloads_empty))
                     else UiState.Success(songs)
                 }
                 "local:all" -> {
@@ -1216,53 +3313,129 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Follows a detail page's continuations in the background, appending each
-     * page to what is already being read.
+     * Follows an album/playlist continuation only after its first page is
+     * already visible. Each response is appended immediately, so a long
+     * collection becomes complete underneath the reader without ever putting
+     * the initial render behind several network round trips.
      *
-     * A playlist of a few hundred tracks is several round trips, and taking
-     * them before showing anything meant a spinner for all of them. Growing
-     * the list underneath the reader is also what makes it safe to keep
-     * following continuations [YtMusicRepository.MAX_PAGES] deep — nobody is
-     * waiting on the last one.
-     *
-     * Stops the moment the page leaves the stack: there is no one to append
-     * for.
+     * This intentionally uses the ordinary continuation lane rather than the
+     * foreground retry lane: after page one there is no UI waiting for the next
+     * batch. A failed continuation leaves the already-visible rows untouched
+     * and keeps its token cached, so reopening/refreshing can try again.
      */
-    private fun fillIn(browseId: String, token: String, artworkFallback: String?) {
-        viewModelScope.launch {
-            var next: String? = token
-            var page = 1
-            while (next != null && page++ < YtMusicRepository.MAX_PAGES) {
-                val fetched = YtMusicRepository.moreSongs(next).getOrNull() ?: return@launch
-                val stack = _detailStack.value
-                val index = stack.indexOfFirst { it.browseId == browseId }
-                if (index < 0) return@launch
-                val current = stack[index]
-                val existing = (current.songs as? UiState.Success)?.data ?: return@launch
-                val known = existing.mapTo(HashSet()) { it.videoId }
-                val added = fetched.songs
-                    .filter { known.add(it.videoId) }
-                    .withArtwork(artworkFallback)
-                // Suggestions can arrive on a later page than the real
-                // tracks, once the playlist's own continuation runs dry —
-                // see parsePlaylistShelf — so they're tracked separately
-                // rather than folded into [known].
-                val knownSuggested = current.suggestedSongs.mapTo(HashSet()) { it.videoId }
-                val addedSuggested = fetched.suggested
-                    .filter { it.videoId !in known && knownSuggested.add(it.videoId) }
-                    .withArtwork(artworkFallback)
-                // A page with nothing new on it means the feed has looped back
-                // rather than run dry with a token still attached.
-                if (added.isEmpty() && addedSuggested.isEmpty()) return@launch
-                _detailStack.value = stack.toMutableList().also {
-                    it[index] = current.copy(
+    private fun fillInDetail(
+        browseId: String,
+        token: String,
+        artworkFallback: String?,
+    ) {
+        if (detailContinuationJobs[browseId]?.isActive == true) return
+
+        val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            val owner = coroutineContext[Job]
+            try {
+                var next: String? = token
+                var page = 1
+                while (next != null && page++ < YtMusicRepository.MAX_PAGES) {
+                    val requestedToken = next
+                    // The token came from a page that is already visible.
+                    // Prefer the fast anonymous continuation so OAuth refresh
+                    // cannot turn background list growth into more network
+                    // contention; account auth is only a fallback.
+                    val fetched = YtMusicRepository.moreSongs(requestedToken).getOrNull()
+                        ?: return@launch
+                    if (coroutineContext[Job]?.isActive != true) return@launch
+
+                    val stack = _detailStack.value
+                    val index = stack.indexOfFirst { it.browseId == browseId }
+                    if (index < 0) return@launch
+                    val current = stack[index]
+                    val existing = (current.songs as? UiState.Success)?.data ?: return@launch
+
+                    val known = existing.mapTo(HashSet()) { it.videoId }
+                    val added = fetched.songs
+                        .filter { known.add(it.videoId) }
+                        .withArtwork(artworkFallback)
+
+                    val knownSuggested = current.suggestedSongs.mapTo(HashSet()) { it.videoId }
+                    val addedSuggested = fetched.suggested
+                        .filter { it.videoId !in known && knownSuggested.add(it.videoId) }
+                        .withArtwork(artworkFallback)
+                        .filterNot(::shouldAvoidPlayback)
+
+                    val nextToken = fetched.continuation
+                        ?.takeUnless { it == requestedToken }
+
+                    // A continuation that adds nothing has looped or reached a
+                    // non-track tail. Mark it complete instead of spinning on
+                    // tokens the user cannot see.
+                    if (added.isEmpty() && addedSuggested.isEmpty()) {
+                        val completed = current.copy(continuation = null)
+                        _detailStack.value = stack.toMutableList().also { it[index] = completed }
+                        cacheDetailPage(completed)
+                        return@launch
+                    }
+
+                    val updated = current.copy(
                         songs = UiState.Success(existing + added),
+                        continuation = nextToken,
                         suggestedSongs = current.suggestedSongs + addedSuggested,
+                        isExplicit = current.isExplicit || added.any { it.isExplicit },
                     )
+                    _detailStack.value = stack.toMutableList().also { it[index] = updated }
+                    cacheDetailPage(updated)
+                    next = nextToken
                 }
-                next = fetched.continuation
+            } finally {
+                if (detailContinuationJobs[browseId] === owner) {
+                    detailContinuationJobs.remove(browseId)
+                }
             }
         }
+        detailContinuationJobs[browseId] = job
+        job.start()
+    }
+
+    /**
+     * Fetches the signed-in save state after the detail page is already
+     * paintable. The fast foreground browse is intentionally anonymous so a
+     * token refresh/cookie compatibility retry can never put the screen back
+     * behind a spinner. If account enrichment is slow or fails, the catalogue
+     * page remains fully usable; only the save/check control waits.
+     */
+    private fun enrichDetailLibraryState(browseId: String) {
+        viewModelScope.launch {
+            delay(1_000)
+            if (_detailStack.value.none { it.browseId == browseId }) return@launch
+
+            val authenticated = YtMusicRepository.browseSongs(browseId).getOrNull()
+                ?.library
+                ?: return@launch
+
+            var updatedPage: DetailPage? = null
+            _detailStack.value = _detailStack.value.map { current ->
+                if (current.browseId == browseId) {
+                    current.copy(library = authenticated).also { updatedPage = it }
+                } else {
+                    current
+                }
+            }
+            updatedPage?.let(::cacheDetailPage)
+        }
+    }
+
+    /**
+     * Compatibility entry point kept for the existing screen callback. Paging
+     * is automatic now; if anything still asks for more explicitly, simply
+     * ensure the same background fill job is running.
+     */
+    fun loadMoreDetail(browseId: String) {
+        val visible = _detailStack.value.lastOrNull { it.browseId == browseId } ?: return
+        val token = visible.continuation ?: return
+        fillInDetail(
+            browseId = browseId,
+            token = token,
+            artworkFallback = visible.thumbnailUrl,
+        )
     }
 
     /**
@@ -1274,6 +3447,48 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (fallback == null) return this
         return map { if (it.thumbnailUrl == null) it.copy(thumbnailUrl = fallback) else it }
     }
+
+    /**
+     * True when an album subtitle is missing either the release year or the
+     * artist/credit. Those are precisely the two fields that vary depending on
+     * whether the page was opened from Home, Search or an artist shelf.
+     */
+    private fun albumMetadataIsIncomplete(subtitle: String): Boolean {
+        val parts = subtitle
+            .split("•", "·")
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+        val hasYear = parts.any { it.length == 4 && it.all(Char::isDigit) }
+        val hasCredit = parts.any { part ->
+            val lower = part.lowercase()
+            lower !in DETAIL_KIND_WORDS && !(part.length == 4 && part.all(Char::isDigit))
+        }
+        return !hasYear || !hasCredit
+    }
+
+    /**
+     * Reuses the album-search parser as the canonical metadata source. Search
+     * already returns the complete subtitle for the exact same browse id, which
+     * avoids inventing a second parser in the ViewModel and keeps Home, artist
+     * shelves and Search converging on one representation.
+     */
+    private suspend fun canonicalAlbumSubtitle(browseId: String, title: String): String? {
+        val rows = YtMusicRepository.search(title, SearchFilter.ALBUMS).getOrNull() ?: return null
+        val albums = rows.filterIsInstance<SearchResult.Browse>()
+
+        val exactId = albums.firstOrNull { it.item.browseId == browseId }
+        if (exactId != null) return exactId.item.subtitle.takeIf { it.isNotBlank() }
+
+        // Some YouTube surfaces alias an album browse id. Fall back only when
+        // there is exactly one same-title album, avoiding a random edition when
+        // several releases share a name.
+        val sameTitle = albums.filter { it.item.title.equals(title, ignoreCase = true) }
+        return sameTitle.singleOrNull()?.item?.subtitle?.takeIf { it.isNotBlank() }
+    }
+
+    private val DETAIL_KIND_WORDS = setOf(
+        "album", "single", "ep", "playlist", "artist", "podcast", "episode", "song", "video",
+    )
 
     /**
      * Home and Explore cards don't say what they point at, and an artist
@@ -1291,37 +3506,163 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun closeDetail(): Boolean {
         val stack = _detailStack.value
         if (stack.isEmpty()) return false
+        _refreshingDetails.value = _refreshingDetails.value - stack.last().browseId
+        detailOpeningJobs.remove(stack.last().browseId)?.cancel()
+        detailContinuationJobs.remove(stack.last().browseId)?.cancel()
+        detailArtistVersionsJobs.remove(stack.last().browseId)?.cancel()
         _detailStack.value = stack.dropLast(1)
         return true
     }
 
-    fun onSignedIn(cookie: String) {
-        authStore.cookie = cookie
-        Innertube.cookie = cookie
+    /**
+     * Personalised hubs belong to the active YouTube identity. A channel switch
+     * is a real invalidation event even though ordinary navigation is not.
+     */
+    private fun invalidatePersonalizedHubs() {
+        releasesHubRequested = false
+        discoverHubRequested = false
+        communityPlaylistsHubRequested = false
+        _releasesHub.value = UiState.Loading
+        _discoverHub.value = UiState.Loading
+        _communityPlaylistsHub.value = UiState.Loading
+    }
+
+    /** Called after Credential Manager + Supabase establish the Orb account. */
+    fun onGoogleSignedIn() {
+        // This flag gates the Orb account experience. It deliberately does not
+        // imply that private YouTube Music endpoints accepted OAuth.
         _signedIn.value = true
+        _account.value = OrbGoogleAuth.storedAccount()
+        restorePersistedLikes()
+        restoreArtistPreferences()
+        reconcileOrbRatingsFromCloud()
+        flushPendingYoutubeRatings()
+        invalidatePersonalizedHubs()
         loadHome()
-        loadLibrary()
+        if (Innertube.hasAccountSession) {
+            loadHomeYouTubeSections(force = true)
+            loadLibrary()
+            loadAccount()
+            loadPlaylists()
+        } else {
+            // Orb login is already complete. Use the local library until the
+            // listener explicitly links YouTube Music compatibility later.
+            publishOrbLibrary()
+            refreshOpenDetailLibraryStates(useYouTube = false)
+        }
+    }
+
+    /**
+     * Browser login is no longer an Orb sign-in. It only attaches the legacy
+     * YouTube Music session used when a private Innertube endpoint rejects
+     * Google's OAuth bearer token.
+     */
+    fun onLegacyYoutubeLinked(
+        session: YouTubeBrowserSession,
+        onResult: (Result<Unit>) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            runCatching { OrbGoogleAuth.acceptLegacyYoutubeSession(session) }
+                .onSuccess {
+                    if (_signedIn.value) {
+                        loadHomeYouTubeSections(force = true)
+                        loadLibrary()
+                        loadAccount()
+                        loadPlaylists()
+                        reconcileOrbRatingsFromCloud()
+                        flushPendingYoutubeRatings()
+                    }
+                    onResult(Result.success(Unit))
+                }
+                .onFailure { onResult(Result.failure(it)) }
+        }
+    }
+
+    @Deprecated("Use onLegacyYoutubeLinked; browser cookies are not Orb identity.")
+    fun onSignedIn(cookie: String) =
+        onLegacyYoutubeLinked(YouTubeBrowserSession(cookieHeader = cookie))
+
+    /** Refresh account-scoped screens after the user changes YouTube channel. */
+    fun onYoutubeIdentityChanged() {
+        if (!_signedIn.value) return
+        invalidatePersonalizedHubs()
+        detailPageCache.evictAll()
+        detailWarmCache.evictAll()
+        artistWarmCache.evictAll()
+        synchronized(artistWarmups) {
+            artistWarmups.values.forEach { it.cancel() }
+            artistWarmups.clear()
+        }
         loadAccount()
-        loadPlaylists()
+        loadHome()
+        if (Innertube.hasAccountSession) {
+            loadHomeYouTubeSections(force = true)
+            loadLibrary()
+            loadPlaylists()
+            flushPendingYoutubeRatings()
+        }
+        reconcileOrbRatingsFromCloud()
     }
 
     fun signOut() {
+        // Clear UI/account state immediately; the credential-provider and
+        // Supabase cleanup can complete off the main thread.
+        viewModelScope.launch { OrbGoogleAuth.signOut() }
         authStore.signOut()
         Innertube.cookie = null
+        Innertube.delegatedPageId = null
+        Innertube.authUserIndex = 0
+        Innertube.accountSignedIn = false
         _signedIn.value = false
         _account.value = null
-        _library.value = UiState.Loading
+        homeYouTubeSectionsJob?.cancel()
+        homeYouTubeSectionsJob = null
+        homeYouTubeSectionsLoaded = false
+        _homeYouTubeSections.value = emptyList()
+        if (AppSettings.useYouTubeMusicLibrary.value) {
+            _library.value = UiState.Loading
+        } else {
+            publishOrbLibrary()
+            refreshOpenDetailLibraryStates(useYouTube = false)
+        }
+        // Stop account-scoped sync workers before clearing the visible state.
+        cloudRatingReconcileJob?.cancel()
+        cloudRatingReconcileJob = null
+        youtubeRatingSyncJobs.values.forEach { it.cancel() }
+        youtubeRatingSyncJobs.clear()
+
         // Ratings and playlists belong to the account that just left; keeping
         // them would show the next signed-in user someone else's hearts.
         _likeOverrides.value = emptyMap()
+        _artistPreferences.value = ArtistPreferenceStore.load("local-device")
         _playlists.value = emptyList()
+        _playlistsLoaded.value = false
         _songMenu.value = null
+
+        // Session caches are account-scoped. Never let the next Google/YouTube
+        // identity inherit the previous listener's personalised pages.
+        searchCache.evictAll()
+        detailPageCache.evictAll()
+        detailWarmCache.evictAll()
+        artistWarmCache.evictAll()
+        synchronized(artistWarmups) {
+            artistWarmups.values.forEach { it.cancel() }
+            artistWarmups.clear()
+        }
+        releasesHubRequested = false
+        trendingHubRequested = false
+        discoverHubRequested = false
+        communityPlaylistsHubRequested = false
+        _releasesHub.value = UiState.Loading
+        _trendingHub.value = UiState.Loading
+        _discoverHub.value = UiState.Loading
+        _communityPlaylistsHub.value = UiState.Loading
         loadHome()
     }
 
     private fun Throwable.friendly(): String = when {
         message?.contains("resolve host", true) == true ||
-            message?.contains("Unable to resolve", true) == true -> "No internet connection"
+                message?.contains("Unable to resolve", true) == true -> "No internet connection"
         message?.contains("401") == true || message?.contains("403") == true ->
             "YouTube Music rejected the request — try signing in again"
         else -> message ?: "Something went wrong"
