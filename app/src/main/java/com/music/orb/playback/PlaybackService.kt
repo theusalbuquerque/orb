@@ -695,8 +695,19 @@ class PlaybackService : MediaSessionService() {
      */
     private fun syncLosslessKnowledgeFromDecoder(mediaId: String?, format: Format) {
         val id = mediaId ?: return
-        val current = player?.currentMediaItem?.takeIf { it.mediaId == id } ?: return
-        val song = current.toSong()
+        // During Automix B may already be decoded on the standby deck before it
+        // becomes the MediaSession player. Resolve the media item from either
+        // deck/queue instead of requiring it to be current on [player], otherwise
+        // only A (often the first row the user played) ever persists its badge.
+        val item = sequenceOf(player, spare)
+            .filterNotNull()
+            .firstNotNullOfOrNull { deck ->
+                (0 until deck.mediaItemCount)
+                    .asSequence()
+                    .map(deck::getMediaItemAt)
+                    .firstOrNull { it.mediaId == id }
+            } ?: return
+        val song = item.toSong()
         if (song.localUri != null) return
         val mime = format.sampleMimeType ?: return
 
@@ -1484,6 +1495,13 @@ class PlaybackService : MediaSessionService() {
         spareEq = heldEq
         incoming.addListener(playbackListener)
         incoming.addAnalyticsListener(formatListener)
+        // B's decoder can have settled while it was the silent standby deck,
+        // before [formatListener] was attached. Persist that already-known tier
+        // immediately at handoff so every actually played Lossless/Hi-Res track
+        // repaints its album/playlist row and contributes to the collection badge.
+        incoming.audioFormat?.let { format ->
+            syncLosslessKnowledgeFromDecoder(incoming.currentMediaItem?.mediaId, format)
+        }
 
         mediaSession?.player = SessionPlayer(incoming, requireNotNull(crossfade), ::onTransportPlayRequested)
         TrackLog.i(
