@@ -362,7 +362,7 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
 
         // Backend reachability is transient; analysis completeness is not.
         // Never relabel a legacy/schema-3 result as "complete" merely because
-        // the health probe is temporarily false — /plan still requires schema 5.
+        // the health probe is temporarily false — /plan still requires schema 6.
         return !curveAware25 || analysis.analysisSchema >= REMOTE_CURVE_SCHEMA
     }
 
@@ -1132,28 +1132,8 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
                     (!needsCurveRemote || landed.analysisSchema >= REMOTE_CURVE_SCHEMA)
                 ) return@execute
 
-                // When the backend is live, heavy feature extraction happens there. The phone
-                // uploads only the standalone lightweight analysis rendition — never the FLAC
-                // selected for playback. A timeout/contract failure returns null and immediately
-                // falls through to the same proven local analyzer using this very same file.
-                if (RemoteAutomixClient.isAvailable()) {
-                    val remote = RemoteAutomixClient.analyze(trackId, durationSeconds, file)
-                    if (remote?.isUsable == true) {
-                        results[trackId] = remote
-                        provisional.remove(trackId)
-                        shortDecodes.remove(trackId)
-                        store.save(trackId, remote)
-                        restoreAttempted.add(trackId)
-                        NerdStats.onAutomixAnalysisSource(trackId, NerdStats.AutomixAnalysisSource.REMOTE)
-                        notifyAnalysisUpdated(trackId)
-                        Log.d(
-                            TAG,
-                            "Remote analysis ready for $trackId: bpm=${remote.bpm} " +
-                                "conf=${remote.beatConfidence}",
-                        )
-                        return@execute
-                    }
-                }
+                // Schema 6 keeps acoustic analysis on-device. Beat This! + Orb DSP produce
+                // the planner metadata directly; Render receives no audio from this path.
 
                 NerdStats.onAutomixAnalysisSource(trackId, NerdStats.AutomixAnalysisSource.RELIABLE_FILE)
                 val outcome = analyzeFile(trackId, file, durationSeconds)
@@ -1410,6 +1390,7 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
         return TrackAnalysis(
             status = TrackAnalysis.STATUS_READY,
             trackId = trackId,
+            analysisSchema = LOCAL_METADATA_SCHEMA,
             duration = durationSeconds,
             bpm = grid?.bpm ?: entry?.bpm ?: 0.0,
             beatInterval = grid?.beatInterval ?: entry?.beatInterval ?: 0.0,
@@ -1709,6 +1690,7 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
                 TrackAnalysis(
                     status = TrackAnalysis.STATUS_READY,
                     trackId = trackId,
+                    analysisSchema = LOCAL_METADATA_SCHEMA,
                     duration = effectiveDuration,
                     contentEndTime = features.contentEndTime.takeIf { it > 0 } ?: effectiveDuration,
                     bpm = leading?.bpm ?: features.bpm,
@@ -1944,7 +1926,8 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
 
     private companion object {
         /** Server analysis schema required by curve-aware Automix 2.5 mix-v6. */
-        const val REMOTE_CURVE_SCHEMA = 5
+        const val REMOTE_CURVE_SCHEMA = 6
+        const val LOCAL_METADATA_SCHEMA = 6
         const val READY_FOR_PLAN_MIN_BEAT_CONFIDENCE = 0.45
         const val TAG = "BitChordTrackAnalyzer"
 
