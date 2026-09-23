@@ -346,7 +346,7 @@ class AutomixPlannerTest(unittest.TestCase):
 
         original = automix._librosa_beat_grid
         try:
-            automix._librosa_beat_grid = lambda _: (
+            automix._librosa_beat_grid = lambda *_: (
                 120.0,
                 0.74,
                 [i * 0.5 for i in range(48)],
@@ -369,7 +369,7 @@ class AutomixPlannerTest(unittest.TestCase):
         original_librosa = automix._librosa_beat_grid
         try:
             automix._beat_grid = lambda *_: (0.0, 0.0, [])
-            automix._librosa_beat_grid = lambda _: (
+            automix._librosa_beat_grid = lambda *_: (
                 126.0,
                 0.78,
                 [i * (60.0 / 126.0) for i in range(16)],
