@@ -2303,7 +2303,11 @@ def _curve_lock_recipe(
 ) -> dict[str, Any]:
     """Turn analysis curves into executable tempo/phase/harmonic lock data."""
     style = str(plan.get("style") or "")
-    if style not in {"RUNWAY_BLEND", "PHRASE_TAKEOVER", "DJ_BLEND", "DJ_FILTER", "EQ_SWAP"}:
+    if style not in {
+        "RUNWAY_BLEND", "INTRO_BED", "INTRO_BRIDGE_FILTER",
+        "FOREGROUND_TAKEOVER", "PHRASE_TAKEOVER",
+        "DJ_BLEND", "DJ_FILTER", "EQ_SWAP",
+    }:
         return {
             "tempoEnvelope": [],
             "incomingPitchSemitones": 0.0,
