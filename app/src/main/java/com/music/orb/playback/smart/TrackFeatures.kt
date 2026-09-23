@@ -100,6 +100,9 @@ object TrackFeatures {
         val vocalActivityMask: List<Double>,
         val energyCurve: List<EnergySample>,
         val lowEnergyCurve: List<EnergySample>,
+        val midEnergyCurve: List<EnergySample>,
+        val highEnergyCurve: List<EnergySample>,
+        val chroma: List<Double>,
         val mixInCandidates: List<MixCandidate>,
         val mixOutCandidates: List<MixCandidate>,
     )
@@ -125,6 +128,9 @@ object TrackFeatures {
         vocalActivityMask = root.doubles("vocalActivityMask"),
         energyCurve = root.energyCurve("energyCurve"),
         lowEnergyCurve = root.energyCurve("lowEnergyCurve"),
+        midEnergyCurve = root.energyCurve("midEnergyCurve"),
+        highEnergyCurve = root.energyCurve("highEnergyCurve"),
+        chroma = root.doubles("chroma").take(12),
         mixInCandidates = root.cuePoints("mixInCandidates"),
         mixOutCandidates = root.cuePoints("mixOutCandidates"),
     )
