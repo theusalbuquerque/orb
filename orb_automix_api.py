@@ -3606,67 +3606,49 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     # otherwise a short filtered bridge masks weak harmonic/tempo evidence.
     if not candidates and a_end > 0.0 and b_end > b_start:
         beat = 60.0 / a_bpm if a_bpm > 0.0 else 0.55
-        if vocal_clash >= 0.55 or b_open_vocal >= 0.62:
-            fallback_span = _clamp(beat * 1.5, 0.55, 1.40)
-            fallback_start = max(0.0, a_end - fallback_span)
-            candidates.append(_candidate_plan(
-                "PHRASE_CUT",
-                0.42 + 0.14 * (1.0 - vocal_clash),
-                "server-adaptive-phrase-fallback",
-                transitionStart=round(fallback_start, 4),
-                transitionEnd=round(a_end, 4),
-                incomingCueTime=round(b_start, 4),
-                incomingHandoffTime=round(b_start, 4),
-                outgoingPlaybackRate=1.0,
-                incomingPlaybackRate=1.0,
-                transitionBeats=1,
-                requestedTransitionBeats=1,
-                handoffFraction=0.72,
-                bassSwap=False,
-                bassSwapFraction=0.72,
-                filterSweep=0.0,
-                keyCompatibility=round(key_fit, 4),
-                tempoCompatibility=round(tempo, 4),
-                phraseAlignment=0.50,
-                overlapVocalClash=round(vocal_clash, 4),
-                energyCompatibility=0.50,
-                pairCompatibility=round(_clamp(0.55 * (1.0 - vocal_clash) + 0.45 * tempo, 0.0, 1.0), 4),
-                spanCompatibility=1.0,
-                gainEnvelope=[],
-            ))
-        else:
-            fallback_span = _clamp(4.0 * beat, 2.0, 6.0)
-            fallback_start = max(0.0, a_end - fallback_span)
-            candidates.append(_candidate_plan(
-                "DJ_FILTER",
-                0.44 + 0.12 * tempo + 0.10 * (1.0 - vocal_clash),
-                "server-adaptive-filter-fallback",
-                transitionStart=round(fallback_start, 4),
-                transitionEnd=round(a_end, 4),
-                incomingCueTime=round(b_start, 4),
-                incomingHandoffTime=round(b_start, 4),
-                outgoingPlaybackRate=1.0,
-                incomingPlaybackRate=1.0,
-                transitionBeats=max(2, int(round(fallback_span / max(beat, 1e-6)))),
-                requestedTransitionBeats=4,
-                handoffFraction=0.66,
-                bassSwap=False,
-                bassSwapFraction=0.66,
-                filterSweep=round(_clamp(0.72 + 0.18 * (1.0 - key_fit), 0.72, 0.96), 4),
-                keyCompatibility=round(key_fit, 4),
-                tempoCompatibility=round(tempo, 4),
-                phraseAlignment=0.50,
-                overlapVocalClash=round(vocal_clash, 4),
-                energyCompatibility=0.50,
-                pairCompatibility=round(_clamp(0.45 * tempo + 0.55 * (1.0 - vocal_clash), 0.0, 1.0), 4),
-                spanCompatibility=1.0,
-                gainEnvelope=[
-                    {"progress": 0.0, "incomingGain": 0.0, "outgoingGain": 1.0},
-                    {"progress": 0.35, "incomingGain": 0.22, "outgoingGain": 1.0},
-                    {"progress": 0.66, "incomingGain": 0.68, "outgoingGain": 0.72},
-                    {"progress": 1.0, "incomingGain": 1.0, "outgoingGain": 0.0},
-                ],
-            ))
+        # When no richer candidate survived its own musical-safety rules, never
+        # manufacture an overlap merely to avoid NO_TRANSITION. Create a deliberate
+        # handoff instead: phrase-like when there is enough room, otherwise a clean cut.
+        fallback_span = _clamp(
+            beat * (1.5 if vocal_clash >= 0.45 or b_open_vocal >= 0.50 else 1.0),
+            0.45,
+            1.40,
+        )
+        fallback_start = max(0.0, a_end - fallback_span)
+        fallback_style = "PHRASE_CUT" if fallback_span >= 0.70 else "CUT"
+        fallback_reason = (
+            "server-adaptive-phrase-fallback"
+            if fallback_style == "PHRASE_CUT"
+            else "server-adaptive-clean-fallback"
+        )
+        candidates.append(_candidate_plan(
+            fallback_style,
+            0.40 + 0.12 * (1.0 - vocal_clash) + 0.06 * tempo,
+            fallback_reason,
+            transitionStart=round(fallback_start, 4),
+            transitionEnd=round(a_end, 4),
+            incomingCueTime=round(b_start, 4),
+            incomingHandoffTime=round(b_start, 4),
+            outgoingPlaybackRate=1.0,
+            incomingPlaybackRate=1.0,
+            transitionBeats=1,
+            requestedTransitionBeats=1,
+            handoffFraction=0.78 if fallback_style == "PHRASE_CUT" else 0.88,
+            bassSwap=False,
+            bassSwapFraction=0.78,
+            filterSweep=0.0,
+            keyCompatibility=round(key_fit, 4),
+            tempoCompatibility=round(tempo, 4),
+            phraseAlignment=0.40,
+            overlapVocalClash=round(vocal_clash, 4),
+            energyCompatibility=0.50,
+            pairCompatibility=round(
+                _clamp(0.50 * (1.0 - vocal_clash) + 0.30 * tempo + 0.20 * key_fit, 0.0, 1.0),
+                4,
+            ),
+            spanCompatibility=1.0,
+            gainEnvelope=[],
+        ))
 
     if not candidates:
         # Degenerate metadata should still not surface NO_TRANSITION in normal
