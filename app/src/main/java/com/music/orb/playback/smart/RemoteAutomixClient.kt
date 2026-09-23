@@ -90,6 +90,7 @@ internal object RemoteAutomixClient {
     private const val REQUIRED_ANALYSIS_SCHEMA = 4
     private const val MAX_REMOTE_AUDIO_BYTES = 24L * 1024L * 1024L
     private const val MAX_PLAN_CURVE_POINTS = 1800
+    private const val PLAN_WINDOW_SECONDS = 90.0
     private const val FAILURE_COOLDOWN_MS = 60_000L
     private const val ENDPOINT_MISSING_COOLDOWN_MS = 10L * 60L * 1000L
 
@@ -221,50 +222,72 @@ internal object RemoteAutomixClient {
      */
     fun requestPlan(outgoing: TrackAnalysis, incoming: TrackAnalysis): RemoteTransitionDirective? {
         if (!isAvailable() || !outgoing.isUsable || !incoming.isUsable) return null
-        // mix-v6 is curve-aware by contract. Never pretend it is active on a legacy/local-only
-        // scalar analysis; TrackAnalyzer will replace those with schema-2 remote evidence.
         if (outgoing.analysisSchema < REQUIRED_ANALYSIS_SCHEMA ||
             incoming.analysisSchema < REQUIRED_ANALYSIS_SCHEMA
         ) return null
-        val payload = JSONObject()
+
+        // Normal path: Render just analysed both tracks, so ids are enough.
+        val compactPayload = JSONObject()
             .put("version", VERSION)
             .put("automixVersion", "2.5")
             .put("preview", true)
+            .put("compact", true)
             .put("accountHash", AppSettings.automix25AccountHash.value)
-            .put("outgoing", analysisSummary(outgoing))
-            .put("incoming", analysisSummary(incoming))
+            .put("outgoing", JSONObject().put("trackId", outgoing.trackId).put("analysisSchema", outgoing.analysisSchema))
+            .put("incoming", JSONObject().put("trackId", incoming.trackId).put("analysisSchema", incoming.analysisSchema))
+
+        val compact = executePlanRequest(compactPayload, allowCacheMiss = true)
+        if (compact.directive != null) return compact.directive
+        if (!compact.cacheMiss) return null
+
+        // If Render restarted and lost its RAM cache, send only the transition
+        // windows: the final 90 s of A and the first 90 s of B, plus global
+        // tempo/key/landmarks. The middle of either song is irrelevant to A->B.
+        val windowPayload = JSONObject()
+            .put("version", VERSION)
+            .put("automixVersion", "2.5")
+            .put("preview", true)
+            .put("compact", false)
+            .put("accountHash", AppSettings.automix25AccountHash.value)
+            .put("outgoing", transitionWindowSummary(outgoing, outgoingWindow = true))
+            .put("incoming", transitionWindowSummary(incoming, outgoingWindow = false))
+
+        return executePlanRequest(windowPayload, allowCacheMiss = false).directive
+    }
+
+    private data class PlanRequestResult(
+        val directive: RemoteTransitionDirective? = null,
+        val cacheMiss: Boolean = false,
+    )
+
+    private fun executePlanRequest(payload: JSONObject, allowCacheMiss: Boolean): PlanRequestResult {
         val request = Request.Builder()
             .url("$BASE_URL/api/automix/plan")
             .header("Accept", "application/json")
             .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
             .build()
-
+        val startedAt = SystemClock.elapsedRealtime()
         return runCatching {
             planClient.newCall(request).execute().use { response ->
+                if (allowCacheMiss && response.code == 409) {
+                    Log.d(TAG, "2.5 compact plan cache miss; retrying with transition windows")
+                    return@use PlanRequestResult(cacheMiss = true)
+                }
                 if (!response.isSuccessful) {
-                    requestFailure(response.code, contentSpecific = true)
-                    return@use null
+                    planRequestFailure(response.code)
+                    return@use PlanRequestResult()
                 }
                 val root = JSONObject(response.body?.string().orEmpty())
-                if (root.optInt("version", 0) < VERSION) return@use null
-                val directive = parsePlan(root.optJSONObject("plan") ?: return@use null)
+                if (root.optInt("version", 0) < VERSION) return@use PlanRequestResult()
+                val directive = parsePlan(root.optJSONObject("plan") ?: return@use PlanRequestResult())
                 if (directive != null) {
-                    Log.d(
-                        TAG,
-                        "2.5 plan style=${directive.style} reason=${directive.reason} " +
-                            "start=${directive.transitionStart} end=${directive.transitionEnd} " +
-                            "cue=${directive.incomingCueTime} handoff=${directive.handoffFraction} " +
-                            "rates=${directive.outgoingPlaybackRate}/${directive.incomingPlaybackRate} " +
-                            "curve=${"%.2f".format(directive.curveCompatibility)} " +
-                            "harm=${"%.2f".format(directive.harmonicCurveFit)} " +
-                            "onset=${"%.2f".format(directive.onsetCurveFit)} " +
-                            "phase=${"%.2f".format(directive.beatPhaseFit)}/${"%.0f".format(directive.beatPhaseErrorMs)}ms " +
-                            "localBpm=${"%.1f".format(directive.outgoingLocalBpm)}/${"%.1f".format(directive.incomingLocalBpm)}",
-                    )
+                    Log.d(TAG, "2.5 plan in ${SystemClock.elapsedRealtime() - startedAt}ms " +
+                        "style=${directive.style} reason=${directive.reason} " +
+                        "start=${directive.transitionStart} end=${directive.transitionEnd}")
                 }
-                directive
+                PlanRequestResult(directive = directive)
             }
-        }.onFailure { transientFailure(it) }.getOrNull()
+        }.onFailure { planTransientFailure(it) }.getOrDefault(PlanRequestResult())
     }
 
     /** Compatibility seam for code/tests that only need the selected family. */
@@ -533,6 +556,48 @@ internal object RemoteAutomixClient {
             .put("mixOutCandidates", a.mixOutCandidates.toJsonCandidates())
     }
 
+    private fun transitionWindowSummary(a: TrackAnalysis, outgoingWindow: Boolean): JSONObject {
+        val base = analysisSummary(a)
+        val duration = a.duration.takeIf { it.isFinite() && it > 0.0 } ?: 0.0
+        val audibleStart = audibleStartOf(a)
+        val contentEnd = a.contentEndTime.takeIf { it.isFinite() && it > audibleStart } ?: duration
+        val from = if (outgoingWindow) maxOf(0.0, contentEnd - PLAN_WINDOW_SECONDS) else audibleStart
+        val until = if (outgoingWindow) maxOf(contentEnd, duration) else {
+            if (duration > 0.0) minOf(duration, audibleStart + PLAN_WINDOW_SECONDS) else audibleStart + PLAN_WINDOW_SECONDS
+        }
+
+        fun List<EnergySample>.windowEnergy() = filter { it.time in from..until }.toJsonEnergy()
+        fun List<TempoSample>.windowTempo() = filter { it.time in from..until }.toJsonTempo()
+        fun List<ChromaSample>.windowChroma() = filter { it.time in from..until }.toJsonChroma()
+        fun List<Double>.windowTimes() = filter { it.isFinite() && it in from..until }.toJsonDoubles()
+        fun List<MixCandidate>.windowCandidates() = filter { it.time.isFinite() && it.time in from..until }.toJsonCandidates()
+
+        val vocalWindow = JSONArray()
+        a.energyCurve.forEachIndexed { index, point ->
+            if (point.time in from..until && index < a.vocalActivityMask.size) {
+                a.vocalActivityMask[index].takeIf { it.isFinite() }?.let(vocalWindow::put)
+            }
+        }
+
+        return base
+            .put("windowStart", from)
+            .put("windowEnd", until)
+            .put("energyCurve", a.energyCurve.windowEnergy())
+            .put("lowEnergyCurve", a.lowEnergyCurve.windowEnergy())
+            .put("midEnergyCurve", a.midEnergyCurve.windowEnergy())
+            .put("highEnergyCurve", a.highEnergyCurve.windowEnergy())
+            .put("brightnessCurve", a.brightnessCurve.windowEnergy())
+            .put("onsetCurve", a.onsetCurve.windowEnergy())
+            .put("chromaCurve", a.chromaCurve.windowChroma())
+            .put("tempoCurve", a.tempoCurve.windowTempo())
+            .put("vocalActivityMask", vocalWindow)
+            .put("beats", a.beats.windowTimes())
+            .put("downbeats", a.downbeats.windowTimes())
+            .put("phraseBoundaries", a.phraseBoundaries.windowTimes())
+            .put("mixInCandidates", a.mixInCandidates.windowCandidates())
+            .put("mixOutCandidates", a.mixOutCandidates.windowCandidates())
+    }
+
     private fun List<EnergySample>.toJsonEnergy(): JSONArray = JSONArray().also { array ->
         take(MAX_PLAN_CURVE_POINTS).forEach { point ->
             if (point.time.isFinite() && point.energy.isFinite()) {
@@ -576,6 +641,14 @@ internal object RemoteAutomixClient {
                 array.put(JSONObject().put("time", point.time).put("score", point.score).put("type", point.type))
             }
         }
+    }
+
+    private fun planRequestFailure(code: Int) {
+        Log.d(TAG, "Remote Automix plan failed (HTTP $code); pair will retry without backend cooldown")
+    }
+
+    private fun planTransientFailure(error: Throwable) {
+        Log.d(TAG, "Remote Automix plan transient failure; pair will retry: ${error.message}")
     }
 
     private fun requestFailure(code: Int, contentSpecific: Boolean) {
