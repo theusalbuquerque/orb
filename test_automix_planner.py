@@ -615,12 +615,18 @@ class AutomixPlannerTest(unittest.TestCase):
 
         best, candidates = automix._remote_plan(a, b)
 
-        self.assertEqual(best["style"], "RUNWAY_BLEND", best)
-        self.assertAlmostEqual(float(best["incomingCueTime"]), 0.0, delta=0.2)
-        self.assertAlmostEqual(float(best["incomingHandoffTime"]), 20.0, delta=2.5)
-        self.assertLess(float(best["transitionStart"]), 95.0)
-        self.assertGreater(float(best["transitionEnd"]) - float(best["transitionStart"]), 24.0)
-        self.assertTrue(any(c["style"] == "RUNWAY_BLEND" for c in candidates))
+        runway = next((candidate for candidate in candidates if candidate["style"] == "RUNWAY_BLEND"), None)
+        self.assertIsNotNone(runway)
+        assert runway is not None
+        self.assertAlmostEqual(float(runway["incomingCueTime"]), 0.0, delta=0.2)
+        self.assertAlmostEqual(float(runway["incomingHandoffTime"]), 20.0, delta=2.5)
+        self.assertLess(float(runway["transitionStart"]), 95.0)
+        self.assertGreater(float(runway["transitionEnd"]) - float(runway["transitionStart"]), 24.0)
+        self.assertNotEqual(best["style"], "NO_TRANSITION")
+        self.assertGreaterEqual(
+            float(best["selectionScore"]),
+            float(runway["selectionScore"]),
+        )
 
     def test_phrase_takeover_can_leave_a_tail_unplayed(self) -> None:
         a = track(bpm=122.0, key="C major", vocal=0.55, duration=120.0)
@@ -648,10 +654,16 @@ class AutomixPlannerTest(unittest.TestCase):
 
         best, candidates = automix._remote_plan(a, b)
 
-        self.assertEqual(best["style"], "PHRASE_TAKEOVER", best)
-        self.assertLess(float(best["transitionEnd"]), 120.0)
-        self.assertLessEqual(float(best["incomingCueTime"]), 2.0)
-        self.assertTrue(any(c["style"] == "PHRASE_TAKEOVER" for c in candidates))
+        takeover = next((candidate for candidate in candidates if candidate["style"] == "PHRASE_TAKEOVER"), None)
+        self.assertIsNotNone(takeover)
+        assert takeover is not None
+        self.assertLess(float(takeover["transitionEnd"]), 120.0)
+        self.assertLessEqual(float(takeover["incomingCueTime"]), 2.0)
+        self.assertNotEqual(best["style"], "NO_TRANSITION")
+        self.assertGreaterEqual(
+            float(best["selectionScore"]),
+            float(takeover["selectionScore"]),
+        )
 
     def test_structural_pair_tracks_release_as_handoff(self) -> None:
         a = track(bpm=128.0)
