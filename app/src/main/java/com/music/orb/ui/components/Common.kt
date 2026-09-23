@@ -1102,23 +1102,23 @@ private fun SongRowContent(
                 overflow = TextOverflow.Ellipsis,
             )
         }
+        // Download state is independent from whether duration metadata exists.
+        // Keep the glyph immediately to the LEFT of the duration on every
+        // SongRow surface.
+        Spacer(Modifier.width(8.dp))
+        DownloadStatusGlyph(
+            videoId = song.videoId,
+            tint = subtitleColor,
+            assumeSaved = forceDownloadedGlyph,
+        )
         song.durationText?.let { duration ->
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(5.dp))
             Text(
                 text = duration,
                 style = MaterialTheme.typography.labelMedium,
                 color = subtitleColor,
             )
         }
-        // Download state is independent from whether duration metadata exists.
-        // Old/legacy downloads can lack durationText, but they are still valid
-        // offline files and must keep the completed-download affordance.
-        Spacer(Modifier.width(5.dp))
-        DownloadStatusGlyph(
-            videoId = song.videoId,
-            tint = subtitleColor,
-            assumeSaved = forceDownloadedGlyph,
-        )
         // Same sheet the long-press opens, for anyone who doesn't think to hold.
         if (onLongPress != null) {
             Box(
