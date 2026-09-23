@@ -106,6 +106,20 @@ internal object RemoteAutomixClient {
     }
 
     /**
+     * Planning is a tiny JSON request against a server that has just analysed A/B,
+     * so inheriting the 35 s audio-analysis timeout can consume the entire end of A.
+     * Fail fast and retry instead of letting one wedged HTTP call miss the mix.
+     */
+    private val planClient by lazy {
+        Http.client.newBuilder()
+            .connectTimeout(2, TimeUnit.SECONDS)
+            .writeTimeout(4, TimeUnit.SECONDS)
+            .readTimeout(4, TimeUnit.SECONDS)
+            .callTimeout(5, TimeUnit.SECONDS)
+            .build()
+    }
+
+    /**
      * Automix 2.5 is the only engine allowed to use the new remote planner.
      * Public Automix 2.0 remains local and unchanged.
      */
@@ -226,7 +240,7 @@ internal object RemoteAutomixClient {
             .build()
 
         return runCatching {
-            client.newCall(request).execute().use { response ->
+            planClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     requestFailure(response.code, contentSpecific = true)
                     return@use null
