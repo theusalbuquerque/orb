@@ -4002,18 +4002,18 @@ private fun InlineQueueRow(
                 overflow = TextOverflow.Ellipsis,
             )
         }
+        val durationTint = contentColor.copy(alpha = if (isCurrent) 0.86f else 0.58f)
+        Spacer(Modifier.width(8.dp))
+        DownloadStatusGlyph(
+            videoId = song.videoId,
+            tint = durationTint,
+        )
         song.durationText?.let { duration ->
-            Spacer(Modifier.width(8.dp))
-            val durationTint = contentColor.copy(alpha = if (isCurrent) 0.86f else 0.58f)
+            Spacer(Modifier.width(5.dp))
             Text(
                 text = duration,
                 style = MaterialTheme.typography.labelMedium,
                 color = durationTint,
-            )
-            Spacer(Modifier.width(5.dp))
-            DownloadStatusGlyph(
-                videoId = song.videoId,
-                tint = durationTint,
             )
         }
         if (isCurrent) {
