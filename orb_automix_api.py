@@ -12,6 +12,8 @@ import asyncio
 import math
 import os
 import tempfile
+import time
+import wave
 import threading
 from collections import OrderedDict
 from typing import Any
@@ -32,14 +34,16 @@ from billing_api import premium_entitled_for_account_hash
 router = APIRouter(prefix="/api/automix", tags=["automix"])
 
 API_VERSION = 7
-# Schema 4 promotes Librosa to the primary rhythm tracker. Orb's autocorrelation
-# tracker is now fallback-only, and local tempo is derived from the accepted beat grid.
-ANALYSIS_SCHEMA = 4
+# Schema 5 keeps Librosa as the primary rhythm tracker but limits expensive
+# analysis to the transition-relevant windows: first 90 s + last 90 s.
+# The middle of a track is not needed to plan A -> B.
+ANALYSIS_SCHEMA = 5
 SAMPLE_RATE = int(os.getenv("AUTOMIX_SAMPLE_RATE", "22050"))
 MAX_UPLOAD_BYTES = int(os.getenv("AUTOMIX_MAX_UPLOAD_BYTES", str(24 * 1024 * 1024)))
 MAX_DURATION_SECONDS = float(os.getenv("AUTOMIX_MAX_DURATION_SECONDS", "900"))
 MAX_CACHE_ENTRIES = int(os.getenv("AUTOMIX_CACHE_ENTRIES", "512"))
 MAX_CONCURRENT_ANALYSES = max(1, int(os.getenv("AUTOMIX_MAX_CONCURRENT", "2")))
+TRANSITION_ANALYSIS_WINDOW_SECONDS = float(os.getenv("AUTOMIX_WINDOW_SECONDS", "90"))
 
 # Temporary 2.5 beta entitlement. Only hashes are stored in source/config; the
 # app never sends the account email to Automix. Future Premium subscriptions
@@ -1007,6 +1011,236 @@ def _analyze(path: str, track_id: str, declared_duration: float) -> dict[str, An
     }
 
 
+
+def _decode_mono_window(path: str, start_seconds: float, end_seconds: float) -> np.ndarray:
+    """Decode only one requested timeline window from the uploaded carrier."""
+    start_seconds = max(0.0, float(start_seconds))
+    end_seconds = max(start_seconds, float(end_seconds))
+    if end_seconds - start_seconds <= 0.01:
+        return np.zeros(0, dtype=np.float32)
+
+    chunks: list[np.ndarray] = []
+    with av.open(path) as container:
+        streams = [s for s in container.streams if s.type == "audio"]
+        if not streams:
+            raise ValueError("no audio stream")
+        stream = streams[0]
+        resampler = av.AudioResampler(format="fltp", layout="mono", rate=SAMPLE_RATE)
+
+        if start_seconds > 0.0:
+            try:
+                # Global seek uses AV_TIME_BASE microseconds and lands on/before a key packet.
+                container.seek(
+                    int(start_seconds * 1_000_000.0),
+                    backward=True,
+                    any_frame=False,
+                )
+            except Exception:
+                # A seek failure must not make analysis fail; decode from zero and trim below.
+                pass
+
+        fallback_time = 0.0
+        for frame in container.decode(stream):
+            converted = resampler.resample(frame)
+            if converted is None:
+                continue
+            out_frames = converted if isinstance(converted, list) else [converted]
+            for out in out_frames:
+                arr = out.to_ndarray()
+                if arr.ndim == 2:
+                    arr = arr[0]
+                arr = np.asarray(arr, dtype=np.float32).reshape(-1)
+                if not arr.size:
+                    continue
+
+                out_time = getattr(out, "time", None)
+                if out_time is None:
+                    frame_time = getattr(frame, "time", None)
+                    out_time = float(frame_time) if frame_time is not None else fallback_time
+                else:
+                    out_time = float(out_time)
+                fallback_time = out_time + arr.size / SAMPLE_RATE
+
+                frame_end = out_time + arr.size / SAMPLE_RATE
+                if frame_end <= start_seconds:
+                    continue
+                if out_time >= end_seconds:
+                    break
+
+                lo = max(0, int(round((start_seconds - out_time) * SAMPLE_RATE)))
+                hi = min(arr.size, int(round((end_seconds - out_time) * SAMPLE_RATE)))
+                if hi > lo:
+                    chunks.append(arr[lo:hi])
+            if fallback_time >= end_seconds:
+                break
+
+    if not chunks:
+        return np.zeros(0, dtype=np.float32)
+    audio = np.concatenate(chunks).astype(np.float32, copy=False)
+    if not np.isfinite(audio).all():
+        audio = np.nan_to_num(audio, copy=False)
+    return audio
+
+
+def _write_pcm16_wav(path: str, audio: np.ndarray) -> None:
+    pcm = (np.clip(audio, -1.0, 1.0) * 32767.0).astype("<i2", copy=False)
+    with wave.open(path, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(SAMPLE_RATE)
+        wav.writeframes(pcm.tobytes())
+
+
+def _shift_timed_items(items: Any, offset: float) -> list[dict[str, Any]]:
+    shifted: list[dict[str, Any]] = []
+    for raw in items or []:
+        if not isinstance(raw, dict):
+            continue
+        point = dict(raw)
+        if "time" in point:
+            point["time"] = round(_finite(point.get("time")) + offset, 4)
+        shifted.append(point)
+    return shifted
+
+
+def _shift_times(values: Any, offset: float) -> list[float]:
+    return [round(_finite(value) + offset, 4) for value in (values or [])]
+
+
+def _analyze_transition_windows(
+    path: str,
+    track_id: str,
+    declared_duration: float,
+) -> dict[str, Any]:
+    """Schema-5 analysis: only HEAD + TAIL are acoustically inspected."""
+    started = time.perf_counter()
+    declared_duration = max(0.0, float(declared_duration))
+
+    # Short tracks contain no irrelevant middle. Keep the simpler single pass.
+    if declared_duration <= TRANSITION_ANALYSIS_WINDOW_SECONDS * 2.0 + 1.0:
+        result = _analyze(path, track_id, declared_duration)
+        result["analysisSchema"] = ANALYSIS_SCHEMA
+        result["analysisScope"] = "transition-windows"
+        result["analysisWindowSeconds"] = round(TRANSITION_ANALYSIS_WINDOW_SECONDS, 2)
+        result["analysisMs"] = int((time.perf_counter() - started) * 1000)
+        return result
+
+    window = TRANSITION_ANALYSIS_WINDOW_SECONDS
+    tail_start = max(0.0, declared_duration - window)
+    head_audio = _decode_mono_window(path, 0.0, min(window, declared_duration))
+    tail_audio = _decode_mono_window(path, tail_start, declared_duration)
+    if head_audio.size < SAMPLE_RATE or tail_audio.size < SAMPLE_RATE:
+        raise ValueError("transition window decode too short")
+
+    head_path = ""
+    tail_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(prefix="orb-head-", suffix=".wav", delete=False) as tmp:
+            head_path = tmp.name
+        with tempfile.NamedTemporaryFile(prefix="orb-tail-", suffix=".wav", delete=False) as tmp:
+            tail_path = tmp.name
+        _write_pcm16_wav(head_path, head_audio)
+        _write_pcm16_wav(tail_path, tail_audio)
+
+        head_duration = head_audio.size / SAMPLE_RATE
+        tail_duration = tail_audio.size / SAMPLE_RATE
+        head = _analyze(head_path, track_id, head_duration)
+        tail = _analyze(tail_path, track_id, tail_duration)
+    finally:
+        for temp in (head_path, tail_path):
+            if temp:
+                try:
+                    os.remove(temp)
+                except OSError:
+                    pass
+
+    head_bpm = _finite(head.get("headBpm"), _finite(head.get("bpm")))
+    tail_bpm = _finite(tail.get("tailBpm"), _finite(tail.get("bpm")))
+    head_conf = _clamp(_finite(head.get("headBeatConfidence"), _finite(head.get("beatConfidence"))), 0.0, 1.0)
+    tail_conf = _clamp(_finite(tail.get("tailBeatConfidence"), _finite(tail.get("beatConfidence"))), 0.0, 1.0)
+    if tail_conf > head_conf:
+        bpm = tail_bpm
+    else:
+        bpm = head_bpm
+    if not 40.0 <= bpm <= 220.0:
+        bpm = tail_bpm if 40.0 <= tail_bpm <= 220.0 else head_bpm
+
+    head_key = str(head.get("headKey") or head.get("key") or "")
+    tail_key = str(tail.get("tailKey") or tail.get("key") or "")
+    head_key_conf = _clamp(_finite(head.get("headKeyConfidence"), _finite(head.get("keyConfidence"))), 0.0, 1.0)
+    tail_key_conf = _clamp(_finite(tail.get("tailKeyConfidence"), _finite(tail.get("keyConfidence"))), 0.0, 1.0)
+    if head_key and head_key == tail_key:
+        key = head_key
+        key_conf = max(head_key_conf, tail_key_conf)
+    elif tail_key_conf > head_key_conf:
+        key, key_conf = tail_key, tail_key_conf
+    else:
+        key, key_conf = head_key, head_key_conf
+
+    energy = list(head.get("energyCurve") or []) + _shift_timed_items(tail.get("energyCurve"), tail_start)
+    low = list(head.get("lowEnergyCurve") or []) + _shift_timed_items(tail.get("lowEnergyCurve"), tail_start)
+    mid = list(head.get("midEnergyCurve") or []) + _shift_timed_items(tail.get("midEnergyCurve"), tail_start)
+    high = list(head.get("highEnergyCurve") or []) + _shift_timed_items(tail.get("highEnergyCurve"), tail_start)
+    brightness = list(head.get("brightnessCurve") or []) + _shift_timed_items(tail.get("brightnessCurve"), tail_start)
+    onset = list(head.get("onsetCurve") or []) + _shift_timed_items(tail.get("onsetCurve"), tail_start)
+    chroma = list(head.get("chromaCurve") or []) + _shift_timed_items(tail.get("chromaCurve"), tail_start)
+
+    result = {
+        "analysisSchema": ANALYSIS_SCHEMA,
+        "analysisScope": "transition-windows",
+        "analysisWindowSeconds": round(window, 2),
+        "duration": round(declared_duration, 4),
+        "bpm": round(bpm, 5),
+        "beatInterval": round(60.0 / bpm, 6) if bpm > 0.0 else 0.0,
+        "beatConfidence": round((head_conf + tail_conf) / 2.0, 5),
+        "beatEvidence": "windowed-librosa",
+        "headBpm": round(head_bpm, 5),
+        "headBeatConfidence": round(head_conf, 5),
+        "tailBpm": round(tail_bpm, 5),
+        "tailBeatConfidence": round(tail_conf, 5),
+        "beats": list(head.get("beats") or []) + _shift_times(tail.get("beats"), tail_start),
+        "tempoCurve": list(head.get("tempoCurve") or []) + _shift_timed_items(tail.get("tempoCurve"), tail_start),
+        "downbeats": list(head.get("downbeats") or []) + _shift_times(tail.get("downbeats"), tail_start),
+        "phraseBoundaries": list(head.get("phraseBoundaries") or []) + _shift_times(tail.get("phraseBoundaries"), tail_start),
+        "firstBeat": round(_finite(head.get("firstBeat")), 4),
+        "key": key,
+        "keyConfidence": round(key_conf, 5),
+        "headKey": head_key,
+        "headKeyConfidence": round(head_key_conf, 5),
+        "tailKey": tail_key,
+        "tailKeyConfidence": round(tail_key_conf, 5),
+        "audibleStartTime": round(_finite(head.get("audibleStartTime")), 4),
+        "pickupTime": round(_finite(head.get("pickupTime")), 4),
+        "introEndTime": round(_finite(head.get("introEndTime")), 4),
+        "contentEndTime": round(tail_start + _finite(tail.get("contentEndTime"), tail_duration), 4),
+        "outroStartTime": round(tail_start + _finite(tail.get("outroStartTime")), 4),
+        "mixInTime": round(_finite(head.get("mixInTime")), 4),
+        "mixOutTime": round(tail_start + _finite(tail.get("mixOutTime"), tail_duration), 4),
+        "mixInCandidates": list(head.get("mixInCandidates") or []),
+        "mixOutCandidates": _shift_timed_items(tail.get("mixOutCandidates"), tail_start),
+        "energyCurve": energy,
+        "lowEnergyCurve": low,
+        "midEnergyCurve": mid,
+        "highEnergyCurve": high,
+        "brightnessCurve": brightness,
+        "onsetCurve": onset,
+        "chromaCurve": chroma,
+        "vocalActivityMask": list(head.get("vocalActivityMask") or []) + list(tail.get("vocalActivityMask") or []),
+        "vocalProbability": round(
+            (_finite(head.get("vocalProbability")) + _finite(tail.get("vocalProbability"))) / 2.0,
+            5,
+        ),
+        "trackId": track_id,
+    }
+    result["analysisMs"] = int((time.perf_counter() - started) * 1000)
+    print(
+        f"Automix analysis {track_id}: schema={ANALYSIS_SCHEMA} scope=head+tail "
+        f"window={window:.0f}s elapsed={result['analysisMs']}ms",
+        flush=True,
+    )
+    return result
+
+
 @router.get("/health")
 async def health() -> dict[str, Any]:
     return {
@@ -1057,7 +1291,12 @@ async def analyze(
         if written == 0:
             raise HTTPException(status_code=400, detail="empty analysis audio")
         async with _analysis_slots:
-            result = await asyncio.to_thread(_analyze, temp_path, track_id, float(duration_seconds))
+            result = await asyncio.to_thread(
+                _analyze_transition_windows,
+                temp_path,
+                track_id,
+                float(duration_seconds),
+            )
         if not 40.0 <= _finite(result.get("bpm")) <= 220.0:
             raise HTTPException(status_code=422, detail="tempo could not be measured reliably")
         _cache_put(track_id, result)
