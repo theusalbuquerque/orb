@@ -1845,17 +1845,17 @@ private fun CompactSongRow(
                 overflow = TextOverflow.Ellipsis,
             )
         }
+        Spacer(Modifier.width(8.dp))
+        DownloadStatusGlyph(
+            videoId = song.videoId,
+            tint = palette.onBackgroundVariant,
+        )
         song.durationText?.let { duration ->
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(5.dp))
             Text(
                 text = duration,
                 style = MaterialTheme.typography.labelMedium,
                 color = palette.onBackgroundVariant,
-            )
-            Spacer(Modifier.width(5.dp))
-            DownloadStatusGlyph(
-                videoId = song.videoId,
-                tint = palette.onBackgroundVariant,
             )
         }
         Box(
