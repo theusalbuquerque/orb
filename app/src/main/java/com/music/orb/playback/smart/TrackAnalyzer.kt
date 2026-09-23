@@ -1627,7 +1627,6 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
         openSource: () -> MediaDataSource?,
         onDecodedShort: () -> Unit,
     ): WholeTrack {
-
         var effectiveDuration = durationSeconds
         if (!effectiveDuration.isFinite() || effectiveDuration <= 0) {
             effectiveDuration = openSource()?.use(AudioDecoder::containerDurationSeconds) ?: 0.0
@@ -1637,93 +1636,142 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
             return WholeTrack(empty(trackId, 0.0))
         }
 
-        // Pass 1 (Phase 1, DSP-only): the analyzer needs the whole track — the energy curve,
-        // phrase structure and mix-out anchor all read the tail, not just a window of it — at its
-        // own low sample rate, so this is a much smaller decode than a full-rate pass would be.
-        //
-        // In a frame of its own, and handing back only the features, because of what it allocates
-        // to get them: the whole track decoded to mono at the container's rate (35 MB for a
-        // 3.5-minute song) plus the resampled copy the DSP reads (8 MB). Neither is touched again
-        // after this line, but a local holding either stays reachable to the end of the method, and
-        // the rest of the method is Pass 2 — the most allocation-heavy part of the analysis.
-        // Measured on the API 28 emulator: those two buffers were 43 MB of an 82 MB live set, still
-        // held while the models ran, in a process that was reaching a 256 MB heap limit and had
-        // died on it. Returning is what releases them — a `val` cannot be nulled, and a narrower
-        // scope alone does not make ART treat one as dead.
-        val structural = structure(
-            trackId,
-            sourceLabel,
-            openSource,
-            effectiveDuration,
-            onDecodedShort,
-        )
-        if (structural.decodedShort) return WholeTrack(null, decodedShort = true)
-        val features = structural.features ?: return WholeTrack(empty(trackId, effectiveDuration))
-
-        // Pass 2 (Phases 2 and 3, models): the Beat This! grid and the open-unmix vocal mask, over
-        // the head and tail only. A transition only ever reads the tail of the outgoing track and
-        // the head of the incoming one, and a track is both of those at different moments, so the
-        // middle is never decoded for this. Both models read the same decoded region, so the
-        // stereo buffer is paid for once.
-        val window = BeatTracker.WINDOW_SECONDS
+        // Schema 6 analyzes only the transition-relevant windows. The middle of the
+        // track is not decoded or inspected for A -> B planning.
+        val window = minOf(LOCAL_TRANSITION_WINDOW_SECONDS, effectiveDuration)
         val tailStart = max(0.0, effectiveDuration - window)
-        val head = region(openSource, 0.0, minOf(window, effectiveDuration), features)
-        val tail = if (tailStart > window / 2) region(openSource, tailStart, effectiveDuration, features) else null
+        val head = region(openSource, 0.0, window, features = null, deriveFeatures = true)
+            ?: return WholeTrack(empty(trackId, effectiveDuration))
+        val tail = if (tailStart > window / 2.0) {
+            region(openSource, tailStart, effectiveDuration, features = null, deriveFeatures = true)
+        } else null
 
-        val headGrid = head?.grid
+        val headFeatures = head.features ?: return WholeTrack(empty(trackId, effectiveDuration))
+        val tailFeatures = tail?.features ?: headFeatures
+        val headGrid = head.grid
         val tailGrid = tail?.grid
-
-        // The tail governs where the outgoing track is mixed out, so it takes precedence; the
-        // head is what a track uses when it is the *incoming* side of a different transition.
         val leading = tailGrid ?: headGrid
 
-        Log.d(
-            TAG,
-            "Analysed $trackId: bpm=${leading?.bpm ?: features.bpm} " +
-                "conf=${leading?.beatConfidence ?: features.beatConfidence} " +
-                "key=${features.key} contentEnd=${features.contentEndTime} " +
-                "mixOutCandidates=${features.mixOutCandidates.size} " +
-                "vocalMask=${if (head?.vocalMask != null || tail?.vocalMask != null) "model" else "dsp"}",
-        )
+        fun shiftTime(value: Double, offset: Double): Double =
+            if (value.isFinite() && value > 0.0) value + offset else value
+        fun shiftEnergy(values: List<EnergySample>, offset: Double): List<EnergySample> =
+            values.map { EnergySample(it.time + offset, it.energy) }
+        fun shiftCandidates(values: List<MixCandidate>, offset: Double): List<MixCandidate> =
+            values.map { it.copy(time = it.time + offset) }
+        fun mergeEnergy(headValues: List<EnergySample>, tailValues: List<EnergySample>): List<EnergySample> {
+            if (tail == null) return headValues
+            return (headValues + shiftEnergy(tailValues, tail.actualStart))
+                .distinctBy { Math.round(it.time * 1000.0) }
+                .sortedBy { it.time }
+        }
+
+        val energy = mergeEnergy(headFeatures.energyCurve, tailFeatures.energyCurve)
+        val low = mergeEnergy(headFeatures.lowEnergyCurve, tailFeatures.lowEnergyCurve)
+        val mid = mergeEnergy(headFeatures.midEnergyCurve, tailFeatures.midEnergyCurve)
+        val high = mergeEnergy(headFeatures.highEnergyCurve, tailFeatures.highEnergyCurve)
+        val brightness = energy.mapIndexed { index, point ->
+            val lo = low.getOrNull(index)?.energy ?: 0.0
+            val mi = mid.getOrNull(index)?.energy ?: point.energy
+            val hi = high.getOrNull(index)?.energy ?: 0.0
+            val total = lo + mi + hi
+            EnergySample(point.time, if (total > 1e-9) (hi + 0.35 * mi) / total else 0.0)
+        }
+        var previousEnergy = 0.0
+        val onset = energy.map { point ->
+            val value = max(0.0, point.energy - previousEnergy)
+            previousEnergy = point.energy
+            EnergySample(point.time, value)
+        }
+
+        val beats = (headGrid?.beats.orEmpty() + tailGrid?.beats.orEmpty())
+            .distinctBy { Math.round(it * 1000.0) }
+            .sorted()
+        val downbeats = (headGrid?.downbeats.orEmpty() + tailGrid?.downbeats.orEmpty())
+            .distinctBy { Math.round(it * 1000.0) }
+            .sorted()
+            .ifEmpty {
+                val shiftedTail = tailFeatures.downbeats.map { it + (tail?.actualStart ?: 0.0) }
+                (headFeatures.downbeats + shiftedTail).sorted()
+            }
+        val tempoCurve = buildList {
+            headGrid?.let { add(TempoSample(head.actualStart + head.seconds * 0.5, it.bpm, it.beatConfidence)) }
+            tailGrid?.let { add(TempoSample((tail?.actualStart ?: 0.0) + (tail?.seconds ?: 0.0) * 0.5, it.bpm, it.beatConfidence)) }
+        }.sortedBy { it.time }
+
+        val headKey = headFeatures.key
+        val tailKey = tailFeatures.key
+        val headKeyConfidence = headFeatures.keyConfidence
+        val tailKeyConfidence = tailFeatures.keyConfidence
+        val globalKey = if (tailKeyConfidence > headKeyConfidence) tailKey else headKey
+        val globalKeyConfidence = max(headKeyConfidence, tailKeyConfidence)
+        val chroma = buildList {
+            if (headFeatures.chroma.size == 12) add(ChromaSample(head.actualStart + head.seconds * 0.5, headFeatures.chroma))
+            if (tail != null && tailFeatures.chroma.size == 12) add(ChromaSample(tail.actualStart + tail.seconds * 0.5, tailFeatures.chroma))
+        }
+
+        val contentEnd = if (tail != null) {
+            shiftTime(tailFeatures.contentEndTime, tail.actualStart).coerceAtMost(effectiveDuration)
+        } else headFeatures.contentEndTime.takeIf { it > 0.0 } ?: effectiveDuration
+        val outroStart = if (tail != null) shiftTime(tailFeatures.outroStartTime, tail.actualStart) else headFeatures.outroStartTime
+        val mixOut = if (tail != null) shiftTime(tailFeatures.mixOutTime, tail.actualStart) else headFeatures.mixOutTime
+        val mixOutCandidates = if (tail != null) shiftCandidates(tailFeatures.mixOutCandidates, tail.actualStart) else headFeatures.mixOutCandidates
+        val phrases = (headFeatures.phraseBoundaries +
+            if (tail != null) tailFeatures.phraseBoundaries.map { it + tail.actualStart } else emptyList())
+            .distinctBy { Math.round(it * 1000.0) }
+            .sorted()
+
+        val vocalMask = buildList {
+            addAll((head.vocalMask?.toList() ?: headFeatures.vocalActivityMask).take(headFeatures.energyCurve.size))
+            if (tail != null) {
+                addAll((tail.vocalMask?.toList() ?: tailFeatures.vocalActivityMask).take(tailFeatures.energyCurve.size))
+            }
+        }
+        val alignedVocalMask = if (vocalMask.size == energy.size) vocalMask else
+            List(energy.size) { index -> vocalMask.getOrElse(index) { NEUTRAL_VOCAL } }
+
+        Log.d(TAG, "Analysed schema-6 windows for $trackId: head=${head.seconds}s tail=${tail?.seconds ?: 0.0}s")
 
         return WholeTrack(
-                TrackAnalysis(
-                    status = TrackAnalysis.STATUS_READY,
-                    trackId = trackId,
-                    analysisSchema = LOCAL_METADATA_SCHEMA,
-                    duration = effectiveDuration,
-                    contentEndTime = features.contentEndTime.takeIf { it > 0 } ?: effectiveDuration,
-                    bpm = leading?.bpm ?: features.bpm,
-                beatInterval = leading?.beatInterval ?: features.beatInterval,
-                beatConfidence = leading?.beatConfidence ?: features.beatConfidence,
-                downbeats = (headGrid?.downbeats.orEmpty() + tailGrid?.downbeats.orEmpty())
-                    .ifEmpty { features.downbeats }
-                    .sorted(),
-                firstBeat = headGrid?.firstBeat ?: features.firstBeat,
-                phraseBoundaries = features.phraseBoundaries,
-                key = features.key,
-                keyConfidence = features.keyConfidence,
-                audibleStartTime = features.audibleStartTime,
-                pickupTime = features.pickupTime,
-                introEndTime = features.introEndTime,
-                outroStartTime = features.outroStartTime,
-                mixInTime = features.mixInTime,
-                mixOutTime = features.mixOutTime,
-                mixInCandidates = features.mixInCandidates,
-                mixOutCandidates = features.mixOutCandidates,
-                energyCurve = features.energyCurve,
-                lowEnergyCurve = features.lowEnergyCurve,
-                // The model's mask where it ran, the DSP heuristic's where it didn't. Falling back to
-                // the heuristic rather than to nothing matters because the policy reads an
-                // absent mask and a neutral one identically — as "no evidence" — so a failed model
-                // pass would otherwise silently discard the estimate Phase 1 already had.
-                vocalActivityMask = mergeMasks(features.energyCurve.size, head?.vocalMask, tail?.vocalMask)
-                    ?: features.vocalActivityMask,
-                vocalProbability = features.vocalProbability,
+            TrackAnalysis(
+                status = TrackAnalysis.STATUS_READY,
+                trackId = trackId,
+                analysisSchema = LOCAL_METADATA_SCHEMA,
+                duration = effectiveDuration,
+                bpm = leading?.bpm ?: headFeatures.bpm,
+                beatInterval = leading?.beatInterval ?: headFeatures.beatInterval,
+                beatConfidence = leading?.beatConfidence ?: headFeatures.beatConfidence,
+                beats = beats,
+                tempoCurve = tempoCurve,
+                downbeats = downbeats,
+                phraseBoundaries = phrases,
+                firstBeat = headGrid?.firstBeat ?: headFeatures.firstBeat,
+                key = globalKey,
+                keyConfidence = globalKeyConfidence,
+                headKey = headKey,
+                headKeyConfidence = headKeyConfidence,
+                tailKey = tailKey,
+                tailKeyConfidence = tailKeyConfidence,
+                audibleStartTime = headFeatures.audibleStartTime,
+                pickupTime = headFeatures.pickupTime,
+                introEndTime = headFeatures.introEndTime,
+                contentEndTime = contentEnd,
+                outroStartTime = outroStart,
+                mixInTime = headFeatures.mixInTime,
+                mixOutTime = mixOut,
+                mixInCandidates = headFeatures.mixInCandidates,
+                mixOutCandidates = mixOutCandidates,
+                energyCurve = energy,
+                lowEnergyCurve = low,
+                midEnergyCurve = mid,
+                highEnergyCurve = high,
+                brightnessCurve = brightness,
+                onsetCurve = onset,
+                chromaCurve = chroma,
+                vocalActivityMask = alignedVocalMask,
+                vocalProbability = max(headFeatures.vocalProbability, tailFeatures.vocalProbability),
             ),
         )
     }
-
     /**
      * Everything a decoded region contributes, once its audio has been let go
      * of. [seconds] is what was actually decoded, which for a partially cached
