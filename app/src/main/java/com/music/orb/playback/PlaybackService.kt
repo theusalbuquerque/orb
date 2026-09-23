@@ -1169,17 +1169,41 @@ class PlaybackService : MediaSessionService() {
         // worker cleanup, so wait for A to become idle and re-check the live queue on Main.
         trackAnalyzer.setOnAnalysisUpdated { trackId ->
             scope.launch {
+                // Planning is event-driven: as soon as either member of the live A/B
+                // pair changes analysis state, let CrossfadeController evaluate it now.
+                // In particular, B finishing no longer waits for the next 250 ms heartbeat.
+                crossfade?.onAnalysisUpdated(trackId)
+
+                val live = player ?: return@launch
+
+                // Future AutoPlay previews also arrive through this callback. Reorder only
+                // when new evidence actually lands — never from the 5 s progress sampler.
+                val isFutureAutoplay = ((live.currentMediaItemIndex + 1) until live.mediaItemCount)
+                    .any { index ->
+                        val item = live.getMediaItemAt(index)
+                        item.mediaId == trackId && item.fromAutoplay
+                    }
+                if (isFutureAutoplay && AppSettings.autoplay.value && AppSettings.smartFadeEnabled.value) {
+                    applyAutoplayMusicalOrder()
+                }
+
+                // Strict full-analysis order remains A -> B. The callback is emitted before
+                // worker cleanup, so wait only when this event belongs to current A.
+                val current = live.currentMediaItem ?: return@launch
+                if (current.mediaId != trackId) return@launch
                 while (!automixOutgoingReadyForIncoming(trackId) &&
                     trackAnalyzer.isAnalysing(trackId)
                 ) {
                     delay(AUTOMIX_ANALYSIS_ORDER_POLL_MS)
                 }
-                val live = player ?: return@launch
-                val current = live.currentMediaItem ?: return@launch
-                if (current.mediaId != trackId || !automixOutgoingReadyForIncoming(trackId)) {
+                if (live.currentMediaItem?.mediaId != trackId ||
+                    !automixOutgoingReadyForIncoming(trackId)
+                ) {
                     return@launch
                 }
                 requestCurrentAutomixPairAnalysis(live)
+                // B may already have been restored/cached synchronously by that request.
+                crossfade?.onAnalysisUpdated(trackId)
             }
         }
 
@@ -4615,13 +4639,8 @@ class PlaybackService : MediaSessionService() {
                     // or has already settled.
                     primeImmediateSuccessorQuality(player)
                     prioritizeImminentSuccessorBuffer(player)
-                    // Stored/preview analysis may land asynchronously with no Media3
-                    // callback. Re-evaluate AutoPlay on this existing five-second
-                    // sampler so BPM/key/beat evidence can improve the future order
-                    // at any time, without a separate polling loop.
-                    if (AppSettings.autoplay.value && AppSettings.smartFadeEnabled.value) {
-                        applyAutoplayMusicalOrder()
-                    }
+                    // AutoPlay musical ordering is event-driven by analysis/timeline
+                    // changes. Do not poll/re-score the future queue on this sampler.
                 }
                 delay(PROGRESS_SAMPLE_MS)
             }
