@@ -46,7 +46,9 @@ object SourceResolver {
     private const val YOUTUBE_BEST_AAC_KBPS = 256
     private const val COLLECTION_BADGE_PROBE_TRACKS = 3
     private const val COLLECTION_LOSSLESS_PROBE_TRACKS = 3
-    private const val COLLECTION_BADGE_MIN_CONFIRMED_TRACKS = 3
+    // Collection-level quality only appears after more than three tracks
+    // have independently confirmed the tier during real playback/probing.
+    private const val COLLECTION_BADGE_MIN_CONFIRMED_TRACKS = 4
     private const val FIRST_NOTE_PINNED_SOURCE_MS = 900L
     private const val FIRST_NOTE_YOUTUBE_QUERY_LIMIT = 2
     private const val FIRST_NOTE_YOUTUBE_CANDIDATES = 6
@@ -809,7 +811,7 @@ object SourceResolver {
         // Playback can confirm more tracks after an earlier collection probe.
         // Re-evaluate the currently known rows before trusting a stale cached
         // "no badge" result, otherwise a collection could stay unbadged even
-        // after its third track has been verified.
+        // after its fourth track has been verified.
         val observed = collectionQualityFrom(songs.map(::cachedTrackPlayableBadge))
         if (observed.losslessTier.isLossless || observed.hiQuality) {
             return strongestBadge(cached, observed)
@@ -830,7 +832,7 @@ object SourceResolver {
 
         // A collection should not need to be opened manually before its badges
         // become visible. Probe a small representative set concurrently: albums
-        // normally share one mastering tier. Only the first three perform the
+        // normally share one mastering tier. Only the first four perform the
         // more expensive cross-source Lossless lookup; all sampled tracks still
         // prove their ordinary AAC/MP4 tier.
         val probeSongs = songs.take(COLLECTION_BADGE_PROBE_TRACKS)
@@ -868,7 +870,7 @@ object SourceResolver {
 
         val hiResCount = confirmed.count { it.losslessTier.isHiRes }
         val losslessCount = confirmed.count { it.losslessTier.isLossless }
-        // Lossless is also at least Hi-Q quality. If all three confirmed
+        // Lossless is also at least Hi-Q quality. If all four confirmed
         // tracks are Hi-Q-or-better but not all three are Lossless, the
         // collection safely falls back to the Hi-Q badge instead of showing
         // nothing for a mixed high-quality mastering.
@@ -887,7 +889,7 @@ object SourceResolver {
                 resolved = true,
                 hiQuality = true,
             )
-            // Three tracks were checked, but they did not confirm one common
+            // Four tracks were checked, but they did not confirm one common
             // quality tier. Keep the collection unbadged rather than guessing.
             else -> PlayableBadgeQuality(resolved = true)
         }
