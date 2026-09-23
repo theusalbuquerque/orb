@@ -18,6 +18,12 @@ from typing import Any
 
 import av
 import numpy as np
+
+try:
+    import librosa
+except Exception:  # Optional at runtime: native Orb DSP remains a safe fallback.
+    librosa = None
+
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
@@ -26,7 +32,9 @@ from billing_api import premium_entitled_for_account_hash
 router = APIRouter(prefix="/api/automix", tags=["automix"])
 
 API_VERSION = 7
-ANALYSIS_SCHEMA = 2
+# Schema 3 adds hybrid Orb + Librosa beat evidence. Bump it so cached schema-2
+# analyses are automatically recomputed instead of silently bypassing the new detector.
+ANALYSIS_SCHEMA = 3
 SAMPLE_RATE = int(os.getenv("AUTOMIX_SAMPLE_RATE", "22050"))
 MAX_UPLOAD_BYTES = int(os.getenv("AUTOMIX_MAX_UPLOAD_BYTES", str(24 * 1024 * 1024)))
 MAX_DURATION_SECONDS = float(os.getenv("AUTOMIX_MAX_DURATION_SECONDS", "900"))
@@ -287,6 +295,161 @@ def _beat_grid(onset: np.ndarray, hop_seconds: float) -> tuple[float, float, lis
     phase = int(np.argmax(phase_scores)) if phase_scores else 0
     beats = [i * hop_seconds for i in range(phase, onset.size, lag)]
     return bpm, confidence, beats
+
+
+
+def _beat_grid_support(
+    beats: list[float],
+    onset: np.ndarray,
+    hop_seconds: float,
+) -> float:
+    """How strongly a proposed beat grid is supported by the actual onset envelope."""
+    if len(beats) < 4 or onset.size == 0 or hop_seconds <= 0.0:
+        return 0.0
+    peak = float(np.percentile(onset, 95)) if onset.size else 0.0
+    if peak <= 1e-9:
+        return 0.0
+    strengths: list[float] = []
+    for beat in beats:
+        center = int(round(beat / hop_seconds))
+        lo = max(0, center - 1)
+        hi = min(onset.size, center + 2)
+        if hi > lo:
+            strengths.append(float(np.max(onset[lo:hi])) / peak)
+    if not strengths:
+        return 0.0
+    intervals = np.diff(np.asarray(beats, dtype=np.float64))
+    regularity = 1.0
+    if intervals.size >= 3:
+        median = float(np.median(intervals))
+        if median > 1e-6:
+            deviation = float(np.median(np.abs(intervals - median))) / median
+            regularity = _clamp(1.0 - deviation / 0.12, 0.0, 1.0)
+    return _clamp(0.72 * float(np.mean(np.clip(strengths, 0.0, 1.0))) + 0.28 * regularity, 0.0, 1.0)
+
+
+def _fold_tempo_and_grid(bpm: float, beats: list[float]) -> tuple[float, list[float]]:
+    """Fold half/double-time estimates into Orb's musical range while keeping a usable grid."""
+    if bpm <= 0.0 or len(beats) < 2:
+        return bpm, beats
+    result = list(beats)
+    while bpm < 70.0:
+        bpm *= 2.0
+        # Insert the halfway beat so the grid follows the doubled tempo.
+        expanded: list[float] = []
+        for left, right in zip(result, result[1:], strict=False):
+            expanded.extend([left, (left + right) * 0.5])
+        expanded.append(result[-1])
+        result = expanded
+    while bpm > 190.0:
+        bpm /= 2.0
+        result = result[::2]
+    return bpm, result
+
+
+def _librosa_beat_grid(audio: np.ndarray) -> tuple[float, float, list[float]]:
+    """Independent beat estimate used as a second opinion for Orb's native tracker."""
+    if librosa is None or audio.size < SAMPLE_RATE * 4:
+        return 0.0, 0.0, []
+    try:
+        hop_length = 512
+        onset_env = librosa.onset.onset_strength(
+            y=np.asarray(audio, dtype=np.float32),
+            sr=SAMPLE_RATE,
+            hop_length=hop_length,
+            aggregate=np.median,
+        )
+        if onset_env.size < 16 or float(np.max(onset_env)) <= 1e-8:
+            return 0.0, 0.0, []
+        tempo, beat_frames = librosa.beat.beat_track(
+            onset_envelope=onset_env,
+            sr=SAMPLE_RATE,
+            hop_length=hop_length,
+            trim=False,
+            sparse=True,
+        )
+        bpm = float(np.asarray(tempo).reshape(-1)[0]) if np.asarray(tempo).size else 0.0
+        beats = [
+            float(value)
+            for value in librosa.frames_to_time(
+                np.asarray(beat_frames, dtype=np.int64),
+                sr=SAMPLE_RATE,
+                hop_length=hop_length,
+            ).tolist()
+        ]
+        bpm, beats = _fold_tempo_and_grid(bpm, beats)
+        if not (40.0 <= bpm <= 220.0) or len(beats) < 4:
+            return 0.0, 0.0, []
+
+        # Librosa exposes the grid but not a single confidence scalar. Build one
+        # from onset support plus interval regularity, keeping it intentionally
+        # bounded so agreement with Orb can increase confidence rather than letting
+        # one library become absolute authority.
+        peak = float(np.percentile(onset_env, 95)) + 1e-9
+        beat_strengths = []
+        for frame in np.asarray(beat_frames, dtype=np.int64):
+            lo = max(0, int(frame) - 1)
+            hi = min(onset_env.size, int(frame) + 2)
+            if hi > lo:
+                beat_strengths.append(float(np.max(onset_env[lo:hi])) / peak)
+        intervals = np.diff(np.asarray(beats, dtype=np.float64))
+        regularity = 0.0
+        if intervals.size >= 3:
+            median = float(np.median(intervals))
+            if median > 1e-6:
+                mad = float(np.median(np.abs(intervals - median))) / median
+                regularity = _clamp(1.0 - mad / 0.12, 0.0, 1.0)
+        onset_support = float(np.mean(np.clip(beat_strengths, 0.0, 1.0))) if beat_strengths else 0.0
+        confidence = _clamp(0.35 + 0.35 * onset_support + 0.30 * regularity, 0.0, 0.90)
+        return bpm, confidence, beats
+    except Exception:
+        return 0.0, 0.0, []
+
+
+def _hybrid_beat_grid(
+    audio: np.ndarray,
+    onset: np.ndarray,
+    hop_seconds: float,
+) -> tuple[float, float, list[float], str]:
+    """Fuse Orb's tracker with Librosa; uncertainty demotes confidence instead of killing beats."""
+    native_bpm, native_conf, native_beats = _beat_grid(onset, hop_seconds)
+    lib_bpm, lib_conf, lib_beats = _librosa_beat_grid(audio)
+
+    native_valid = 40.0 <= native_bpm <= 220.0 and len(native_beats) >= 4
+    lib_valid = 40.0 <= lib_bpm <= 220.0 and len(lib_beats) >= 4
+    if not lib_valid:
+        return native_bpm, native_conf, native_beats, "orb"
+    if not native_valid:
+        return lib_bpm, lib_conf, lib_beats, "librosa"
+
+    # Compare tempo modulo the common half/double-time ambiguity.
+    ratios = (
+        abs(lib_bpm / native_bpm - 1.0),
+        abs((lib_bpm * 2.0) / native_bpm - 1.0),
+        abs((lib_bpm * 0.5) / native_bpm - 1.0),
+    )
+    tempo_disagreement = min(ratios)
+    native_support = _beat_grid_support(native_beats, onset, hop_seconds)
+    lib_support = _beat_grid_support(lib_beats, onset, hop_seconds)
+
+    if tempo_disagreement <= 0.035:
+        # Both independent trackers see the same pulse. Prefer the phase/grid with
+        # stronger onset support and materially raise confidence.
+        if lib_support > native_support + 0.06:
+            bpm, beats, source = lib_bpm, lib_beats, "hybrid-librosa-grid"
+        else:
+            bpm, beats, source = native_bpm, native_beats, "hybrid-orb-grid"
+        agreement_bonus = 0.20 + 0.15 * (1.0 - tempo_disagreement / 0.035)
+        confidence = _clamp(max(native_conf, lib_conf) + agreement_bonus, 0.0, 1.0)
+        return bpm, confidence, beats, source
+
+    # When they disagree, select the grid actually supported by the source audio.
+    # Do not average BPMs: an average of two wrong hypotheses is not a tempo.
+    native_score = 0.58 * native_conf + 0.42 * native_support
+    lib_score = 0.58 * lib_conf + 0.42 * lib_support
+    if lib_score > native_score + 0.10:
+        return lib_bpm, _clamp(lib_conf * 0.88, 0.0, 0.82), lib_beats, "librosa-disagreement"
+    return native_bpm, _clamp(native_conf * 0.88, 0.0, 0.82), native_beats, "orb-disagreement"
 
 
 def _downbeats_from_beats(
@@ -579,7 +742,11 @@ def _analyze(path: str, track_id: str, declared_duration: float) -> dict[str, An
     beat_frames = _frame_signal(audio, beat_frame, beat_frame)
     beat_rms = np.sqrt(np.mean(beat_frames.astype(np.float64) ** 2, axis=1) + 1e-12)
     onset = np.maximum(0.0, np.diff(np.log1p(beat_rms * 1000.0), prepend=0.0))
-    bpm, beat_conf, beats = _beat_grid(onset, beat_frame / SAMPLE_RATE)
+    bpm, beat_conf, beats, beat_source = _hybrid_beat_grid(
+        audio,
+        onset,
+        beat_frame / SAMPLE_RATE,
+    )
     beat_interval = 60.0 / bpm if bpm > 0 else 0.0
     tempo_curve = _tempo_curve(onset, beat_frame / SAMPLE_RATE, duration)
 
@@ -683,6 +850,7 @@ def _analyze(path: str, track_id: str, declared_duration: float) -> dict[str, An
         "bpm": round(bpm, 5),
         "beatInterval": round(beat_interval, 6),
         "beatConfidence": round(beat_conf, 5),
+        "beatEvidence": beat_source,
         "headBpm": round(head_bpm, 5),
         "headBeatConfidence": round(head_beat_conf, 5),
         "tailBpm": round(tail_bpm, 5),
