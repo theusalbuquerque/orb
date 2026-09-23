@@ -1391,9 +1391,10 @@ class PlaybackService : MediaSessionService() {
                 currentTrackHasBeenAudible
             ) return@launch
 
+            val resumePosition = live.currentPosition.coerceAtLeast(0L)
             swappingMediaId = mediaId
             live.replaceMediaItem(index, item)
-            live.seekTo(index, 0L)
+            live.seekTo(index, resumePosition)
             live.prepare()
             live.playWhenReady = true
             live.play()
@@ -2206,7 +2207,12 @@ class PlaybackService : MediaSessionService() {
         val item = player.currentMediaItem ?: return
         val mediaId = item.mediaId
         val uri = item.localConfiguration?.uri
-        val position = player.currentPosition.coerceAtLeast(0L)
+        val reportedPosition = player.currentPosition.coerceAtLeast(0L)
+        // Some source errors reset Media3's currentPosition before onPlayerError arrives.
+        // Never turn a mid-track recovery into a restart at 0:00; fall back to the
+        // last progress sample when it belongs to this same track.
+        val sampledPosition = (lastPositionSeconds * 1000L).coerceAtLeast(0L)
+        val position = maxOf(reportedPosition, sampledPosition)
 
         // An AutoPlay recommendation that is not on disk cannot be repaired by
         // retrying the network while the device is offline. Prefer another
