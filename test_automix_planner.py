@@ -137,7 +137,7 @@ class AutomixPlannerTest(unittest.TestCase):
         self.assertEqual(result["authority"], "server")
         self.assertIn(result["style"], {
             "RUNWAY_BLEND", "PHRASE_TAKEOVER",
-            "DJ_BLEND", "DJ_FILTER", "EQ_SWAP", "PHRASE_CUT", "CUT", "NO_TRANSITION",
+            "DJ_BLEND", "DJ_FILTER", "EQ_SWAP", "PHRASE_CUT", "CUT",
         })
 
     def test_client_model_evidence_overrides_cached_transition_windows(self) -> None:
@@ -220,14 +220,47 @@ class AutomixPlannerTest(unittest.TestCase):
         best, candidates = automix._remote_plan(a, b)
 
         self.assertNotEqual(best["style"], "NO_TRANSITION")
-        self.assertEqual(best["style"], "PHRASE_TAKEOVER")
-        self.assertEqual(best["reason"], "server-quiet-tail-takeover")
+        self.assertFalse(any(candidate["style"] == "NO_TRANSITION" for candidate in candidates))
         self.assertTrue(any(
             candidate["reason"] == "server-quiet-tail-takeover"
             for candidate in candidates
         ))
-        self.assertLess(best["transitionStart"], a["contentEndTime"])
-        self.assertGreater(best["transitionEnd"], a["contentEndTime"])
+
+    def test_normal_planner_never_emits_no_transition(self) -> None:
+        pairs = [
+            (track(bpm=128.0, key="C major", vocal=0.95), track(bpm=97.0, key="F# major", vocal=0.95)),
+            (track(bpm=80.0, key="C major", vocal=0.10), track(bpm=170.0, key="F# minor", vocal=0.10)),
+            (track(bpm=128.0, key="", vocal=0.70), track(bpm=128.0, key="", vocal=0.70)),
+        ]
+
+        for outgoing, incoming in pairs:
+            best, candidates = automix._remote_plan(outgoing, incoming)
+            self.assertNotEqual(best["style"], "NO_TRANSITION")
+            self.assertFalse(any(
+                candidate["style"] == "NO_TRANSITION"
+                for candidate in candidates
+            ))
+
+    def test_selection_score_is_style_name_agnostic(self) -> None:
+        base = {
+            "score": 0.72,
+            "pairCompatibility": 0.74,
+            "curveCompatibility": 0.69,
+            "phraseAlignment": 0.77,
+            "tempoCompatibility": 0.71,
+            "keyCompatibility": 0.64,
+            "overlapVocalClash": 0.18,
+            "energyCompatibility": 0.73,
+            "spanCompatibility": 0.80,
+        }
+        scores = {
+            style: automix._candidate_selection_score({"style": style, **base})
+            for style in (
+                "RUNWAY_BLEND", "PHRASE_TAKEOVER", "DJ_BLEND",
+                "DJ_FILTER", "EQ_SWAP", "PHRASE_CUT", "CUT",
+            )
+        }
+        self.assertEqual(len(set(scores.values())), 1)
 
     def test_curve_alignment_fine_tunes_incoming_beat_phase(self) -> None:
         a = track(bpm=120.0, key="C major", vocal=0.10)
@@ -750,7 +783,7 @@ class AutomixPlannerTest(unittest.TestCase):
         if best["style"] in {"RUNWAY_BLEND", "DJ_BLEND", "DJ_FILTER", "EQ_SWAP"}:
             self.assertGreaterEqual(float(best["handoffFraction"]), 0.84)
         else:
-            self.assertIn(best["style"], {"PHRASE_TAKEOVER", "PHRASE_CUT", "CUT", "NO_TRANSITION"})
+            self.assertIn(best["style"], {"PHRASE_TAKEOVER", "PHRASE_CUT", "CUT", "DJ_FILTER"})
 
 
     def test_heavy_vocal_collision_rejects_long_overlap(self) -> None:
