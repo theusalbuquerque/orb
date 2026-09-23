@@ -110,7 +110,7 @@ def _plan_cache_key(outgoing: dict[str, Any], incoming: dict[str, Any]) -> str:
             f"{_finite(track.get('mixOutTime')):.3f}",
             f"{_finite(track.get('contentEndTime')):.3f}",
         ])
-    return f"mix-v9::{fingerprint(outgoing)}>>{fingerprint(incoming)}"
+    return f"mix-v10::{fingerprint(outgoing)}>>{fingerprint(incoming)}"
 
 
 def _plan_cache_get(key: str) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
@@ -1164,7 +1164,7 @@ async def health() -> dict[str, Any]:
         "version": API_VERSION,
         "automixVersion": "2.5",
         "analyzer": "orb-metadata-planner-v8",
-        "plannerRevision": "mix-v9",
+        "plannerRevision": "mix-v10",
         "analysisSchema": ANALYSIS_SCHEMA,
     }
 
@@ -2975,6 +2975,297 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                     ],
                 ))
 
+    # 0.5) Verified instrumental bed / filtered instrumental bridge.
+    #
+    # These are the server equivalents of the local INTRO_BED families. They are
+    # intentionally stricter than RUNWAY_BLEND about B's opening: B must expose a
+    # genuinely low-vocal runway, and A keeps foreground ownership until its measured
+    # release. The filtered variant competes separately when the two arrangements are
+    # dense or the spectral curves predict masking.
+    first_vocal = _first_sustained_vocal(b)
+    if first_vocal is None:
+        fallback_vocal_markers = [
+            _finite(b.get("mixInTime"), -1.0),
+            _finite(b.get("introEndTime"), -1.0),
+        ]
+        fallback_vocal_markers = [x for x in fallback_vocal_markers if x > b_start]
+        first_vocal = max(fallback_vocal_markers) if fallback_vocal_markers else None
+
+    annotated_intro_end = _finite(b.get("introEndTime"), -1.0)
+    bed_arrivals = [b_impact]
+    if first_vocal is not None:
+        bed_arrivals.append(float(first_vocal))
+    if annotated_intro_end >= b_start + 10.0:
+        bed_arrivals.append(annotated_intro_end)
+    bed_arrivals = [
+        value for value in bed_arrivals
+        if value >= b_start + 10.0 and (b_end <= 0.0 or value < b_end - 0.25)
+    ]
+
+    if bed_arrivals and a_end > 10.0:
+        bed_arrival = min(bed_arrivals)
+        bed_runway = bed_arrival - b_start
+        if 10.0 <= bed_runway <= 90.0:
+            bed_open_vocal = _mean_window(
+                b_vocal,
+                b_start,
+                min(bed_arrival, b_start + 8.0),
+                _finite(b.get("vocalProbability"), 0.5),
+            )
+            if bed_open_vocal <= 0.42:
+                bed_a_bpm, bed_a_conf = _tempo_near(a, a_release, a_bpm)
+                bed_b_bpm, bed_b_conf = _tempo_near(b, bed_arrival, b_bpm)
+                if bed_a_bpm > 0.0 and bed_b_bpm > 0.0:
+                    while bed_b_bpm / bed_a_bpm > 1.5:
+                        bed_b_bpm /= 2.0
+                    while bed_b_bpm / bed_a_bpm < 0.67:
+                        bed_b_bpm *= 2.0
+                bed_tempo_fit = (
+                    _clamp(1.0 - abs(bed_b_bpm / bed_a_bpm - 1.0) / 0.14, 0.0, 1.0)
+                    if bed_a_bpm > 0.0 and bed_b_bpm > 0.0
+                    else 0.0
+                )
+                bed_out_rate, bed_in_rate = _tempo_bridge_rates(bed_a_bpm, bed_b_bpm)
+                natural_wall = bed_runway / max(bed_in_rate, 1e-6)
+                bed_start = a_end - natural_wall * bed_out_rate
+
+                if bed_start >= 5.0 and bed_start < a_end - 9.0:
+                    a_tail_activity = _mean_window(
+                        _curve(a, "energyCurve"),
+                        max(0.0, a_end - 10.0),
+                        a_end,
+                        0.5,
+                    )
+                    a_bed_vocal = _mean_window(
+                        a_vocal_curve,
+                        bed_start,
+                        a_end,
+                        _finite(a.get("vocalProbability"), 0.5),
+                    )
+                    bed_curve = _transition_curve_metrics(
+                        a,
+                        b,
+                        bed_start,
+                        a_end,
+                        b_start,
+                        bed_out_rate,
+                        bed_in_rate,
+                    )
+                    bed_curve_fit = float(bed_curve.get("compatibility", 0.5))
+                    bed_curve_evidence = bool(bed_curve.get("evidence", False))
+                    bed_onset_fit = float(bed_curve.get("onsetFit", 0.5))
+                    bed_harmonic_fit = float(bed_curve.get("harmonicFit", 0.5))
+                    bed_spectral_fit = float(bed_curve.get("spectralFit", 0.5))
+                    bed_low_collision = float(bed_curve.get("lowCollision", 0.0))
+                    bed_phase_fit, bed_phase_error_ms = _beat_phase_metrics(
+                        a,
+                        b,
+                        max(bed_start, a_release),
+                        bed_arrival,
+                        bed_a_bpm,
+                        bed_b_bpm,
+                        bed_out_rate,
+                        bed_in_rate,
+                    )
+                    handoff_target = _clamp(max(a_release, bed_start), bed_start, a_end)
+                    handoff_fraction = _clamp(
+                        (handoff_target - bed_start) / max(a_end - bed_start, 1e-6),
+                        0.55,
+                        0.995,
+                    )
+                    overlap_vocal = min(a_bed_vocal, bed_open_vocal)
+                    density = max(a_tail_activity, b_open_activity)
+                    filtered_needed = (
+                        density >= 0.78
+                        or bed_low_collision >= 0.56
+                        or (bed_curve_evidence and bed_spectral_fit < 0.44)
+                    )
+                    long_intro = _clamp((bed_runway - 6.0) / 42.0, 0.0, 1.0)
+                    base_bed_score = (
+                        0.46
+                        + 0.22 * long_intro
+                        + 0.13 * (1.0 - bed_open_vocal)
+                        + 0.08 * a_tail_activity
+                        + 0.06 * bed_tempo_fit
+                        + 0.05 * bed_phase_fit
+                        + (0.08 * bed_curve_fit if bed_curve_evidence else 0.0)
+                    )
+                    if protected:
+                        base_bed_score += 0.06
+
+                    pre_handoff = max(0.08, handoff_fraction - 0.18)
+                    post_handoff = min(0.985, handoff_fraction + 0.10)
+                    common_bed = dict(
+                        transitionStart=round(bed_start, 4),
+                        transitionEnd=round(a_end, 4),
+                        incomingCueTime=round(b_start, 4),
+                        incomingHandoffTime=round(bed_arrival, 4),
+                        outgoingPlaybackRate=round(bed_out_rate, 5),
+                        incomingPlaybackRate=round(bed_in_rate, 5),
+                        transitionBeats=max(0, int(round(natural_wall * max(bed_a_bpm, 0.0) / 60.0))),
+                        requestedTransitionBeats=32,
+                        handoffFraction=round(handoff_fraction, 4),
+                        bassSwap=True,
+                        bassSwapFraction=round(_clamp(handoff_fraction, 0.45, 0.90), 4),
+                        keyCompatibility=round(key_fit, 4),
+                        tempoCompatibility=round(tempo, 4),
+                        phraseAlignment=round(max(0.50, bed_phase_fit), 4),
+                        overlapVocalClash=round(overlap_vocal, 4),
+                        energyCompatibility=round(_clamp(1.0 - abs(a_tail_activity - b_open_activity), 0.0, 1.0), 4),
+                        pairCompatibility=round(_clamp(
+                            0.48 * (1.0 - bed_open_vocal)
+                            + 0.24 * long_intro
+                            + 0.16 * bed_tempo_fit
+                            + 0.12 * bed_curve_fit,
+                            0.0,
+                            1.0,
+                        ), 4),
+                        spanCompatibility=1.0,
+                        outgoingAnchor="foreground-release",
+                        incomingAnchor="instrumental-impact",
+                        curveCompatibility=round(bed_curve_fit, 4),
+                        onsetCurveFit=round(bed_onset_fit, 4),
+                        harmonicCurveFit=round(bed_harmonic_fit, 4),
+                        spectralCurveFit=round(bed_spectral_fit, 4),
+                        beatPhaseFit=round(bed_phase_fit, 4),
+                        beatPhaseErrorMs=round(bed_phase_error_ms, 2),
+                        localTempoCompatibility=round(bed_tempo_fit, 4),
+                        outgoingLocalBpm=round(bed_a_bpm, 4),
+                        incomingLocalBpm=round(bed_b_bpm, 4),
+                        gainEnvelope=[
+                            {"progress": 0.0, "incomingGain": 0.0, "outgoingGain": 1.0},
+                            {"progress": round(min(0.14, handoff_fraction * 0.24), 4), "incomingGain": 0.10, "outgoingGain": 1.0},
+                            {"progress": round(pre_handoff, 4), "incomingGain": 0.32, "outgoingGain": 1.0},
+                            {"progress": round(handoff_fraction, 4), "incomingGain": 0.66, "outgoingGain": 0.94},
+                            {"progress": round(post_handoff, 4), "incomingGain": 0.94, "outgoingGain": 0.34},
+                            {"progress": 1.0, "incomingGain": 1.0, "outgoingGain": 0.0},
+                        ],
+                    )
+
+                    # Open instrumental bed: the cleanest version of the move.
+                    intro_bed_score = base_bed_score - (0.10 if filtered_needed else 0.0)
+                    if overlap_vocal < 0.44:
+                        candidates.append(_candidate_plan(
+                            "INTRO_BED",
+                            intro_bed_score,
+                            "server-instrumental-bed",
+                            filterSweep=0.0,
+                            **common_bed,
+                        ))
+
+                    # Filtered instrumental bridge: same arrangement logic, but with
+                    # complementary spectral carving when the records are dense.
+                    if filtered_needed and overlap_vocal < 0.52:
+                        bridge_filter = _clamp(
+                            0.30
+                            + 0.24 * density
+                            + 0.22 * bed_low_collision
+                            + 0.18 * (1.0 - bed_spectral_fit),
+                            0.32,
+                            0.82,
+                        )
+                        candidates.append(_candidate_plan(
+                            "INTRO_BRIDGE_FILTER",
+                            base_bed_score + 0.06 * density + 0.04 * bed_low_collision,
+                            "server-filtered-instrumental-bridge",
+                            filterSweep=round(bridge_filter, 4),
+                            **common_bed,
+                        ))
+
+    # 0.75) Foreground takeover. B is allowed to become the perceptual foreground
+    # quickly only when A has genuinely opened a lane and B's opening is assertive.
+    # A remains audible as a musical tail; this is not a CUT.
+    a_tail_activity = _mean_window(
+        _curve(a, "energyCurve"),
+        max(0.0, a_end - 10.0),
+        a_end,
+        0.5,
+    )
+    if (
+        a_end > 6.0
+        and not protected
+        and not (a_tail_vocal >= 0.62 and a_tail_activity >= 0.82)
+    ):
+        incoming_assertiveness = _clamp(
+            0.68 * b_open_activity + 0.32 * b_open_vocal,
+            0.0,
+            1.0,
+        )
+        if incoming_assertiveness >= 0.54:
+            takeover_bpm = a_bpm if 40.0 <= a_bpm <= 220.0 else 120.0
+            takeover_span = min(a_end, _clamp(24.0 * 60.0 / takeover_bpm, 6.0, 20.0))
+            takeover_start = max(0.0, a_end - takeover_span)
+            release_need = _clamp(0.62 * a_tail_activity + 0.38 * a_tail_vocal, 0.0, 1.0)
+            takeover_handoff = _clamp(0.20 + 0.16 * release_need, 0.16, 0.42)
+            outgoing_release = _clamp(1.0 - release_need, 0.0, 1.0)
+            intro_runway = max(0.0, _finite(b.get("introEndTime"), b_start) - b_start)
+            short_intro = _clamp(1.0 - intro_runway / 18.0, 0.0, 1.0)
+            takeover_score = (
+                0.32
+                + 0.24 * outgoing_release
+                + 0.22 * incoming_assertiveness
+                + 0.15 * short_intro
+                + 0.05 * tempo
+            )
+            if outgoing_release >= 0.60 and incoming_assertiveness >= 0.65 and short_intro >= 0.55:
+                takeover_score += 0.15
+
+            takeover_curve = _transition_curve_metrics(
+                a, b, takeover_start, a_end, b_start, 1.0, 1.0
+            )
+            takeover_curve_fit = float(takeover_curve.get("compatibility", 0.5))
+            takeover_spectral_fit = float(takeover_curve.get("spectralFit", 0.5))
+            incoming_handoff = _finite(b.get("mixInTime"), b_start)
+            if incoming_handoff < b_start:
+                incoming_handoff = b_start
+
+            candidates.append(_candidate_plan(
+                "FOREGROUND_TAKEOVER",
+                takeover_score,
+                "server-foreground-takeover",
+                transitionStart=round(takeover_start, 4),
+                transitionEnd=round(a_end, 4),
+                incomingCueTime=round(b_start, 4),
+                incomingHandoffTime=round(incoming_handoff, 4),
+                outgoingPlaybackRate=1.0,
+                incomingPlaybackRate=1.0,
+                transitionBeats=max(1, int(round(takeover_span * takeover_bpm / 60.0))),
+                requestedTransitionBeats=24,
+                handoffFraction=round(takeover_handoff, 4),
+                bassSwap=bool(_low_curve(a) and _low_curve(b)),
+                bassSwapFraction=0.46,
+                filterSweep=0.0,
+                keyCompatibility=round(key_fit, 4),
+                tempoCompatibility=round(tempo, 4),
+                phraseAlignment=0.55,
+                overlapVocalClash=round(min(a_tail_vocal, b_open_vocal), 4),
+                energyCompatibility=round(_clamp(1.0 - abs(a_tail_activity - b_open_activity), 0.0, 1.0), 4),
+                pairCompatibility=round(_clamp(
+                    0.48 * outgoing_release + 0.42 * incoming_assertiveness + 0.10 * short_intro,
+                    0.0,
+                    1.0,
+                ), 4),
+                spanCompatibility=1.0,
+                outgoingAnchor="foreground-release",
+                incomingAnchor="assertive-opening",
+                curveCompatibility=round(takeover_curve_fit, 4),
+                onsetCurveFit=round(float(takeover_curve.get("onsetFit", 0.5)), 4),
+                harmonicCurveFit=round(float(takeover_curve.get("harmonicFit", 0.5)), 4),
+                spectralCurveFit=round(takeover_spectral_fit, 4),
+                beatPhaseFit=0.0,
+                beatPhaseErrorMs=0.0,
+                localTempoCompatibility=round(tempo, 4),
+                outgoingLocalBpm=round(a_bpm, 4),
+                incomingLocalBpm=round(b_bpm, 4),
+                gainEnvelope=[
+                    {"progress": 0.0, "incomingGain": 0.0, "outgoingGain": 1.0},
+                    {"progress": 0.12, "incomingGain": 0.48, "outgoingGain": 1.0},
+                    {"progress": round(takeover_handoff, 4), "incomingGain": 0.88, "outgoingGain": 0.90},
+                    {"progress": round(min(0.70, takeover_handoff + 0.30), 4), "incomingGain": 1.0, "outgoingGain": 0.42},
+                    {"progress": 1.0, "incomingGain": 1.0, "outgoingGain": 0.0},
+                ],
+            ))
+
     # 1) Beat/key bridge. The planner now searches *pairs* of structural anchors:
     # A's late phrase/downbeat and B's entry phrase/downbeat are scored together.
     if a_end > 0.0 and 40.0 <= a_bpm <= 220.0 and 40.0 <= b_bpm <= 220.0:
@@ -3936,7 +4227,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
             4,
         )
 
-    best["planner"] = "orb-automix-2.5-mix-v9"
+    best["planner"] = "orb-automix-2.5-mix-v10"
     best["serverAuthoritative"] = True
     return best, candidates[:5]
 
@@ -3996,7 +4287,7 @@ def _resilient_plan_fallback(
         "filterSweep": 0.0,
         "gainEnvelope": [],
         "tempoEnvelope": [],
-        "planner": "orb-automix-2.5-mix-v9",
+        "planner": "orb-automix-2.5-mix-v10",
         "serverAuthoritative": True,
     }
     return plan_result, [dict(plan_result)]
@@ -4049,7 +4340,7 @@ async def plan(request: PlanRequest) -> dict[str, Any]:
     # minimal fallback is selected here on the server; Android may only reject impossible bounds.
     plan_result = dict(plan_result)
     plan_result["serverAuthoritative"] = True
-    plan_result["planner"] = "orb-automix-2.5-mix-v9"
+    plan_result["planner"] = "orb-automix-2.5-mix-v10"
     return {
         "version": API_VERSION,
         "automixVersion": "2.5",
