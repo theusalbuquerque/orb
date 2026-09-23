@@ -342,9 +342,11 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
         // still waiting for exactly the evidence the 2.5 planner needs.
         val curveAware25 =
             AppSettings.automixVersion.value == AutomixVersion.V2_5 &&
-                AppSettings.automix25Available.value &&
-                RemoteAutomixClient.isAvailable()
+                AppSettings.automix25Available.value
 
+        // Backend reachability is transient; analysis completeness is not.
+        // Never relabel a legacy/schema-3 result as "complete" merely because
+        // the health probe is temporarily false — /plan still requires schema 4.
         return !curveAware25 || analysis.analysisSchema >= REMOTE_CURVE_SCHEMA
     }
 
