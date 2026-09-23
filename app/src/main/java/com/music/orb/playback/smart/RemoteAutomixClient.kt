@@ -403,6 +403,10 @@ internal object RemoteAutomixClient {
             firstBeat = data.optDoubleFinite("firstBeat"),
             key = data.optString("key", ""),
             keyConfidence = data.optDoubleFinite("keyConfidence").coerceIn(0.0, 1.0),
+            headKey = data.optString("headKey", ""),
+            headKeyConfidence = data.optDoubleFinite("headKeyConfidence").coerceIn(0.0, 1.0),
+            tailKey = data.optString("tailKey", ""),
+            tailKeyConfidence = data.optDoubleFinite("tailKeyConfidence").coerceIn(0.0, 1.0),
             audibleStartTime = data.optNullableDouble("audibleStartTime"),
             pickupTime = data.optNullableDouble("pickupTime"),
             introEndTime = data.optDoubleFinite("introEndTime"),
@@ -501,6 +505,10 @@ internal object RemoteAutomixClient {
             .put("beatConfidence", a.beatConfidence)
             .put("key", a.key)
             .put("keyConfidence", a.keyConfidence)
+            .put("headKey", a.headKey)
+            .put("headKeyConfidence", a.headKeyConfidence)
+            .put("tailKey", a.tailKey)
+            .put("tailKeyConfidence", a.tailKeyConfidence)
             .put("vocalProbability", a.vocalProbability)
             .put("mixInTime", a.mixInTime)
             .put("mixOutTime", a.mixOutTime)
