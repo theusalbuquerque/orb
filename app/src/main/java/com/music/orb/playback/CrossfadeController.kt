@@ -484,11 +484,11 @@ class CrossfadeController(
         }
         if (trackId != current.mediaId && trackId != next?.mediaId) return
 
-        // If B first produced a preview-authored plan and then finished schema-4
+        // If B first produced a preview-authored plan and then finished schema-5
         // refinement before arming, allow exactly one authoritative re-plan.
         if (next != null && trackId == next.mediaId) {
             val pair = "${current.mediaId}->${next.mediaId}"
-            val fullIncoming = analysisFor(next).analysisSchema >= 4
+            val fullIncoming = analysisFor(next).analysisSchema >= 5
             if (fullIncoming &&
                 remotePlanByPair.containsKey(pair) &&
                 remotePlanRefined.add(pair)
