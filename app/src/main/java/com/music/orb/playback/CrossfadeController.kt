@@ -162,6 +162,8 @@ class CrossfadeController(
      * Only feeds the stats line — nothing about a transition waits on it.
      */
     private val analysisRunningFor: (MediaItem) -> Boolean = { false },
+    /** True only when the analysis is final enough for the 2.5 remote planner. */
+    private val analysisReadyForPlan: (MediaItem) -> Boolean = { true },
     /** True only when B has a validated route selected for this A→B pair. */
     private val incomingAudioReadyFor: (MediaItem) -> Boolean = { true },
 ) {
@@ -685,12 +687,26 @@ class CrossfadeController(
         // The server only needs musical evidence. Waiting for B's quality preflight used to
         // consume most of A's runway and made otherwise valid recipes arrive after their beat.
         // The standby player still proves the actual route/buffer before B becomes audible.
-        if (useAutomix25 && RemoteAutomixClient.isAvailable() &&
-            currentAnalysis.isUsable && nextAnalysis.isUsable &&
+        val currentReadyForPlan = !useAutomix25 || analysisReadyForPlan(currentItem)
+        val nextReadyForPlan = !useAutomix25 || analysisReadyForPlan(nextItem)
+
+        if (useAutomix25 &&
+            currentReadyForPlan && nextReadyForPlan &&
             !remotePlanByPair.containsKey(analysisPair) &&
             remotePlanAttempted.add(analysisPair)
         ) {
             scope.launch(Dispatchers.IO) {
+                // Do not depend on a startup probe that may have gone stale.
+                // A+B being schema-4 ready is the strongest signal that planning
+                // should happen now; actively re-probe once before giving up.
+                val backendReady =
+                    RemoteAutomixClient.isAvailable() || RemoteAutomixClient.probe()
+                if (!backendReady) {
+                    delay(REMOTE_PLAN_RETRY_MS)
+                    remotePlanAttempted.remove(analysisPair)
+                    return@launch
+                }
+
                 val directive = RemoteAutomixClient.requestPlan(currentAnalysis, nextAnalysis)
                 if (directive != null) {
                     if (remotePlanByPair.size >= REMOTE_STYLE_CACHE_LIMIT) {
@@ -819,8 +835,12 @@ class CrossfadeController(
         // routinely analysed from its opening long before it plays, that was
         // most of the time the marker was missing.
         val musicallyReady =
-            analysisState.current == TrackAnalysisState.ANALYSED &&
-                analysisState.next in MEASURED_ENOUGH_TO_ENTER_ON
+            if (useAutomix25) {
+                currentReadyForPlan && nextReadyForPlan
+            } else {
+                analysisState.current == TrackAnalysisState.ANALYSED &&
+                    analysisState.next in MEASURED_ENOUGH_TO_ENTER_ON
+            }
         val markable = !plan.blocked &&
             plan.markerVisible &&
             duration > 0L &&
@@ -922,6 +942,11 @@ class CrossfadeController(
     ): TrackAnalysisState = when {
         analysis.isUsable && requireIncomingAudioReady && !incomingAudioReadyFor(item) ->
             TrackAnalysisState.ANALYSING
+        AppSettings.automixVersion.value == AutomixVersion.V2_5 &&
+            AppSettings.automix25Available.value &&
+            analysis.isUsable &&
+            !analysisReadyForPlan(item) ->
+            if (analysisRunningFor(item)) TrackAnalysisState.REFINING else TrackAnalysisState.ANALYSING
         analysis.isUsable ->
             if (analysisRunningFor(item)) TrackAnalysisState.REFINING else TrackAnalysisState.ANALYSED
         analysisRunningFor(item) -> TrackAnalysisState.ANALYSING
