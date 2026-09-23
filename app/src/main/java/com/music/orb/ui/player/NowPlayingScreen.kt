@@ -4226,13 +4226,14 @@ private fun NerdStatsLine(
         ?: transitionWindow?.takeIf { trackDurationMs > 0L }?.let { window ->
             (window.start.coerceIn(0f, 1f) * trackDurationMs).toLong()
         }
-    val bStillAnalyzing = smartAnalysis.next == TrackAnalysisState.ANALYSING ||
-        smartAnalysis.next == TrackAnalysisState.REFINING
+    val pairAnalysisComplete =
+        smartAnalysis.current == TrackAnalysisState.ANALYSED &&
+            smartAnalysis.next == TrackAnalysisState.ANALYSED
     val transitionStyle = automixStats?.style?.let { localizedAutomixStyle(it) }
     val transitionLine = when {
-        // Do not reveal a provisional/stale recipe while B is still being measured.
-        // The user-facing mix type only becomes visible after B finishes analysis.
-        bStillAnalyzing -> stringResource(R.string.nerd_analysis_analysing)
+        // Never expose a provisional/stale verdict — especially "Sem mixagem" —
+        // while either side of the pair is still waiting, analysing or refining.
+        !pairAnalysisComplete -> stringResource(R.string.nerd_analysis_analysing)
         transitionStyle != null && transitionStartMs != null -> stringResource(
             R.string.nerd_stats_transition_line,
             transitionStyle,
