@@ -337,15 +337,23 @@ class AutomixPlannerTest(unittest.TestCase):
         self.assertTrue(np.all(brightness <= 1.0))
         self.assertGreater(float(np.mean(chroma[:, 0])), 0.20)
 
-    def test_librosa_primary_beat_grid(self) -> None:
+    def test_librosa_primary_beat_grid_skips_orb_tracker(self) -> None:
         hop = 0.10
         onset = np.zeros(240, dtype=np.float64)
         for frame in range(0, onset.size, 5):
             onset[frame] = 1.0
-        audio = np.zeros(int(automix.SAMPLE_RATE * 24.0), dtype=np.float32)
 
-        original = automix._librosa_beat_grid
+        original_native = automix._beat_grid
+        original_librosa = automix._librosa_beat_grid
+        native_called = False
+
+        def native_should_not_run(*_args):
+            nonlocal native_called
+            native_called = True
+            return 0.0, 0.0, []
+
         try:
+            automix._beat_grid = native_should_not_run
             automix._librosa_beat_grid = lambda *_: (
                 120.0,
                 0.74,
@@ -353,36 +361,39 @@ class AutomixPlannerTest(unittest.TestCase):
             )
             bpm, confidence, beats, source = automix._primary_beat_grid(onset, hop)
         finally:
-            automix._librosa_beat_grid = original
+            automix._beat_grid = original_native
+            automix._librosa_beat_grid = original_librosa
 
+        self.assertFalse(native_called)
         self.assertAlmostEqual(bpm, 120.0, delta=0.5)
-        self.assertGreaterEqual(confidence, 0.85)
+        self.assertGreaterEqual(confidence, 0.75)
         self.assertEqual(source, "librosa-primary")
         self.assertGreaterEqual(len(beats), 40)
 
     def test_orb_fallback_when_librosa_fails(self) -> None:
         hop = 0.10
-        onset = np.zeros(80, dtype=np.float64)
-        audio = np.zeros(int(automix.SAMPLE_RATE * 8.0), dtype=np.float32)
+        onset = np.zeros(100, dtype=np.float64)
+        for frame in range(0, onset.size, 5):
+            onset[frame] = 1.0
 
         original_native = automix._beat_grid
         original_librosa = automix._librosa_beat_grid
         try:
-            automix._beat_grid = lambda *_: (0.0, 0.0, [])
-            automix._librosa_beat_grid = lambda *_: (
-                126.0,
-                0.78,
-                [i * (60.0 / 126.0) for i in range(16)],
+            automix._librosa_beat_grid = lambda *_: (0.0, 0.0, [])
+            automix._beat_grid = lambda *_: (
+                120.0,
+                0.81,
+                [i * 0.5 for i in range(20)],
             )
             bpm, confidence, beats, source = automix._primary_beat_grid(onset, hop)
         finally:
             automix._beat_grid = original_native
             automix._librosa_beat_grid = original_librosa
 
-        self.assertAlmostEqual(bpm, 126.0, delta=0.01)
-        self.assertAlmostEqual(confidence, 0.78, delta=0.01)
-        self.assertEqual(source, "librosa-primary")
-        self.assertGreaterEqual(len(beats), 12)
+        self.assertAlmostEqual(bpm, 120.0, delta=0.01)
+        self.assertAlmostEqual(confidence, 0.81, delta=0.01)
+        self.assertEqual(source, "orb-fallback")
+        self.assertGreaterEqual(len(beats), 16)
 
     def test_downbeat_phase_follows_recurring_accents(self) -> None:
         hop = 0.10
