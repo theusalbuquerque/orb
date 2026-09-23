@@ -318,7 +318,7 @@ internal object RemoteAutomixClient {
             incomingAnchor = plan.optString("incomingAnchor", ""),
             outgoingTransitionKey = plan.optString("outgoingTransitionKey", ""),
             incomingTransitionKey = plan.optString("incomingTransitionKey", ""),
-            blocked = noTransition,
+            blocked = false,
             serverAuthoritative = true,
         )
     }
