@@ -1985,7 +1985,7 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
                     .maxByOrNull { it.score }
                     ?.time
                     ?.takeIf { it.isFinite() && it > 0.0 }
-                    ?.let(::add)
+                    ?.let { add(it) }
             }.maxOrNull()
 
             if (lateIntroTarget != null && lateIntroTarget > maxSeconds * 0.85) {
