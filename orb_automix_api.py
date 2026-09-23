@@ -3136,6 +3136,135 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                     gainEnvelope=[],
                 ))
 
+    # 2.6) Quiet-tail takeover. A file may keep running for several seconds after its
+    # meaningful musical content has already released. Natural playback in that situation creates
+    # exactly the dead-air failure Automix exists to avoid. Once A's post-content tail is both
+    # low-energy and vocal-free, harmonic/tempo mismatch stops being a hard veto: there is little
+    # or no foreground material left to clash with B. Start B around A's measured release, let its
+    # opening occupy the dying tail, and hand ownership over before the silent file tail finishes.
+    a_file_end = max(a_end, _finite(a.get("duration"), a_end))
+    dead_tail = max(0.0, a_file_end - a_end)
+    post_content_energy = _mean_window(
+        _curve(a, "energyCurve"),
+        a_end,
+        a_file_end,
+        0.0,
+    )
+    post_content_vocal = _mean_window(
+        a_vocal_curve,
+        a_end,
+        a_file_end,
+        0.0,
+    )
+    quiet_tail = (
+        dead_tail >= 2.0
+        and post_content_energy <= 0.24
+        and post_content_vocal <= 0.24
+        and b_end > b_start + 1.0
+    )
+    if quiet_tail:
+        # Begin slightly before contentEnd so a low-level outro and B's opening can actually
+        # overlap instead of producing a disguised gapless skip. Longer dead tails allow a
+        # slightly earlier, more leisurely entrance but never steal a large part of A.
+        pre_roll = _clamp(1.25 + dead_tail * 0.18, 1.25, 3.75)
+        post_roll = _clamp(0.90 + dead_tail * 0.12, 0.90, 2.75)
+        quiet_start = max(0.0, min(a_release, a_end) - pre_roll)
+        quiet_end = min(a_file_end, max(a_end + post_roll, quiet_start + 2.0))
+
+        quiet_curve = _transition_curve_metrics(
+            a,
+            b,
+            quiet_start,
+            min(a_end, quiet_end),
+            b_start,
+            1.0,
+            1.0,
+        )
+        quiet_curve_evidence = bool(quiet_curve.get("evidence", False))
+        quiet_curve_fit = float(quiet_curve.get("compatibility", 0.5))
+        quiet_onset_fit = float(quiet_curve.get("onsetFit", 0.5))
+        quiet_harmonic_fit = float(quiet_curve.get("harmonicFit", 0.5))
+        quiet_spectral_fit = float(quiet_curve.get("spectralFit", 0.5))
+        quiet_low_collision = float(quiet_curve.get("lowCollision", 0.0))
+
+        handoff_fraction = _clamp(
+            (a_end - quiet_start) / max(quiet_end - quiet_start, 1e-6),
+            0.38,
+            0.82,
+        )
+        # Dead-air avoidance is intrinsically high-confidence once the tail is measured quiet.
+        # Curve similarity is a bonus that lets musically similar outro/intro pairs outrank merely
+        # safe ones; it is never a veto here.
+        quiet_score = (
+            0.66
+            + 0.12 * _clamp(dead_tail / 8.0, 0.0, 1.0)
+            + 0.08 * (1.0 - post_content_energy)
+            + 0.06 * (1.0 - post_content_vocal)
+            + (0.08 * quiet_curve_fit if quiet_curve_evidence else 0.0)
+        )
+        before = max(0.08, handoff_fraction - 0.20)
+        after = min(0.96, handoff_fraction + 0.16)
+        candidates.append(_candidate_plan(
+            "PHRASE_TAKEOVER",
+            quiet_score,
+            "server-quiet-tail-takeover",
+            transitionStart=round(quiet_start, 4),
+            transitionEnd=round(quiet_end, 4),
+            incomingCueTime=round(b_start, 4),
+            incomingHandoffTime=round(b_start, 4),
+            outgoingPlaybackRate=1.0,
+            incomingPlaybackRate=1.0,
+            transitionBeats=0,
+            requestedTransitionBeats=0,
+            handoffFraction=round(handoff_fraction, 4),
+            bassSwap=False,
+            bassSwapFraction=round(handoff_fraction, 4),
+            filterSweep=round(_clamp(
+                0.14
+                + 0.18 * (1.0 - quiet_spectral_fit)
+                + 0.10 * quiet_low_collision,
+                0.08,
+                0.48,
+            ), 4),
+            keyCompatibility=round(key_fit, 4),
+            tempoCompatibility=round(tempo, 4),
+            phraseAlignment=1.0,
+            overlapVocalClash=round(min(post_content_vocal, b_open_vocal), 4),
+            energyCompatibility=round(1.0 - post_content_energy, 4),
+            pairCompatibility=round(_clamp(quiet_score, 0.0, 1.0), 4),
+            spanCompatibility=1.0,
+            outgoingAnchor="quiet-tail-release",
+            incomingAnchor="opening",
+            curveCompatibility=round(quiet_curve_fit, 4),
+            onsetCurveFit=round(quiet_onset_fit, 4),
+            harmonicCurveFit=round(quiet_harmonic_fit, 4),
+            spectralCurveFit=round(quiet_spectral_fit, 4),
+            beatPhaseFit=0.0,
+            beatPhaseErrorMs=0.0,
+            localTempoCompatibility=round(tempo, 4),
+            outgoingLocalBpm=round(a_bpm, 4),
+            incomingLocalBpm=round(b_bpm, 4),
+            gainEnvelope=[
+                {"progress": 0.0, "incomingGain": 0.0, "outgoingGain": 1.0},
+                {
+                    "progress": round(before, 4),
+                    "incomingGain": 0.18,
+                    "outgoingGain": 1.0,
+                },
+                {
+                    "progress": round(handoff_fraction, 4),
+                    "incomingGain": 0.72,
+                    "outgoingGain": 0.72,
+                },
+                {
+                    "progress": round(after, 4),
+                    "incomingGain": 1.0,
+                    "outgoingGain": 0.20,
+                },
+                {"progress": 1.0, "incomingGain": 1.0, "outgoingGain": 0.0},
+            ],
+        ))
+
     # 2.75) Phrase takeover. Some reference transitions deliberately hand ownership to B
     # before A's file reaches its natural end, but only after A has released its foreground phrase.
     # B starts at (or very near) its opening instead of being cued into a chorus. A gets a short
