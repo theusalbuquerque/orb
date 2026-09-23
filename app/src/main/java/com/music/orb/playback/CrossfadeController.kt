@@ -703,10 +703,10 @@ class CrossfadeController(
             // the new remote planner.
             serverAuthoritative = useAutomix25,
         )
-        // A blocked 2.5 plan is NO_TRANSITION. TransitionPlan's legacy default
-        // enum is EQUAL_POWER, so never report that placeholder as the chosen
-        // musical family when nothing will actually be rendered.
-        val reportedStyle = if (useAutomix25 && plan.blocked) "NO_TRANSITION" else plan.transitionStyle.name
+        // A blocked 2.5 plan means the recipe is still unavailable/invalid,
+        // not that the musical decision is "no transition". Normal 2.5 playback
+        // never reports NO_TRANSITION; album-original-order is handled above.
+        val reportedStyle = if (useAutomix25 && plan.blocked) "PENDING" else plan.transitionStyle.name
 
         // One line per distinct verdict rather than one per 250ms tick, so the
         // log says what the planner decided for this pair without burying it.
