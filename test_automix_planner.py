@@ -199,6 +199,36 @@ class AutomixPlannerTest(unittest.TestCase):
         self.assertTrue(merged["energyCurve"])
 
 
+    def test_quiet_file_tail_prefers_takeover_over_no_transition(self) -> None:
+        a = add_curve_analysis(track(bpm=120.0, key="C major", vocal=0.08, duration=120.0))
+        b = add_curve_analysis(track(bpm=123.0, key="A minor", vocal=0.08, duration=120.0))
+
+        # A's meaningful content resolves six seconds before the file itself ends.
+        # This models the real recording where Orb had already detected the end
+        # of musical content but still let several seconds of near-silence play.
+        a["contentEndTime"] = 114.0
+        a["outroStartTime"] = 108.0
+        a["mixOutTime"] = 113.0
+        for point in a["energyCurve"]:
+            if point["time"] >= 114.0:
+                point["energy"] = 0.02
+        a["vocalActivityMask"] = [
+            0.02 if point["time"] >= 114.0 else 0.08
+            for point in a["energyCurve"]
+        ]
+
+        best, candidates = automix._remote_plan(a, b)
+
+        self.assertNotEqual(best["style"], "NO_TRANSITION")
+        self.assertEqual(best["style"], "PHRASE_TAKEOVER")
+        self.assertEqual(best["reason"], "server-quiet-tail-takeover")
+        self.assertTrue(any(
+            candidate["reason"] == "server-quiet-tail-takeover"
+            for candidate in candidates
+        ))
+        self.assertLess(best["transitionStart"], a["contentEndTime"])
+        self.assertGreater(best["transitionEnd"], a["contentEndTime"])
+
     def test_curve_alignment_fine_tunes_incoming_beat_phase(self) -> None:
         a = track(bpm=120.0, key="C major", vocal=0.10)
         b = track(bpm=120.0, key="A minor", vocal=0.10)
