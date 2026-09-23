@@ -347,22 +347,24 @@ def _fold_tempo_and_grid(bpm: float, beats: list[float]) -> tuple[float, list[fl
     return bpm, result
 
 
-def _librosa_beat_grid(audio: np.ndarray) -> tuple[float, float, list[float]]:
-    """Independent beat estimate used as a second opinion for Orb's native tracker."""
-    if librosa is None or audio.size < SAMPLE_RATE * 4:
+def _librosa_beat_grid(
+    onset_env: np.ndarray,
+    hop_seconds: float,
+) -> tuple[float, float, list[float]]:
+    """Librosa beat-tracker second opinion over Orb's already-computed onset envelope.
+
+    Recomputing a second full STFT/onset-strength pass over every song roughly doubled
+    server analysis time. The expensive acoustic evidence is already present here;
+    Librosa now contributes the independent *tracker* over the same envelope.
+    """
+    if librosa is None or onset_env.size < 16 or hop_seconds <= 0.0:
         return 0.0, 0.0, []
     try:
-        hop_length = 512
-        onset_env = librosa.onset.onset_strength(
-            y=np.asarray(audio, dtype=np.float32),
-            sr=SAMPLE_RATE,
-            hop_length=hop_length,
-            aggregate=np.median,
-        )
-        if onset_env.size < 16 or float(np.max(onset_env)) <= 1e-8:
+        hop_length = max(1, int(round(hop_seconds * SAMPLE_RATE)))
+        if float(np.max(onset_env)) <= 1e-8:
             return 0.0, 0.0, []
         tempo, beat_frames = librosa.beat.beat_track(
-            onset_envelope=onset_env,
+            onset_envelope=np.asarray(onset_env, dtype=np.float32),
             sr=SAMPLE_RATE,
             hop_length=hop_length,
             trim=False,
@@ -413,7 +415,7 @@ def _hybrid_beat_grid(
 ) -> tuple[float, float, list[float], str]:
     """Fuse Orb's tracker with Librosa; uncertainty demotes confidence instead of killing beats."""
     native_bpm, native_conf, native_beats = _beat_grid(onset, hop_seconds)
-    lib_bpm, lib_conf, lib_beats = _librosa_beat_grid(audio)
+    lib_bpm, lib_conf, lib_beats = _librosa_beat_grid(onset, hop_seconds)
 
     native_valid = 40.0 <= native_bpm <= 220.0 and len(native_beats) >= 4
     lib_valid = 40.0 <= lib_bpm <= 220.0 and len(lib_beats) >= 4
