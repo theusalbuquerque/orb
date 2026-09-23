@@ -361,6 +361,8 @@ class CrossfadeController(
     /** One full remote recipe per immutable A -> B pair. Local validation remains final. */
     private val remotePlanByPair = ConcurrentHashMap<String, RemoteTransitionDirective>()
     private val remotePlanAttempted = ConcurrentHashMap.newKeySet<String>()
+    /** Pair whose preview-authored recipe has already been replaced once by full B evidence. */
+    private val remotePlanRefined = ConcurrentHashMap.newKeySet<String>()
 
     /**
      * Analysis itself is deduped by TrackAnalyzer, but asking it to rescan cache state four times a
@@ -478,6 +480,21 @@ class CrossfadeController(
             null
         }
         if (trackId != current.mediaId && trackId != next?.mediaId) return
+
+        // If B first produced a preview-authored plan and then finished schema-4
+        // refinement before arming, allow exactly one authoritative re-plan.
+        if (next != null && trackId == next.mediaId) {
+            val pair = "${current.mediaId}->${next.mediaId}"
+            val fullIncoming = analysisFor(next).analysisSchema >= 4
+            if (fullIncoming &&
+                remotePlanByPair.containsKey(pair) &&
+                remotePlanRefined.add(pair)
+            ) {
+                remotePlanByPair.remove(pair)
+                remotePlanAttempted.remove(pair)
+            }
+        }
+
         considerAutoTransition()
     }
 
