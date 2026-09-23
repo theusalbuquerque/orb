@@ -396,14 +396,16 @@ internal object RemoteAutomixClient {
             .get()
             .build()
         return runCatching {
-            client.newCall(request).execute().use { response ->
+            // Cache lookup is tiny metadata traffic. Never inherit the 35 s upload
+            // timeout or put the whole backend into cooldown because one lookup stalled.
+            planClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
-                    endpointFailure(response.code)
+                    planRequestFailure(response.code)
                     return@use null
                 }
                 parseAnalysisEnvelope(JSONObject(response.body?.string().orEmpty()), trackId)
             }
-        }.onFailure { transientFailure(it) }.getOrNull()
+        }.onFailure { planTransientFailure(it) }.getOrNull()
     }
 
     private fun parseAnalysisEnvelope(root: JSONObject, trackId: String): TrackAnalysis? {
