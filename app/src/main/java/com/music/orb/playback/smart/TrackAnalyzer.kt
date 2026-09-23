@@ -1781,6 +1781,7 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
         val grid: BeatTracker.Grid?,
         val vocalMask: DoubleArray?,
         val seconds: Double,
+        val actualStart: Double,
         /** Only populated when the caller asked for it; see [region]'s `deriveFeatures`. */
         val features: TrackFeatures.Features? = null,
     )
@@ -1833,10 +1834,19 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
         // process was dying. Same reasoning [derived] already had, one level further out.
         val inputs = regionInputs(stereo, seconds, deriveFeatures)
 
+        val maskFeatures = features ?: inputs.derived
         return Region(
             grid = inputs.forModel?.let { tracker.track(it, offsetSeconds = actualStart) },
-            vocalMask = features?.let { vocalMask(stereo, it, actualStart) },
+            vocalMask = maskFeatures?.let {
+                vocalMask(
+                    stereo,
+                    it,
+                    actualStart,
+                    featureOffsetSeconds = if (features == null) actualStart else 0.0,
+                )
+            },
             seconds = seconds,
+            actualStart = actualStart,
             features = inputs.derived,
         )
     }
@@ -1897,6 +1907,7 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
         stereo: AudioDecoder.StereoPcm,
         features: TrackFeatures.Features,
         actualStart: Double,
+        featureOffsetSeconds: Double = 0.0,
     ): DoubleArray? {
         val curve = features.energyCurve
         if (curve.isEmpty() || !VocalSpectrogram.available) return null
@@ -1915,7 +1926,7 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
 
         val mask = DoubleArray(curve.size) { NEUTRAL_VOCAL }
         for (index in curve.indices) {
-            val frame = ((curve[index].time - actualStart) * VocalSpectrogram.frameRate).toInt()
+            val frame = ((curve[index].time + featureOffsetSeconds - actualStart) * VocalSpectrogram.frameRate).toInt()
             if (frame in values.indices) mask[index] = values[frame].toDouble()
         }
         return mask
@@ -1976,6 +1987,7 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
         /** Server analysis schema required by curve-aware Automix 2.5 mix-v6. */
         const val REMOTE_CURVE_SCHEMA = 6
         const val LOCAL_METADATA_SCHEMA = 6
+        const val LOCAL_TRANSITION_WINDOW_SECONDS = 90.0
         const val READY_FOR_PLAN_MIN_BEAT_CONFIDENCE = 0.45
         const val TAG = "BitChordTrackAnalyzer"
 
