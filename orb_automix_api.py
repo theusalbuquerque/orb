@@ -55,6 +55,10 @@ _analysis_slots = asyncio.Semaphore(MAX_CONCURRENT_ANALYSES)
 _cache_lock = threading.Lock()
 _analysis_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
+_plan_cache_lock = threading.Lock()
+_plan_cache: OrderedDict[str, tuple[dict[str, Any], list[dict[str, Any]]]] = OrderedDict()
+MAX_PLAN_CACHE_ENTRIES = 96
+
 
 class PlanRequest(BaseModel):
     version: int = API_VERSION
@@ -93,6 +97,43 @@ def _cache_put(track_id: str, value: dict[str, Any]) -> None:
         _analysis_cache.move_to_end(track_id)
         while len(_analysis_cache) > MAX_CACHE_ENTRIES:
             _analysis_cache.popitem(last=False)
+
+
+def _plan_cache_key(outgoing: dict[str, Any], incoming: dict[str, Any]) -> str:
+    # Full schema-4 analysis is stable for a track/rendition. Include the
+    # transition anchors/BPM so a refreshed analysis cannot accidentally reuse
+    # an older recipe for the same id.
+    def fingerprint(track: dict[str, Any]) -> str:
+        return "|".join([
+            str(track.get("trackId") or ""),
+            str(int(_finite(track.get("analysisSchema"), 0))),
+            f"{_finite(track.get('bpm')):.4f}",
+            f"{_finite(track.get('mixInTime')):.3f}",
+            f"{_finite(track.get('mixOutTime')):.3f}",
+            f"{_finite(track.get('contentEndTime')):.3f}",
+        ])
+    return f"mix-v9::{fingerprint(outgoing)}>>{fingerprint(incoming)}"
+
+
+def _plan_cache_get(key: str) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
+    with _plan_cache_lock:
+        cached = _plan_cache.get(key)
+        if cached is not None:
+            _plan_cache.move_to_end(key)
+            return dict(cached[0]), [dict(item) for item in cached[1]]
+        return None
+
+
+def _plan_cache_put(
+    key: str,
+    plan: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> None:
+    with _plan_cache_lock:
+        _plan_cache[key] = (dict(plan), [dict(item) for item in candidates])
+        _plan_cache.move_to_end(key)
+        while len(_plan_cache) > MAX_PLAN_CACHE_ENTRIES:
+            _plan_cache.popitem(last=False)
 
 
 def _decode_mono(path: str) -> np.ndarray:
@@ -3757,7 +3798,15 @@ async def plan(request: PlanRequest) -> dict[str, Any]:
         raise HTTPException(status_code=403, detail="Automix 2.5 entitlement required")
     outgoing = _plan_track(request.outgoing)
     incoming = _plan_track(request.incoming)
-    plan_result, candidates = _remote_plan(outgoing, incoming)
+    cache_key = _plan_cache_key(outgoing, incoming)
+    cached_plan = _plan_cache_get(cache_key)
+    if cached_plan is not None:
+        plan_result, candidates = cached_plan
+    else:
+        # Candidate search is CPU work. Keep FastAPI's event loop responsive so a
+        # plan request is never queued behind another client's Python planning pass.
+        plan_result, candidates = await asyncio.to_thread(_remote_plan, outgoing, incoming)
+        _plan_cache_put(cache_key, plan_result, candidates)
     # The selected recipe is a command from the musical planner, not a style hint. Even the
     # minimal fallback is selected here on the server; Android may only reject impossible bounds.
     plan_result = dict(plan_result)
