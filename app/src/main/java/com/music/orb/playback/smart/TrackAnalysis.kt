@@ -72,6 +72,11 @@ data class TrackAnalysis(
 
     val key: String = "",
     val keyConfidence: Double = 0.0,
+    /** Transition-local harmony; outgoing uses tail, incoming uses head. */
+    val headKey: String = "",
+    val headKeyConfidence: Double = 0.0,
+    val tailKey: String = "",
+    val tailKeyConfidence: Double = 0.0,
 
     /** Where the file starts making sound, and where the first musical event lands. */
     val audibleStartTime: Double? = null,
