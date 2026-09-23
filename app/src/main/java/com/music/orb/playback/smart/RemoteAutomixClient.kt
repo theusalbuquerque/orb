@@ -87,7 +87,7 @@ internal object RemoteAutomixClient {
     private const val BASE_URL = "https://orb-4mrh.onrender.com"
     private const val VERSION = 7
     private const val REQUIRED_PLANNER_REVISION = "mix-v9"
-    private const val REQUIRED_ANALYSIS_SCHEMA = 4
+    private const val REQUIRED_ANALYSIS_SCHEMA = 5
     private const val MAX_REMOTE_AUDIO_BYTES = 24L * 1024L * 1024L
     private const val MAX_PLAN_CURVE_POINTS = 1800
     private const val PLAN_WINDOW_SECONDS = 90.0
@@ -222,14 +222,14 @@ internal object RemoteAutomixClient {
      */
     fun requestPlan(outgoing: TrackAnalysis, incoming: TrackAnalysis): RemoteTransitionDirective? {
         if (!isAvailable() || !outgoing.isUsable || !incoming.isUsable) return null
-        // A defines the release/mix-out and therefore must be final schema 4.
+        // A defines the release/mix-out and therefore must be final schema 5.
         // B may be a trusted opening preview: that is enough to choose an
         // incoming cue/style while its full-track analysis refines in parallel.
         if (outgoing.analysisSchema < REQUIRED_ANALYSIS_SCHEMA) return null
 
         val incomingIsFull = incoming.analysisSchema >= REQUIRED_ANALYSIS_SCHEMA
 
-        // Fastest path when both sides are already in Render's schema-4 cache.
+        // Fastest path when both sides are already in Render's schema-5 cache.
         val compactPayload = JSONObject()
             .put("version", VERSION)
             .put("automixVersion", "2.5")
