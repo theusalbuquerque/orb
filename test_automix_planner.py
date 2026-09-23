@@ -337,6 +337,53 @@ class AutomixPlannerTest(unittest.TestCase):
         self.assertTrue(np.all(brightness <= 1.0))
         self.assertGreater(float(np.mean(chroma[:, 0])), 0.20)
 
+    def test_hybrid_beat_grid_rewards_independent_agreement(self) -> None:
+        hop = 0.10
+        onset = np.zeros(240, dtype=np.float64)
+        for frame in range(0, onset.size, 5):
+            onset[frame] = 1.0
+        audio = np.zeros(int(automix.SAMPLE_RATE * 24.0), dtype=np.float32)
+
+        original = automix._librosa_beat_grid
+        try:
+            automix._librosa_beat_grid = lambda _: (
+                120.0,
+                0.74,
+                [i * 0.5 for i in range(48)],
+            )
+            bpm, confidence, beats, source = automix._hybrid_beat_grid(audio, onset, hop)
+        finally:
+            automix._librosa_beat_grid = original
+
+        self.assertAlmostEqual(bpm, 120.0, delta=0.5)
+        self.assertGreaterEqual(confidence, 0.85)
+        self.assertTrue(source.startswith("hybrid-"))
+        self.assertGreaterEqual(len(beats), 40)
+
+    def test_hybrid_beat_grid_can_rescue_native_failure(self) -> None:
+        hop = 0.10
+        onset = np.zeros(80, dtype=np.float64)
+        audio = np.zeros(int(automix.SAMPLE_RATE * 8.0), dtype=np.float32)
+
+        original_native = automix._beat_grid
+        original_librosa = automix._librosa_beat_grid
+        try:
+            automix._beat_grid = lambda *_: (0.0, 0.0, [])
+            automix._librosa_beat_grid = lambda _: (
+                126.0,
+                0.78,
+                [i * (60.0 / 126.0) for i in range(16)],
+            )
+            bpm, confidence, beats, source = automix._hybrid_beat_grid(audio, onset, hop)
+        finally:
+            automix._beat_grid = original_native
+            automix._librosa_beat_grid = original_librosa
+
+        self.assertAlmostEqual(bpm, 126.0, delta=0.01)
+        self.assertAlmostEqual(confidence, 0.78, delta=0.01)
+        self.assertEqual(source, "librosa")
+        self.assertGreaterEqual(len(beats), 12)
+
     def test_downbeat_phase_follows_recurring_accents(self) -> None:
         hop = 0.10
         beats = [i * 0.50 for i in range(24)]
