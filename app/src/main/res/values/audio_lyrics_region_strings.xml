@@ -1,0 +1,29 @@
+<resources>
+    <string name="settings_output_precision">Output precision</string>
+    <string name="settings_output_precision_subtitle">PCM format requested at the Android audio output</string>
+    <string name="settings_prefer_usb_dac">Prefer USB DAC</string>
+    <string name="settings_prefer_usb_dac_subtitle">Use a connected USB DAC when available; 32-bit float is enabled only on a compatible USB route.</string>
+    <string name="lyrics_prioritize_syllable">Prioritize word-synced lyrics</string>
+    <string name="lyrics_prioritize_syllable_description">Keep searching after a line-synced result to find word or syllable timing.</string>
+    <string name="lyrics_paxsenix_api_key">PaxSenix API key</string>
+    <string name="lyrics_paxsenix_api_key_configured">PaxSenix API key · configured</string>
+    <string name="lyrics_translation_translate">Translate lyrics</string>
+    <string name="lyrics_translation_show_original">Show original lyrics</string>
+    <string name="lyrics_translation_same_language">These lyrics are already in the selected language.</string>
+    <string name="lyrics_translation_unavailable">Lyrics translation is unavailable right now.</string>
+    <string name="save">Save</string>
+    <string name="cancel">Cancel</string>
+    <string name="lyrics_source_bini_detail">Apple Music timing matched to the recording with ISRC</string>
+    <string name="lyrics_source_portato_detail">QQ Music karaoke timing through BetterLyrics</string>
+    <string name="lyrics_source_paxsenix_detail">Apple Music timing through a second keyless route</string>
+    <string name="lyrics_source_paxsenix_spotify_detail">Spotify lyrics through PaxSenix; API key required</string>
+    <string name="lyrics_source_paxsenix_musixmatch_detail">Musixmatch timing through PaxSenix; API key required</string>
+    <string name="lyrics_source_unison_detail">Listener-contributed TTML, LRC and plain lyrics</string>
+    <string name="lyrics_source_youtube_captions_detail">Timed captions from the exact playing YouTube video</string>
+    <string name="lyrics_source_youtube_music_detail">Plain lyrics from the playing video’s YouTube Music Lyrics tab</string>
+    <string name="lyrics_source_megalobiz_detail">Community-made whole-line LRC</string>
+    <string name="lyrics_source_kugou_detail">Whole-line lyrics with strong international coverage</string>
+    <string name="lyrics_source_musixmatch_detail">Whole-line timing from the Musixmatch catalogue</string>
+    <string name="lyrics_source_genius_detail">Plain-text fallback with a very large catalogue</string>
+    <string name="settings_lyrics_sources_count">%1$d sources enabled</string>
+</resources>

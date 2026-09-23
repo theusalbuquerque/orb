@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="lyrics_sources_dialog_title">Lyrics Sources</string>
+    <string name="lyrics_sources_dialog_description">Sources are tried in priority order. Orb prefers word-by-word timing when available and falls back to line-synced or plain lyrics.</string>
+    <string name="lyrics_sources_dialog_done">Done</string>
+    <string name="lyrics_sources_enabled_description">Enabled</string>
+    <string name="lyrics_source_betterlyrics_detail">Apple Music timings, word by word</string>
+    <string name="lyrics_source_lyricsplus_detail">Syllable by syllable, on community mirrors</string>
+    <string name="lyrics_source_simpmusic_detail">Matched to the video to avoid the wrong version</string>
+    <string name="lyrics_source_lrclib_detail">Whole-line timing from LRCLIB</string>
+</resources>

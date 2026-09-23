@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Kept as an empty compatibility file. The PT-BR Now Playing strings now
+        come from values-pt-rBR/strings.xml, mirrored from the dev flavor so
+        Stable and Beta expose the same text without duplicate resources.
+    -->
+</resources>

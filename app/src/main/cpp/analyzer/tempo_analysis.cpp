@@ -1,0 +1,4 @@
+#include "tempo_analysis.h"
+#include <algorithm>
+#include <cmath>
+namespace bitchord::smart { TempoResult AnalyzeTempo(const std::vector<double>& x,double dt){TempoResult r;if(x.size()<16||dt<=0)return r;double best=-1;int bestlag=0;double mean=0;for(double v:x)mean+=v;mean/=x.size();for(int lag=std::max(1,(int)std::round(60.0/220.0/dt));lag<=std::min((int)x.size()/2,(int)std::round(60.0/40.0/dt));++lag){double a=0,b=0,c=0;for(size_t i=lag;i<x.size();++i){double u=x[i]-mean,v=x[i-lag]-mean;a+=u*v;b+=u*u;c+=v*v;}double corr=(b>0&&c>0)?a/std::sqrt(b*c):0;if(corr>best){best=corr;bestlag=lag;}} if(bestlag){r.interval=bestlag*dt;r.bpm=60.0/r.interval;r.confidence=std::clamp(best,0.0,1.0);size_t p=std::max_element(x.begin(),x.begin()+std::min<size_t>(bestlag,x.size()))-x.begin();r.first=p*dt;}return r;}}

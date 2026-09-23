@@ -1,0 +1,29 @@
+<resources>
+    <string name="settings_output_precision">Precisão de saída</string>
+    <string name="settings_output_precision_subtitle">Formato PCM solicitado na saída de áudio do Android</string>
+    <string name="settings_prefer_usb_dac">Preferir DAC USB</string>
+    <string name="settings_prefer_usb_dac_subtitle">Usa um DAC USB conectado quando disponível; 32-bit float só é ativado em uma rota USB compatível.</string>
+    <string name="lyrics_prioritize_syllable">Priorizar letras por palavra</string>
+    <string name="lyrics_prioritize_syllable_description">Continua procurando após encontrar uma letra por linha para tentar obter sincronização por palavra ou sílaba.</string>
+    <string name="lyrics_paxsenix_api_key">Chave da API PaxSenix</string>
+    <string name="lyrics_paxsenix_api_key_configured">Chave da API PaxSenix · configurada</string>
+    <string name="lyrics_translation_translate">Traduzir letra</string>
+    <string name="lyrics_translation_show_original">Mostrar letra original</string>
+    <string name="lyrics_translation_same_language">A letra já está no idioma selecionado.</string>
+    <string name="lyrics_translation_unavailable">A tradução da letra não está disponível agora.</string>
+    <string name="save">Salvar</string>
+    <string name="cancel">Cancelar</string>
+    <string name="lyrics_source_bini_detail">Sincronização do Apple Music associada à gravação por ISRC</string>
+    <string name="lyrics_source_portato_detail">Sincronização karaoke do QQ Music via BetterLyrics</string>
+    <string name="lyrics_source_paxsenix_detail">Sincronização do Apple Music por uma segunda rota sem chave</string>
+    <string name="lyrics_source_paxsenix_spotify_detail">Letras do Spotify via PaxSenix; requer chave de API</string>
+    <string name="lyrics_source_paxsenix_musixmatch_detail">Sincronização do Musixmatch via PaxSenix; requer chave de API</string>
+    <string name="lyrics_source_unison_detail">Letras TTML, LRC e texto simples enviadas pela comunidade</string>
+    <string name="lyrics_source_youtube_captions_detail">Legendas sincronizadas do vídeo exato em reprodução no YouTube</string>
+    <string name="lyrics_source_youtube_music_detail">Letra simples da aba Letras do vídeo em reprodução no YouTube Music</string>
+    <string name="lyrics_source_megalobiz_detail">LRC comunitário sincronizado por linha</string>
+    <string name="lyrics_source_kugou_detail">Letras por linha com ampla cobertura internacional</string>
+    <string name="lyrics_source_musixmatch_detail">Sincronização por linha do catálogo Musixmatch</string>
+    <string name="lyrics_source_genius_detail">Fallback em texto simples com um catálogo muito amplo</string>
+    <string name="settings_lyrics_sources_count">%1$d fontes ativadas</string>
+</resources>

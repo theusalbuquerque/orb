@@ -1,0 +1,10 @@
+<resources>
+    <string name="artist_info">Artist information</string>
+    <string name="artist_info_loading">Loading artist information…</string>
+    <string name="artist_info_unavailable">Wikipedia information isn’t available for this artist right now.</string>
+    <string name="artist_info_source">Source: Wikipedia</string>
+    <string name="artist_like">I like this artist</string>
+    <string name="artist_liked">Artist liked</string>
+    <string name="artist_block">Don’t play this artist</string>
+    <string name="artist_blocked">Artist blocked</string>
+</resources>

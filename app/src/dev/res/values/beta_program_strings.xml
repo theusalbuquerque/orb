@@ -1,0 +1,25 @@
+<resources>
+    <string name="beta_updates_header">Updates</string>
+    <string name="beta_updates_join_title">Join the Beta Program</string>
+    <string name="beta_updates_join_subtitle_off">Get test versions before the stable release.</string>
+    <string name="beta_updates_join_subtitle_beta">You will receive notifications when new versions are available.</string>
+    <string name="beta_updates_join_subtitle_stable_auto">You will receive notifications when new versions are available.</string>
+    <string name="beta_updates_footer">Orb uses one app package for Stable and Beta. Only the selected GitHub release channel is checked, and Android always asks you to confirm installation.</string>
+    <string name="update_channel_notification_permission_required">Android notifications are off. Orb will still show ready updates inside the app when you open it.</string>
+    <string name="beta_updates_leave_title">Leave the Beta program?</string>
+    <string name="beta_updates_leave_message">Orb will stop checking pre-releases and switch to the stable channel. The newest compatible stable version will be downloaded automatically when available, and Android will ask you to confirm installation. Your app data will be kept.</string>
+    <string name="beta_updates_leave_cancel">Cancel</string>
+    <string name="beta_updates_leave_confirm">Leave Beta</string>
+    <string name="beta_updates_left_beta_to_stable">Stable channel enabled. Orb will automatically download the next compatible stable release.</string>
+    <string name="beta_updates_channel_name">Orb app updates</string>
+    <string name="beta_updates_channel_description">Downloaded Orb updates ready to install</string>
+    <string name="beta_updates_notification_title_beta">Orb Beta ready to install</string>
+    <string name="beta_updates_notification_title_stable">Orb stable ready to install</string>
+    <string name="beta_updates_notification_body">%1$s was downloaded. Tap to confirm installation.</string>
+    <string name="update_manual_title">Check for updates now</string>
+    <string name="update_manual_checking">Checking for updates…</string>
+    <string name="update_manual_up_to_date">You are already using the latest version.</string>
+    <string name="update_manual_no_release">No newer version was found.</string>
+    <string name="update_manual_downloaded">%1$s was downloaded and is ready to install.</string>
+    <string name="update_manual_failed">Orb could not check for updates. Try again later.</string>
+</resources>

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="library_search_hint">Buscar álbuns ou playlists</string>
+    <string name="library_search_open">Buscar na biblioteca</string>
+    <string name="library_search_close">Fechar busca na biblioteca</string>
+    <string name="library_search_empty">Nenhum álbum ou playlist encontrado na sua biblioteca.</string>
+</resources>

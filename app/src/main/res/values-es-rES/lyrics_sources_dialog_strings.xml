@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="lyrics_sources_dialog_title">Fuentes de letras</string>
+    <string name="lyrics_sources_dialog_description">Las fuentes siguen el orden de prioridad. Orb prefiere sincronización palabra por palabra cuando está disponible y usa letras por línea o sin sincronizar como alternativa.</string>
+    <string name="lyrics_sources_dialog_done">Listo</string>
+    <string name="lyrics_sources_enabled_description">Activada</string>
+    <string name="lyrics_source_betterlyrics_detail">Sincronización de Apple Music, palabra por palabra</string>
+    <string name="lyrics_source_lyricsplus_detail">Sílaba por sílaba, en servidores espejo de la comunidad</string>
+    <string name="lyrics_source_simpmusic_detail">Coincidencia por vídeo para evitar la versión incorrecta</string>
+    <string name="lyrics_source_lrclib_detail">Sincronización por líneas completas mediante LRCLIB</string>
+</resources>

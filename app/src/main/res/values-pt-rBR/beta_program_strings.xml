@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="beta_updates_header">Atualizações</string>
+    <string name="beta_updates_join_title">Participar do Programa Beta</string>
+    <string name="beta_updates_join_subtitle_off">Receba versões de testes antes da versão estável.</string>
+    <string name="beta_updates_join_subtitle_beta">Você receberá notificações quando novas versões estiverem disponíveis.</string>
+    <string name="beta_updates_join_subtitle_stable_auto">Você receberá notificações quando novas versões estiverem disponíveis.</string>
+    <string name="beta_updates_footer">O Orb usa o mesmo aplicativo para Stable e Beta. Apenas o canal selecionado nas Releases do GitHub é verificado, e o Android sempre pede sua confirmação antes de instalar.</string>
+    <string name="update_channel_notification_permission_required">As notificações do Android estão desativadas. O Orb continuará mostrando atualizações disponíveis dentro do app quando você abri-lo.</string>
+    <string name="beta_updates_join_confirm_title">Participar do programa Beta?</string>
+    <string name="beta_updates_join_confirm_message">Você receberá versões de teste do Orb antes do lançamento estável. Elas podem conter recursos novos, alterações incompletas ou instabilidades. Quando uma nova Beta estiver disponível, o Orb avisará e mostrará o changelog completo. Nada será baixado até você escolher Baixar.</string>
+    <string name="beta_updates_join_confirm_cancel">Cancelar</string>
+    <string name="beta_updates_join_confirm_action">Participar</string>
+    <string name="beta_updates_leave_title">Sair do programa Beta?</string>
+    <string name="beta_updates_leave_message">O Orb deixará de procurar pre-releases e passará para o canal estável. Quando uma versão estável compatível mais recente estiver disponível, o Orb avisará e mostrará o changelog completo. Nada será baixado até você escolher Baixar. Os dados do aplicativo serão mantidos.</string>
+    <string name="beta_updates_leave_cancel">Cancelar</string>
+    <string name="beta_updates_leave_confirm">Sair do Beta</string>
+    <string name="beta_updates_left_beta_to_stable">Canal estável ativado. O Orb avisará quando a próxima versão estável compatível estiver disponível.</string>
+    <string name="beta_updates_channel_name">Atualizações do Orb</string>
+    <string name="beta_updates_channel_description">Notificações quando novas versões do Orb estiverem disponíveis</string>
+    <string name="beta_updates_notification_title_beta">Orb Beta pronto para instalar</string>
+    <string name="beta_updates_notification_title_stable">Orb estável pronto para instalar</string>
+    <string name="beta_updates_notification_body">%1$s foi baixado. Toque para confirmar a instalação.</string>
+    <string name="beta_updates_in_app_title_beta">Orb Beta pronto para instalar</string>
+    <string name="beta_updates_in_app_title_stable">Orb estável pronto para instalar</string>
+    <string name="beta_updates_in_app_message">%1$s foi baixado e está pronto para instalar.</string>
+    <string name="beta_updates_install_now">Instalar agora</string>
+    <string name="beta_updates_in_app_icon_description">Atualização: %1$s</string>
+    <string name="update_manual_title">Buscar atualizações agora</string>
+    <string name="update_manual_checking">Buscando atualizações…</string>
+    <string name="update_manual_up_to_date">Você já está usando a versão mais recente.</string>
+    <string name="update_manual_no_release">Nenhuma versão mais recente foi encontrada.</string>
+    <string name="update_manual_downloaded">%1$s foi baixada e está pronta para instalar.</string>
+    <string name="update_manual_failed">Não foi possível buscar atualizações. Tente novamente mais tarde.</string>
+    <string name="beta_updates_notification_available_title_beta">Atualização Beta do Orb disponível</string>
+    <string name="beta_updates_notification_available_title_stable">Atualização do Orb disponível</string>
+    <string name="beta_updates_notification_available_body">%1$s está disponível. Toque para ver as novidades; nada foi baixado.</string>
+</resources>

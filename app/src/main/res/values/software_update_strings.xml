@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="software_update_available_status">Orb %1$s is available.</string>
+    <string name="software_update_downloading_status">Downloading Orb %1$s…</string>
+    <string name="software_update_ready_status">Orb %1$s is ready to install.</string>
+    <string name="software_update_whats_new">What’s new</string>
+    <string name="software_update_no_notes">• New features and refinements in this version
+• Performance and stability improvements
+• Interface and playback fixes</string>
+    <string name="software_update_cancel">Cancel</string>
+    <string name="software_update_version_label">Version %1$s</string>
+    <string name="update_manual_available">Update available: %1$s. Open the update notice to review the full changelog and choose whether to download.</string>
+</resources>

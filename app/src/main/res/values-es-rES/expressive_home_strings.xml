@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="expressive_greeting_morning">Buenos días</string>
+    <string name="expressive_greeting_afternoon">Buenas tardes</string>
+    <string name="expressive_greeting_evening">Buenas noches</string>
+    <string name="expressive_home_for_you">Para ti</string>
+    <string name="expressive_home_new_releases">Álbumes</string>
+    <string name="expressive_albums_new_from_favorite">Nuevo álbum</string>
+    <string name="expressive_albums_new">Nuevos álbumes</string>
+    <string name="expressive_albums_favorites">Tus álbumes favoritos</string>
+    <string name="expressive_albums_may_like">Álbumes que te pueden gustar</string>
+    <string name="expressive_home_charts">Charts</string>
+    <string name="expressive_home_discover">Descubre</string>
+    <string name="expressive_releases_liked_artists">De artistas que te gustan</string>
+    <string name="expressive_releases_heard_artists">De artistas que ya escuchaste</string>
+    <string name="expressive_releases_general">Nuevos álbumes y sencillos</string>
+    <string name="expressive_charts_daily">Daily Charts</string>
+    <string name="expressive_charts_weekly">Weekly Charts</string>
+    <string name="expressive_charts_trending_community">Playlists de la comunidad en tendencia</string>
+    <string name="expressive_charts_trending_songs">Canciones en tendencia</string>
+    <string name="expressive_discovery_songs">Canciones por descubrir</string>
+    <string name="expressive_discovery_artists">Artistas por descubrir</string>
+    <string name="expressive_discovery_albums">Álbumes por descubrir</string>
+    <string name="expressive_discovery_singles">Sencillos por descubrir</string>
+    <string name="expressive_discovery_community">Playlists</string>
+
+    <string name="expressive_for_you_recommendations">Sugerencias</string>
+    <string name="expressive_for_you_recent">Reproducidas recientemente</string>
+    <string name="expressive_for_you_listen_again">Escuchar de nuevo</string>
+    <string name="expressive_for_you_top_artists">Artistas</string>
+    <string name="expressive_for_you_quick_picks">Selecciones rápidas</string>
+    <string name="expressive_for_you_mixes">Mixes para ti</string>
+    <string name="expressive_for_you_playlists">Tus playlists</string>
+    <string name="expressive_for_you_library">De tu biblioteca</string>
+    <string name="expressive_for_you_forgotten">Favoritos olvidados</string>
+    <string name="expressive_for_you_albums">Álbumes para ti</string>
+    <string name="expressive_for_you_recaps">Recaps</string>
+    <string name="expressive_releases_new">Nuevos lanzamientos</string>
+    <string name="expressive_releases_liked">De artistas que te gustan</string>
+    <string name="expressive_releases_heard">De artistas que ya escuchaste</string>
+    <string name="expressive_releases_region">Lanzamientos nacionales</string>
+    <string name="expressive_releases_global">Lanzamientos internacionales</string>
+    <string name="expressive_trending_top_songs">Top 10 nacional</string>
+    <string name="expressive_trending_now">En tendencia</string>
+    <string name="expressive_trending_daily">Daily Charts</string>
+    <string name="expressive_trending_weekly">Weekly Charts</string>
+    <string name="expressive_discover_may_like">Puede que te guste esto</string>
+    <string name="expressive_discover_unheard_songs">Canciones que nunca escuchaste</string>
+    <string name="expressive_discover_unheard_artists">Artistas que nunca escuchaste</string>
+    <string name="expressive_discover_unheard_albums">Álbumes que nunca escuchaste</string>
+    <string name="expressive_trending_top_global">Top 10 global</string>
+    <string name="expressive_playlists_yours">Tus playlists</string>
+    <string name="expressive_playlists_recent">Escuchadas recientemente</string>
+    <string name="expressive_playlists_community">De la comunidad</string>
+</resources>

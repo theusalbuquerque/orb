@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_haptic_feedback">Respostas táteis</string>
+    <string name="settings_haptic_feedback_subtitle">Vibrar em ações selecionadas, como Curtir, biblioteca e controles da fila.</string>
+    <string name="song_share_listen_on">Ouça no</string>
+    <string name="song_share_failed">Não foi possível criar o card para Stories.</string>
+</resources>

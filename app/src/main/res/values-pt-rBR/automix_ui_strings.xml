@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_automix">Automix</string>
+    <string name="settings_automix_subtitle">Transições inteligentes sincronizadas com batida, andamento, tonalidade e energia</string>
+    <string name="settings_automix_subtitle_v20">Automix 2.0 · Motor público estável</string>
+    <string name="settings_automix_subtitle_v25">Automix 2.5 · Prévia Premium</string>
+    <string name="settings_automix_version">Versão do Automix</string>
+    <string name="settings_automix_20">2.0</string>
+    <string name="settings_automix_25">2.5</string>
+    <string name="settings_automix_25_premium_preview">Prévia Premium · disponível para esta conta</string>
+    <string name="automix_beta_notice_title">Automix 2.0 experimental</string>
+    <string name="automix_beta_notice_message">O Automix 2.0 analisa o áudio localmente para planejar transições mais naturais entre as músicas. Este recurso ainda é experimental e algumas faixas podem não produzir a transição ideal. Se o telefone estiver esquentando demais ou o Android estiver interrompendo o Orb automaticamente, desative o Automix.</string>
+    <string name="automix_25_beta_notice_title">Prévia Premium do Automix 2.5</string>
+    <string name="automix_25_beta_notice_message">O Automix 2.5 usa o novo planner musical remoto com análise de andamento, tonalidade, frases, energia e sobreposição vocal. Esta prévia ainda é experimental e está restrita a contas autorizadas.</string>
+    <string name="detail_suggested">Sugeridas</string>
+</resources>

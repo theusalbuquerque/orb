@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="first_account_step_youtube">1 of 2 · Recommended</string>
+    <string name="first_account_youtube_title">Connect YouTube Music</string>
+    <string name="first_account_youtube_message">Connect your YouTube Music account to bring your library, likes and private account features into Orb. You can also do this later from Account.</string>
+    <string name="first_account_youtube_connect">Connect YouTube Music</string>
+    <string name="first_account_step_username">2 of 2 · Orb account</string>
+    <string name="first_account_username_title">Create your Orb username</string>
+    <string name="first_account_username_message">Choose a unique @username to get full access to Stats and Orb’s social experience, including profiles, followers and listening activity.</string>
+    <string name="first_account_username_field">Username</string>
+    <string name="first_account_username_rules">3–30 lowercase letters, numbers, dots or underscores.</string>
+    <string name="first_account_username_create">Create username</string>
+    <string name="first_account_username_error">That username could not be saved. Try another one.</string>
+    <string name="first_account_youtube_error">YouTube Music could not be connected right now. You can try again later from Account.</string>
+    <string name="first_account_later">Not now</string>
+</resources>

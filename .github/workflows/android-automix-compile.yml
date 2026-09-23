@@ -3,6 +3,7 @@ name: Android Automix compile
 on:
   push:
     paths:
+      - "app/src/**"
       - "app/src/main/java/com/music/orb/playback/**"
       - "app/src/main/java/com/music/orb/playback/smart/**"
       - "app/src/main/java/com/music/orb/data/settings/**"
@@ -16,6 +17,7 @@ on:
       - ".github/workflows/android-automix-compile.yml"
   pull_request:
     paths:
+      - "app/src/**"
       - "app/src/main/java/com/music/orb/playback/**"
       - "app/src/main/java/com/music/orb/playback/smart/**"
       - "app/src/main/java/com/music/orb/data/settings/**"
@@ -51,6 +53,9 @@ jobs:
 
       - name: Compile Dev and Prod Kotlin
         run: ./gradlew :app:compileDevDebugKotlin :app:compileProdDebugKotlin --stacktrace
+
+      - name: Assemble Dev and Prod debug APKs
+        run: ./gradlew :app:assembleDevDebug :app:assembleProdDebug --stacktrace
 
       - name: Package updated Orb
         run: |

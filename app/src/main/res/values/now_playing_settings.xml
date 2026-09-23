@@ -1,0 +1,8 @@
+<resources>
+    <string name="settings_hide_status_bar_now_playing">Hide status bar</string>
+    <string name="settings_hide_status_bar_now_playing_subtitle">Hides the clock, battery and system icons while the full player is open.</string>
+    <string name="settings_keep_screen_on_now_playing">Keep screen awake</string>
+    <string name="settings_keep_screen_on_now_playing_subtitle">Prevents the display from turning off automatically while the full player is open.</string>
+    <string name="settings_allow_screen_rotation">Rotate screen</string>
+    <string name="settings_allow_screen_rotation_subtitle">Allows the Now Playing screen to follow device rotation on phones.</string>
+</resources>

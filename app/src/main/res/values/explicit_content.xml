@@ -1,0 +1,12 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="explicit_content">Explicit Content</string>
+    <string name="explicit_badge">E</string>
+    <string name="explicit_badge_full">Explicit</string>
+    <string name="hi_quality_audio_badge">Hi-Quality Audio</string>
+    <string name="hi_quality_audio_available">Hi-Quality Audio Available</string>
+    <string name="lossless_badge">Lossless</string>
+    <string name="hi_res_lossless_badge">Hi-Res Lossless</string>
+    <string name="hi_res_lossless_available">Hi-Res Lossless Available</string>
+    <string name="lossless_available">Lossless Available</string>
+</resources>

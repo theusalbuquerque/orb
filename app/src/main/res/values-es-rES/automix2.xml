@@ -1,0 +1,47 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="now_playing_queue_title">Cola</string>
+    <string name="now_playing_queue_clear">Limpiar</string>
+    <string name="now_playing_autoplay_title">AutoPlay</string>
+    <string name="now_playing_autoplay_queued_subtitle">Música similar, en orden aleatorio</string>
+    <string name="now_playing_autoplay_empty_subtitle">Seguirá reproduciéndose música similar</string>
+    <string name="now_playing_upgrading_quality">Buscando mejor calidad</string>
+    <string name="automix_nerd_analyzing_a">Analizando A</string>
+    <string name="automix_nerd_a_analyzed">A analizada</string>
+    <string name="automix_nerd_analyzing_b">Analizando B</string>
+    <string name="automix_nerd_a_done_analyzing_b">A analizada · analizando B</string>
+    <string name="automix_nerd_b_analyzed">B analizada</string>
+    <string name="automix_nerd_planning">Planificando transición</string>
+    <string name="automix_nerd_transition_ready">La transición será %1$s · esperando el mejor momento</string>
+    <string name="automix_nerd_preparing_b">Preparando B para reproducir</string>
+    <string name="automix_nerd_b_ready">B lista para reproducir</string>
+    <string name="automix_nerd_mixing">Transición en curso · %1$s</string>
+    <string name="automix_nerd_completed">Transición completada</string>
+    <string name="automix_style_blend">Blend</string>
+    <string name="automix_style_rise">Rise</string>
+    <string name="automix_style_intro_bed">Intro Instrumental</string>
+    <string name="automix_style_fade">Fade</string>
+    <string name="automix_style_cut">Cut</string>
+    <string name="automix_style_intro_bridge_filter">Puente Instrumental con Filtro</string>
+    <string name="automix_style_takeover">Entrada con Cola de A</string>
+    <string name="automix_style_phrase_cut">Corte de Frase</string>
+    <string name="automix_style_eq_swap">Intercambio de EQ</string>
+    <string name="automix_style_unknown">Transición</string>
+    <string name="automix_style_no_mix">Sin mezcla</string>
+    <string name="automix_style_filter">Blend con Filtro</string>
+    <string name="automix_style_runway_blend">Entrada Progresiva</string>
+    <string name="automix_style_phrase_takeover">Cambio por Frase</string>
+    <string name="automix_style_gapless">Transición sin Intervalo</string>
+    <string name="automix_style_crossfade">Crossfade de Potencia Constante</string>
+    <string name="nerd_analysis_waiting">Esperando</string>
+    <string name="nerd_analysis_analysing">Analizando</string>
+    <string name="nerd_analysis_analysed">Analizada</string>
+    <string name="nerd_analysis_refining">Refinando</string>
+    <string name="nerd_analysis_failed">Falló</string>
+    <string name="settings_crossfade_disabled_automix">Desactivado mientras Automix está activo</string>
+    <string name="now_playing_mixing">Mezclando</string>
+    <string name="nerd_stats_audio_quality_line">%1$s</string>
+    <string name="nerd_stats_pair_status_line">A: %1$s · B: %2$s</string>
+    <string name="nerd_stats_transition_line">%1$s · %2$s</string>
+    <string name="nerd_stats_transition_pending_line">Esperando Plan</string>
+</resources>

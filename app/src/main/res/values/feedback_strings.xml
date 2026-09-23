@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="footer_send_feedback">Send feedback</string>
+    <string name="feedback_title">Send feedback</string>
+    <string name="feedback_subtitle">Tell us what is working, what is not, or what you would like to see in Orb.</string>
+    <string name="feedback_version">Version: %1$s</string>
+    <string name="feedback_username">Orb username: %1$s</string>
+    <string name="feedback_email">Google account: %1$s</string>
+    <string name="feedback_message_label">Your feedback</string>
+    <string name="feedback_message_hint">Describe your feedback in as much detail as you want.</string>
+    <string name="feedback_attach_images">Attach images (%1$d/%2$d)</string>
+    <string name="feedback_attachment_limit">Up to 2 images, 10 MB each.</string>
+    <string name="feedback_max_images">You can attach up to 2 images.</string>
+    <string name="feedback_image_too_large">Each image can be at most 10 MB.</string>
+    <string name="feedback_image_not_image">That file is not a supported image.</string>
+    <string name="feedback_image_read_failed">Orb could not read that image.</string>
+    <string name="feedback_remove_image">Remove image</string>
+    <string name="feedback_sign_in_required">Sign in with Google to send feedback with your Orb account information.</string>
+    <string name="feedback_cancel">Cancel</string>
+    <string name="feedback_send">Send</string>
+    <string name="feedback_sent">Feedback sent. Thank you!</string>
+    <string name="feedback_send_failed">Orb could not send your feedback. Please try again.</string>
+</resources>

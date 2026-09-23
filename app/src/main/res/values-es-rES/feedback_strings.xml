@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="footer_send_feedback">Enviar comentarios</string>
+    <string name="feedback_title">Enviar comentarios</string>
+    <string name="feedback_subtitle">Cuéntanos qué funciona, qué debería mejorar o qué te gustaría ver en Orb.</string>
+    <string name="feedback_version">Versión: %1$s</string>
+    <string name="feedback_username">Usuario de Orb: %1$s</string>
+    <string name="feedback_email">Cuenta de Google: %1$s</string>
+    <string name="feedback_message_label">Tus comentarios</string>
+    <string name="feedback_message_hint">Describe tus comentarios con el nivel de detalle que quieras.</string>
+    <string name="feedback_attach_images">Adjuntar imágenes (%1$d/%2$d)</string>
+    <string name="feedback_attachment_limit">Hasta 2 imágenes de 10 MB cada una.</string>
+    <string name="feedback_max_images">Puedes adjuntar hasta 2 imágenes.</string>
+    <string name="feedback_image_too_large">Cada imagen puede tener un máximo de 10 MB.</string>
+    <string name="feedback_image_not_image">Ese archivo no es una imagen compatible.</string>
+    <string name="feedback_image_read_failed">Orb no pudo leer esa imagen.</string>
+    <string name="feedback_remove_image">Eliminar imagen</string>
+    <string name="feedback_sign_in_required">Inicia sesión con Google para enviar comentarios con la información de tu cuenta de Orb.</string>
+    <string name="feedback_cancel">Cancelar</string>
+    <string name="feedback_send">Enviar</string>
+    <string name="feedback_sent">Comentarios enviados. ¡Gracias!</string>
+    <string name="feedback_send_failed">Orb no pudo enviar tus comentarios. Inténtalo de nuevo.</string>
+</resources>

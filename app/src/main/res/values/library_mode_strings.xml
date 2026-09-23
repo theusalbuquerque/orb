@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="account_library_sync_header">Library Integration</string>
+    <string name="account_library_sync_title">YouTube Music library sync</string>
+    <string name="settings_youtube_music_library_linked">Linking your YouTube Music library to Orb.</string>
+    <string name="settings_youtube_music_library_unlinked">Unlinked your YouTube Music library.</string>
+    <string name="orb_library_empty">Your Orb library is empty. Add songs, albums or singles from their actions.</string>
+    <string name="song_action_add_to_library">Add to library</string>
+    <string name="song_action_remove_from_library">Remove from library</string>
+    <string name="library_downloads_empty">No downloaded songs yet.</string>
+    <string name="downloads_remove_all">Remove all downloads</string>
+    <string name="downloads_remove_all_title">Remove all downloads?</string>
+    <string name="downloads_remove_all_message">All songs downloaded by Orb will be removed from this device.</string>
+    <string name="downloads_remove_all_confirm">Remove all</string>
+
+    <!-- Album/playlist collection download confirmations. -->
+    <string name="collection_download_cancel_title">Cancel download?</string>
+    <string name="collection_download_cancel_message">The album or playlist download is still in progress. Pending tracks will be cancelled and tracks already downloaded will be removed.</string>
+    <string name="collection_download_cancel_confirm">Cancel download</string>
+    <string name="collection_download_remove_title">Remove download?</string>
+    <string name="collection_download_remove_message">This album or playlist is fully downloaded. Remove its downloaded tracks from this device?</string>
+    <string name="collection_download_remove_confirm">Remove download</string>
+</resources>

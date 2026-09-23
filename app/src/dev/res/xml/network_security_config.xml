@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Dev/beta only: lets a phone on the same LAN reach a self-hosted
+         Orb Navidrome Addon over http://192.168.x.x during testing.
+         Production keeps src/main's HTTPS-only policy. -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="expressive_greeting_morning">Good morning</string>
+    <string name="expressive_greeting_afternoon">Good afternoon</string>
+    <string name="expressive_greeting_evening">Good evening</string>
+    <string name="expressive_home_for_you">For You</string>
+    <string name="expressive_home_new_releases">Albums</string>
+    <string name="expressive_albums_new_from_favorite">New album</string>
+    <string name="expressive_albums_new">New albums</string>
+    <string name="expressive_albums_favorites">Your favorite albums</string>
+    <string name="expressive_albums_may_like">Albums you may like</string>
+    <string name="expressive_home_charts">Charts</string>
+    <string name="expressive_home_discover">Discover</string>
+    <string name="expressive_releases_liked_artists">From artists you like</string>
+    <string name="expressive_releases_heard_artists">From artists you’ve heard</string>
+    <string name="expressive_releases_general">New albums &amp; singles</string>
+    <string name="expressive_charts_daily">Daily Charts</string>
+    <string name="expressive_charts_weekly">Weekly Charts</string>
+    <string name="expressive_charts_trending_community">Trending Community Playlists</string>
+    <string name="expressive_charts_trending_songs">Trending Songs</string>
+    <string name="expressive_discovery_songs">Songs to discover</string>
+    <string name="expressive_discovery_artists">Artists to discover</string>
+    <string name="expressive_discovery_albums">Albums to discover</string>
+    <string name="expressive_discovery_singles">Singles to discover</string>
+    <string name="expressive_discovery_community">Playlists</string>
+
+    <string name="expressive_for_you_recommendations">Suggestions</string>
+    <string name="expressive_for_you_recent">Recently played</string>
+    <string name="expressive_for_you_listen_again">Listen again</string>
+    <string name="expressive_for_you_top_artists">Artists</string>
+    <string name="expressive_for_you_quick_picks">Quick picks</string>
+    <string name="expressive_for_you_mixes">Mixes for you</string>
+    <string name="expressive_for_you_playlists">Your playlists</string>
+    <string name="expressive_for_you_library">From your library</string>
+    <string name="expressive_for_you_forgotten">Forgotten favorites</string>
+    <string name="expressive_for_you_albums">Albums for you</string>
+    <string name="expressive_for_you_recaps">Recaps</string>
+    <string name="expressive_releases_new">New releases</string>
+    <string name="expressive_releases_liked">From artists you like</string>
+    <string name="expressive_releases_heard">From artists you’ve heard</string>
+    <string name="expressive_releases_region">National releases</string>
+    <string name="expressive_releases_global">International releases</string>
+    <string name="expressive_trending_top_songs">National Top 10</string>
+    <string name="expressive_trending_now">Trending</string>
+    <string name="expressive_trending_daily">Daily Charts</string>
+    <string name="expressive_trending_weekly">Weekly Charts</string>
+    <string name="expressive_discover_may_like">You may like this</string>
+    <string name="expressive_discover_unheard_songs">Songs you’ve never heard</string>
+    <string name="expressive_discover_unheard_artists">Artists you’ve never heard</string>
+    <string name="expressive_discover_unheard_albums">Albums you’ve never heard</string>
+    <string name="expressive_trending_top_global">Global Top 10</string>
+    <string name="expressive_playlists_yours">Your playlists</string>
+    <string name="expressive_playlists_recent">Recently listened</string>
+    <string name="expressive_playlists_community">From the community</string>
+</resources>

@@ -1,0 +1,12 @@
+<resources>
+    <string-array name="now_playing_intro_lines">
+        <item>Instrumental intro</item>
+        <item>Let the music speak</item>
+        <item>Coming in…</item>
+    </string-array>
+    <string-array name="now_playing_lyrics_loading_lines">
+        <item>Finding lyrics…</item>
+        <item>Reading the next line…</item>
+        <item>Lyrics are on the way…</item>
+    </string-array>
+</resources>

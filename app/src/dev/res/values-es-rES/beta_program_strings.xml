@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="beta_updates_header">Actualizaciones</string>
+    <string name="beta_updates_join_title">Participar en el Programa Beta</string>
+    <string name="beta_updates_join_subtitle_off">Recibe versiones de prueba antes de la versión estable.</string>
+    <string name="beta_updates_join_subtitle_beta">Recibirás notificaciones cuando haya nuevas versiones disponibles.</string>
+    <string name="beta_updates_join_subtitle_stable_auto">Recibirás notificaciones cuando haya nuevas versiones disponibles.</string>
+    <string name="beta_updates_footer">Orb usa la misma aplicación para Stable y Beta. Solo se comprueba el canal seleccionado en GitHub Releases, y Android siempre solicita confirmación antes de instalar.</string>
+    <string name="update_channel_notification_permission_required">Las notificaciones de Android están desactivadas. Orb seguirá mostrando las actualizaciones listas dentro de la app cuando la abras.</string>
+    <string name="beta_updates_leave_title">¿Salir del programa Beta?</string>
+    <string name="beta_updates_leave_message">Orb dejará de buscar pre-releases y cambiará al canal estable. La versión estable compatible más reciente se descargará automáticamente cuando esté disponible, y Android solicitará confirmación para instalarla. Se conservarán los datos de la aplicación.</string>
+    <string name="beta_updates_leave_cancel">Cancelar</string>
+    <string name="beta_updates_leave_confirm">Salir de Beta</string>
+    <string name="beta_updates_left_beta_to_stable">Canal estable activado. Orb descargará automáticamente la próxima versión estable compatible.</string>
+    <string name="beta_updates_channel_name">Actualizaciones de Orb</string>
+    <string name="beta_updates_channel_description">Actualizaciones de Orb descargadas y listas para instalar</string>
+    <string name="beta_updates_notification_title_beta">Orb Beta listo para instalar</string>
+    <string name="beta_updates_notification_title_stable">Orb estable listo para instalar</string>
+    <string name="beta_updates_notification_body">Se descargó %1$s. Toca para confirmar la instalación.</string>
+    <string name="update_manual_title">Buscar actualizaciones ahora</string>
+    <string name="update_manual_checking">Buscando actualizaciones…</string>
+    <string name="update_manual_up_to_date">Ya estás usando la versión más reciente.</string>
+    <string name="update_manual_no_release">No se encontró una versión más reciente.</string>
+    <string name="update_manual_downloaded">Se descargó %1$s y está lista para instalar.</string>
+    <string name="update_manual_failed">No se pudieron buscar actualizaciones. Inténtalo de nuevo más tarde.</string>
+</resources>

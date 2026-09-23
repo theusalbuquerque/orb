@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_haptic_feedback">Respuesta háptica</string>
+    <string name="settings_haptic_feedback_subtitle">Vibrar en acciones seleccionadas, como Me gusta, biblioteca y controles de cola.</string>
+    <string name="song_share_listen_on">Escucha en</string>
+    <string name="song_share_failed">No fue posible crear la tarjeta para Stories.</string>
+</resources>

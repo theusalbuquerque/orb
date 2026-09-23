@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+
+    <!--
+        Orb Explicit badge.
+
+        The artwork deliberately reaches almost the full 24x24 viewport. This
+        keeps a requested 13dp icon visually close to 13dp instead of shrinking
+        the visible seal behind large invisible vector margins. Compose applies
+        the contextual surface/title colour with Icon.tint.
+    -->
+    <path
+        android:pathData="M5,0.75 H19 C21.35,0.75 23.25,2.65 23.25,5 V19 C23.25,21.35 21.35,23.25 19,23.25 H5 C2.65,23.25 0.75,21.35 0.75,19 V5 C0.75,2.65 2.65,0.75 5,0.75 Z"
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.1"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <path
+        android:pathData="M7.2,5.4 H16.9 V7.55 H9.65 V10.85 H16.05 V13 H9.65 V16.45 H16.9 V18.6 H7.2 Z"
+        android:fillColor="#FFFFFFFF" />
+</vector>

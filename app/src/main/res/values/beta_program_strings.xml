@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="beta_updates_header">Updates</string>
+    <string name="beta_updates_join_title">Join the Beta Program</string>
+    <string name="beta_updates_join_subtitle_off">Get test versions before the stable release.</string>
+    <string name="beta_updates_join_subtitle_beta">You will receive notifications when new versions are available.</string>
+    <string name="beta_updates_join_subtitle_stable_auto">You will receive notifications when new versions are available.</string>
+    <string name="beta_updates_footer">Orb uses one app package for Stable and Beta. Only the selected GitHub release channel is checked, and Android always asks you to confirm installation.</string>
+    <string name="update_channel_notification_permission_required">Android notifications are off. Orb will still show available updates inside the app when you open it.</string>
+    <string name="beta_updates_join_confirm_title">Join the Beta program?</string>
+    <string name="beta_updates_join_confirm_message">You will receive test versions of Orb before the stable release. They may include new features, unfinished changes or instability. When a new Beta is available, Orb will notify you and show the full changelog. Nothing is downloaded until you choose Download.</string>
+    <string name="beta_updates_join_confirm_cancel">Cancel</string>
+    <string name="beta_updates_join_confirm_action">Join</string>
+    <string name="beta_updates_leave_title">Leave the Beta program?</string>
+    <string name="beta_updates_leave_message">Orb will stop checking pre-releases and switch to the stable channel. When a newer compatible stable version is available, Orb will notify you and show the full changelog. Nothing is downloaded until you choose Download. Your app data will be kept.</string>
+    <string name="beta_updates_leave_cancel">Cancel</string>
+    <string name="beta_updates_leave_confirm">Leave Beta</string>
+    <string name="beta_updates_left_beta_to_stable">Stable channel enabled. Orb will notify you when the next compatible stable release is available.</string>
+    <string name="beta_updates_channel_name">Orb app updates</string>
+    <string name="beta_updates_channel_description">Notifications when new Orb versions are available</string>
+    <string name="beta_updates_notification_title_beta">Orb Beta ready to install</string>
+    <string name="beta_updates_notification_title_stable">Orb stable ready to install</string>
+    <string name="beta_updates_notification_body">%1$s was downloaded. Tap to confirm installation.</string>
+    <string name="beta_updates_in_app_title_beta">Orb Beta ready to install</string>
+    <string name="beta_updates_in_app_title_stable">Orb stable ready to install</string>
+    <string name="beta_updates_in_app_message">%1$s has been downloaded and is ready to install.</string>
+    <string name="beta_updates_install_now">Install Now</string>
+    <string name="beta_updates_in_app_icon_description">Update: %1$s</string>
+    <string name="update_manual_title">Check for updates now</string>
+    <string name="update_manual_checking">Checking for updates…</string>
+    <string name="update_manual_up_to_date">You are already using the latest version.</string>
+    <string name="update_manual_no_release">No newer version was found.</string>
+    <string name="update_manual_downloaded">%1$s was downloaded and is ready to install.</string>
+    <string name="update_manual_failed">Orb could not check for updates. Try again later.</string>
+    <string name="beta_updates_notification_available_title_beta">Orb Beta update available</string>
+    <string name="beta_updates_notification_available_title_stable">Orb update available</string>
+    <string name="beta_updates_notification_available_body">%1$s is available. Tap to see what’s new; nothing has been downloaded.</string>
+</resources>

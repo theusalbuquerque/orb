@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="playlist_picker_add_to_playlist_heading">ADD TO PLAYLIST</string>
+    <string name="playlist_picker_your_playlists_heading">YOUR PLAYLISTS</string>
+    <string name="playlist_picker_new_playlist">New playlist</string>
+    <string name="playlist_picker_empty">No playlists yet — create one above.</string>
+    <string name="playlist_picker_new_playlist_title">New playlist</string>
+    <string name="playlist_picker_saved_to_youtube">Saved to your YouTube Music account</string>
+    <string name="playlist_picker_name_hint">Playlist name</string>
+    <string name="playlist_picker_clear_name">Clear name</string>
+    <string name="playlist_picker_visibility_heading">WHO CAN SEE IT</string>
+    <string name="playlist_picker_create">Create playlist</string>
+    <string name="playlist_picker_privacy_private">Private</string>
+    <string name="playlist_picker_privacy_unlisted">Unlisted</string>
+    <string name="playlist_picker_privacy_public">Public</string>
+    <string name="playlist_picker_back">Back</string>
+</resources>

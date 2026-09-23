@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="donation_card_title">Ajude a construir o Orb</string>
+    <string name="donation_card_subtitle">Apoie o desenvolvimento independente e ajude o Orb a continuar evoluindo.</string>
+    <string name="donation_sheet_title">Ajude a construir o Orb</string>
+    <string name="donation_sheet_body">O Orb é desenvolvido de forma independente. Se você gosta do app e quiser contribuir, qualquer apoio ajuda a manter o desenvolvimento, os testes e as próximas melhorias.</string>
+    <string name="donation_notice">Sua contribuição continua totalmente opcional e separada do Premium. A partir de 1º de novembro, novos recursos Premium estarão disponíveis no Orb por meio de planos mensal e anual.</string>
+    <string name="donation_payment_methods">Escolha como contribuir</string>
+    <string name="donation_pix_title">Pix · BRL</string>
+    <string name="donation_pix_provider">Mercado Pago · Brasil</string>
+    <string name="donation_usd_title">Transferência bancária · USD</string>
+    <string name="donation_usd_provider">Wise · Community Federal Savings Bank</string>
+    <string name="donation_eur_title">Transferência bancária · EUR</string>
+    <string name="donation_cny_title">Transferência bancária · CNY</string>
+    <string name="donation_gbp_title">Transferência bancária · GBP</string>
+    <string name="donation_wise_provider">Wise</string>
+    <string name="donation_field_pix_key">Chave Pix</string>
+    <string name="donation_field_recipient">Favorecido</string>
+    <string name="donation_field_account">Conta</string>
+    <string name="donation_field_account_type">Tipo de conta</string>
+    <string name="donation_field_routing">Routing number</string>
+    <string name="donation_field_sort_code">Sort code</string>
+    <string name="donation_field_iban">IBAN</string>
+    <string name="donation_copy_all">Copiar dados</string>
+    <string name="donation_copy_field">Copiar %1$s</string>
+    <string name="donation_copied">Copiado para a área de transferência</string>
+    <string name="donation_choose_currency">Escolha a moeda</string>
+    <string name="donation_choose_currency_subtitle">Selecione a moeda que deseja usar para fazer sua contribuição.</string>
+    <string name="donation_method_pix">Pix</string>
+    <string name="donation_method_bank_transfer">Transferência bancária</string>
+    <string name="donation_transfer_details">Dados da transferência</string>
+    <string name="donation_transfer_data">Informações para transferência</string>
+    <string name="donation_details_hint">Toque em qualquer campo para copiá-lo ou copie todos os dados de uma vez.</string>
+    <string name="donation_back">Voltar</string>
+    <string name="donation_not_configured">As formas de contribuição estão indisponíveis no momento.</string>
+</resources>

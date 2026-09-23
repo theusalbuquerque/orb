@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="experimental_feature_confirm">Entendido</string>
+    <string name="audio_lossless_experimental_title">Audio Lossless experimental</string>
+    <string name="audio_lossless_experimental_message">La reproducción Lossless y Hi-Res Lossless todavía es experimental y puede no funcionar correctamente con todas las canciones por ahora. Por ahora, Lossless y Hi-Res Lossless funcionan únicamente en redes Wi-Fi.</string>
+    <string name="automix_experimental_title">Automix experimental</string>
+    <string name="automix_experimental_message">Automix todavía es experimental y puede no funcionar correctamente con todas las canciones o transiciones por ahora. Si el teléfono se calienta demasiado o Android empieza a detener Orb automáticamente, desactiva Automix.</string>
+    <string name="google_sans_flex_beta_notice_title">Google Sans Flex · Beta</string>
+    <string name="google_sans_flex_beta_notice_message">Google Sans Flex es una función exclusiva de la versión beta de Orb y todavía es experimental. La tipografía variable y expresiva puede no funcionar correctamente en todas las partes de la app por ahora.</string>
+</resources>

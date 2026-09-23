@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- HTTPS everywhere by default. The only cleartext exception is the
+         user's LAN hifi-api fallback configured in TidalService.LOCAL_INSTANCE. -->
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">192.168.3.90</domain>
+    </domain-config>
+</network-security-config>

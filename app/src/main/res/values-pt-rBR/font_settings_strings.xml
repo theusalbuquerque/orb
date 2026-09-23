@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_fonts">Fontes</string>
+    <string name="settings_font_orb_default">Padrão</string>
+    <string name="settings_font_google_sans_flex">Google Sans Flex</string>
+</resources>

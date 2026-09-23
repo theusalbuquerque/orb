@@ -1,0 +1,25 @@
+<resources>
+    <string name="youtube_music_compatibility_title">YouTube Music</string>
+    <string name="youtube_music_compatibility_message">Tu cuenta de Google ya está conectada a Orb. Completa aquí la configuración de YouTube Music solo si Orb necesita acceso mediante el navegador, o usa esta pantalla para elegir otro canal de YouTube. Esto no crea otra cuenta de Orb.</string>
+    <string name="title_account_integrations">Cuenta e integraciones</string>
+    <string name="account_connections_header">Integraciones</string>
+    <string name="account_orb_profile">Perfil de Orb</string>
+    <string name="account_orb_profile_subtitle">El nombre de usuario que tus amigos usarán para encontrarte</string>
+    <string name="account_youtube_music">YouTube Music</string>
+    <string name="account_youtube_same_google">Usa la misma cuenta de Google</string>
+    <string name="account_youtube_finish_setup">Elige el canal de YouTube Music que usará Orb</string>
+    <string name="account_channel_switch_footer">Toca YouTube Music arriba para elegir o cambiar el canal de YouTube que usa Orb.</string>
+    <string name="youtube_channel_picker_title">Canal de YouTube</string>
+    <string name="youtube_channel_picker_message">Elige qué perfil o canal de YouTube debe usar Orb. Esto no cambia tu cuenta de Google ni tu cuenta de Orb.</string>
+    <string name="youtube_channel_picker_current">En uso</string>
+    <string name="youtube_channel_picker_reconnect">Reconectar YouTube</string>
+    <string name="youtube_channel_picker_cancel">Cancelar</string>
+    <string name="account_orb_create_username">Crear nombre de usuario</string>
+    <string name="account_username_dialog_title">Crea tu nombre de usuario de Orb</string>
+    <string name="account_username_dialog_description">Elige un nombre de usuario único para que tus amigos puedan encontrarte en Orb.</string>
+    <string name="account_username_field_label">Nombre de usuario</string>
+    <string name="account_username_rules">3–30 letras minúsculas, números, puntos o guiones bajos.</string>
+    <string name="account_username_save_error">No se pudo guardar ese nombre de usuario. Prueba con otro.</string>
+    <string name="account_username_cancel">Cancelar</string>
+    <string name="account_username_create">Crear</string>
+</resources>
