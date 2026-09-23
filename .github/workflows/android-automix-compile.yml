@@ -56,6 +56,9 @@ jobs:
       - name: Compile Dev and Prod Kotlin
         run: ./gradlew :app:compileDevDebugKotlin :app:compileProdDebugKotlin --stacktrace
 
+      - name: Check Automix network policy
+        run: ./gradlew :app:testDevDebugUnitTest --tests com.music.orb.AutomixNetworkPolicyTest
+
       - name: Assemble Dev and Prod debug APKs
         run: ./gradlew :app:assembleDevDebug :app:assembleProdDebug --stacktrace
 

@@ -233,9 +233,12 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
      * the full reliable C/D analysis, so the live Automix A -> B -> C contract
      * stays intact.
      */
+    @Synchronized
     fun requestQueuePreview(trackId: String, uri: Uri, durationSeconds: Double) {
         if (trackId.isBlank()) return
         restoreOnce(trackId)
+        // 2.5 only analyzes the live A/B pair. Queue sorting may reuse stored evidence.
+        if (AppSettings.automixVersion.value == AutomixVersion.V2_5) return
         if (results[trackId]?.isUsable == true) return
         cache.requestAnalysisHead(uri)
         if (running.isNotEmpty() || reliablePending.isNotEmpty()) return
@@ -323,11 +326,7 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
     /**
      * True only when the current track has finished its full analysis pass.
      *
-     * Wi-Fi keeps this as the gate for A -> B because the outgoing side benefits from tail/vocal
-     * evidence. On metered mobile data PlaybackService may deliberately unlock B from a usable
-     * provisional head so B can learn its intro in time; the full A result still supersedes that
-     * provisional evidence as soon as it arrives. A ready-but-empty terminal failure counts as
-     * finished so one bad A cannot block every successor forever.
+     * A complete result is required on every network. The service also waits for worker cleanup.
      */
     fun isFullyAnalysed(trackId: String): Boolean {
         val analysis = results[trackId] ?: return false
@@ -335,10 +334,8 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
     }
 
     /**
-     * Whether the currently published result already contains usable musical
-     * evidence. On cellular this may be the provisional head pass: it is enough
-     * to let B start learning its own intro while A's full tail analysis keeps
-     * running in the background.
+     * Whether the published evidence is usable, including a provisional result.
+     * This is not permission to start the next track's analysis.
      */
     fun hasUsableAnalysis(trackId: String): Boolean = results[trackId]?.isUsable == true
 
@@ -369,9 +366,10 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
      * read for. That result is provisional and is replaced by the whole-track
      * [analyze] as soon as the remaining bytes arrive.
      */
+    @Synchronized
     fun request(trackId: String, uri: Uri, durationSeconds: Double) {
         if (trackId.isBlank()) return
-        if (trackId in running) return
+        if (running.isNotEmpty() || reliablePending.isNotEmpty()) return
 
         // Any complete rendition of this recording will do, not just the one the
         // player happens to be on: see [chooseRendition]. Waiting on the live
@@ -540,8 +538,10 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
      * rendition when safe, so source-quality discovery and musical analysis can run
      * independently without forcing the mix to play Opus.
      */
+    @Synchronized
     fun requestReliable(trackId: String, uri: Uri, durationSeconds: Double) {
         if (trackId.isBlank()) return
+        if (running.any { it != trackId } || reliablePending.isNotEmpty()) return
 
         // Always let persisted evidence win without touching the network or decoding again.
         restoreOnce(trackId)
@@ -555,11 +555,8 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
             !RemoteAutomixClient.isAvailable() ||
             AppSettings.meteredConnection.value == true
         ) {
-            // Cellular gets a small local/cache-head pass immediately. Waiting
-            // exclusively for the immutable whole-file upload meant A had to
-            // download completely before B was even allowed to start, which is
-            // precisely the wrong shape on a variable mobile link. The reliable
-            // whole-track pass below still supersedes this provisional result.
+            // Reuse local evidence first on cellular. A provisional result never
+            // unlocks B; the complete pass below must finish before advancing.
             request(trackId, uri, durationSeconds)
         }
         if (!hasAnalysisCarrier) return
@@ -574,23 +571,29 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
         ) return
         if (trackId in running) return
         val now = SystemClock.elapsedRealtime()
-        val eligibleAt = reliableEligibleAt.putIfAbsent(trackId, now + RELIABLE_CACHE_GRACE_MS)
-            ?: (now + RELIABLE_CACHE_GRACE_MS)
+        val eligibleAt = reliableEligibleAt.putIfAbsent(trackId, now + AutomixNetworkPolicy.cacheGraceMs(AppSettings.wifiConnection.value))
+            ?: (now + AutomixNetworkPolicy.cacheGraceMs(AppSettings.wifiConnection.value))
         if (now < eligibleAt) return
         if ((reliableRetryAt[trackId] ?: 0L) > now) return
         if (!reliablePending.add(trackId)) return
 
         NerdStats.onAutomixAnalysisSource(trackId, NerdStats.AutomixAnalysisSource.RELIABLE_DOWNLOAD)
         reliableAudio.request(uri) { file ->
-            reliablePending.remove(trackId)
+            synchronized(this@TrackAnalyzer) {
             if (file == null) {
                 NerdStats.onAutomixAnalysisSource(trackId, NerdStats.AutomixAnalysisSource.FAILED)
                 deferReliableRetry(trackId)
+                reliablePending.remove(trackId)
                 return@request
             }
             reliableFailures.remove(trackId)
             reliableRetryAt.remove(trackId)
-            scheduleReliableAnalysis(trackId, uri, durationSeconds, file)
+            try {
+                scheduleReliableAnalysis(trackId, uri, durationSeconds, file)
+            } finally {
+                reliablePending.remove(trackId)
+            }
+            }
         }
     }
 
@@ -602,6 +605,7 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
      * race the beat/vocal pass or create a second concurrent ONNX burst on memory-constrained
      * devices. Callers poll [transitionStemsFor]; no playback thread ever blocks here.
      */
+    @Synchronized
     fun requestTransitionStems(
         trackId: String,
         uri: Uri,
@@ -609,6 +613,7 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
         endSeconds: Double,
     ) {
         if (trackId.isBlank() || uri.getQueryParameter("v").isNullOrBlank()) return
+        if (running.isNotEmpty() || reliablePending.isNotEmpty() || !isFullyAnalysed(trackId)) return
         if (!startSeconds.isFinite() || !endSeconds.isFinite() || endSeconds <= startSeconds) return
 
         val startMs = (startSeconds.coerceAtLeast(0.0) * 1000.0).toLong()

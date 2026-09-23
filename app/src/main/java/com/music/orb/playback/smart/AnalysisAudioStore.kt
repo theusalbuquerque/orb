@@ -13,6 +13,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -138,7 +139,9 @@ class AnalysisAudioStore(private val context: Context) {
             var position = 0L
             while (position < total) {
                 coroutineContext.ensureActive()
-                val endInclusive = minOf(total - 1L, position + CHUNK_BYTES - 1L)
+                val chunkStarted = SystemClock.elapsedRealtime()
+                val chunkBytes = AutomixNetworkPolicy.chunkBytes(AppSettings.wifiConnection.value)
+                val endInclusive = minOf(total - 1L, position + chunkBytes - 1L)
                 val expected = endInclusive - position + 1L
                 val request = Request.Builder()
                     .url(resolvedUrl)
@@ -180,6 +183,11 @@ class AnalysisAudioStore(private val context: Context) {
                     }
                 }
                 position += expected
+                // Re-read connectivity after every block, including a Wi-Fi -> cellular handover.
+                if (position < total) delay(AutomixNetworkPolicy.downloadPauseMs(
+                    AppSettings.wifiConnection.value, expected,
+                    SystemClock.elapsedRealtime() - chunkStarted,
+                ))
             }
             raf.fd.sync()
         }

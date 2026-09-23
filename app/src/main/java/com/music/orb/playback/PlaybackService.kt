@@ -1154,18 +1154,10 @@ class PlaybackService : MediaSessionService() {
         // against the track the bitrate is looked up for.
         exoPlayer.addAnalyticsListener(formatListener)
 
-        // Sequential Automix rule: A is always requested before B. Wi-Fi waits for A's full result;
-        // cellular may unlock B once A has a usable provisional head so variable network latency
-        // cannot make the incoming analysis arrive after the transition. TrackAnalyzer calls this
-        // from its worker, so hop back to Main before touching ExoPlayer. The live-pair re-check
-        // prevents a skip/queue edit from ever unlocking the wrong successor.
+        // Analysis is strictly A -> B on every network. The callback is emitted before
+        // worker cleanup, so wait for A to become idle and re-check the live queue on Main.
         trackAnalyzer.setOnAnalysisUpdated { trackId ->
             scope.launch {
-                // On Wi-Fi we keep the strict full-A -> B ordering. Cellular is
-                // different: a provisional A head is enough to let B start
-                // learning its intro while A's full/tail pass continues. Waiting
-                // for the reliable whole-file job to leave `reliablePending`
-                // made B start tens of seconds late on mobile data.
                 while (!automixOutgoingReadyForIncoming(trackId) &&
                     trackAnalyzer.isAnalysing(trackId)
                 ) {
@@ -1192,7 +1184,7 @@ class PlaybackService : MediaSessionService() {
             requestAnalysis = { item, durationMs ->
                 // The controller may ask about A and B in the same heartbeat, but the service owns
                 // the ordering contract. B is ignored until A meets the network-appropriate gate
-                // (full on Wi-Fi, usable provisional on cellular); the analyzer callback above then
+                // (complete and idle on every network); the analyzer callback above then
                 // unlocks B immediately rather than waiting for another heartbeat.
                 requestSequentialAutomixAnalysis(item, durationMs)
             },
@@ -1234,7 +1226,10 @@ class PlaybackService : MediaSessionService() {
                     outgoingEqProcessor.setGains(lowDb, midDb, highDb)
             },
             requestIncomingStems = { item, startMs, endMs ->
-                item.localConfiguration?.uri?.let { uri ->
+                val outgoingId = player?.currentMediaItem?.mediaId
+                item.localConfiguration?.uri?.takeIf {
+                    outgoingId != null && automixOutgoingReadyForIncoming(outgoingId)
+                }?.let { uri ->
                     trackAnalyzer.requestTransitionStems(
                         item.mediaId,
                         uri,
@@ -3984,22 +3979,9 @@ class PlaybackService : MediaSessionService() {
         primeImmediateSuccessorQuality(live)
     }
 
-    /**
-     * Cellular uses staged Automix analysis: A still starts first, but once its
-     * provisional head already has usable beat/entry evidence, B may begin its
-     * own small head pass. The complete A analysis continues in parallel and
-     * supersedes the provisional result before planning whenever it arrives in
-     * time. Wi-Fi keeps the stricter full-analysis ordering.
-     *
-     * C is unaffected by this relaxation because this gate is only evaluated
-     * for the live current -> next pair; C is not next until B has become the
-     * session's current track.
-     */
-    private fun automixOutgoingReadyForIncoming(mediaId: String): Boolean {
-        if (trackAnalyzer.isFullyAnalysed(mediaId)) return true
-        if (AppSettings.meteredConnection.value != true) return false
-        return trackAnalyzer.hasUsableAnalysis(mediaId)
-    }
+    /** A must finish every analysis job before B is eligible, on every network. */
+    private fun automixOutgoingReadyForIncoming(mediaId: String): Boolean =
+        trackAnalyzer.isFullyAnalysed(mediaId) && !trackAnalyzer.isAnalysing(mediaId)
 
     private fun requestAutomixAnalysisFor(player: ExoPlayer, index: Int, item: MediaItem) {
         val uri = item.localConfiguration?.uri ?: return
