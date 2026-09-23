@@ -3786,6 +3786,67 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     return best, candidates[:5]
 
 
+
+def _resilient_plan_fallback(
+    outgoing: dict[str, Any],
+    incoming: dict[str, Any],
+    reason: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Always return one executable 2.5 handoff when candidate search itself fails.
+
+    This is deliberately not an equal-power crossfade. It is the smallest
+    phrase/cut handoff that preserves continuous playback while keeping the
+    server authoritative for the recipe.
+    """
+    duration = max(0.0, _finite(outgoing.get("duration"), 0.0))
+    content_end = _finite(outgoing.get("contentEndTime"), duration)
+    if content_end <= 0.15:
+        content_end = duration if duration > 0.15 else 0.65
+    if duration > 0.0:
+        content_end = min(content_end, duration)
+
+    bpm = _finite(outgoing.get("tailBpm"), _finite(outgoing.get("bpm"), 0.0))
+    beat = 60.0 / bpm if 40.0 <= bpm <= 220.0 else 0.60
+    span = _clamp(beat, 0.45, 1.10)
+    start = max(0.0, content_end - span)
+
+    incoming_duration = max(0.0, _finite(incoming.get("duration"), 0.0))
+    cue = _finite(
+        incoming.get("audibleStartTime"),
+        _finite(incoming.get("mixInTime"), _finite(incoming.get("firstBeat"), 0.0)),
+    )
+    cue = max(0.0, cue)
+    if incoming_duration > 0.25:
+        cue = min(cue, incoming_duration - 0.25)
+
+    has_structure = bool(outgoing.get("downbeats") or outgoing.get("phraseBoundaries"))
+    style = "PHRASE_CUT" if has_structure and span >= 0.60 else "CUT"
+    plan_result = {
+        "style": style,
+        "score": 0.25,
+        "selectionScore": 0.25,
+        "confidence": 0.35,
+        "reason": reason,
+        "transitionStart": round(start, 4),
+        "transitionEnd": round(content_end, 4),
+        "incomingCueTime": round(cue, 4),
+        "incomingHandoffTime": round(cue, 4),
+        "outgoingPlaybackRate": 1.0,
+        "incomingPlaybackRate": 1.0,
+        "transitionBeats": 1,
+        "requestedTransitionBeats": 1,
+        "handoffFraction": 0.86,
+        "bassSwap": False,
+        "bassSwapFraction": 0.70,
+        "filterSweep": 0.0,
+        "gainEnvelope": [],
+        "tempoEnvelope": [],
+        "planner": "orb-automix-2.5-mix-v9",
+        "serverAuthoritative": True,
+    }
+    return plan_result, [dict(plan_result)]
+
+
 @router.post("/plan")
 async def plan(request: PlanRequest) -> dict[str, Any]:
     if request.version > API_VERSION:
@@ -3818,7 +3879,16 @@ async def plan(request: PlanRequest) -> dict[str, Any]:
     else:
         # Candidate search is CPU work. Keep FastAPI's event loop responsive so a
         # plan request is never queued behind another client's Python planning pass.
-        plan_result, candidates = await asyncio.to_thread(_remote_plan, outgoing, incoming)
+        # A planner exception is not allowed to become an HTTP 500 / missing mix:
+        # fall back to a server-authored structural handoff for this pair.
+        try:
+            plan_result, candidates = await asyncio.to_thread(_remote_plan, outgoing, incoming)
+        except Exception:
+            plan_result, candidates = _resilient_plan_fallback(
+                outgoing,
+                incoming,
+                "server-resilient-handoff",
+            )
         _plan_cache_put(cache_key, plan_result, candidates)
     # The selected recipe is a command from the musical planner, not a style hint. Even the
     # minimal fallback is selected here on the server; Android may only reject impossible bounds.
