@@ -1278,6 +1278,7 @@ class PlaybackService : MediaSessionService() {
             },
             stemDeck = { transitionStemDeck },
             analysisRunningFor = { item -> trackAnalyzer.isAnalysing(item.mediaId) },
+            analysisReadyForPlan = { item -> trackAnalyzer.isFullyAnalysed(item.mediaId) },
         )
         crossfade = controller
         controller.start()
