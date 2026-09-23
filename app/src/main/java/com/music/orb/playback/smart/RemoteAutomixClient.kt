@@ -222,11 +222,14 @@ internal object RemoteAutomixClient {
      */
     fun requestPlan(outgoing: TrackAnalysis, incoming: TrackAnalysis): RemoteTransitionDirective? {
         if (!isAvailable() || !outgoing.isUsable || !incoming.isUsable) return null
-        if (outgoing.analysisSchema < REQUIRED_ANALYSIS_SCHEMA ||
-            incoming.analysisSchema < REQUIRED_ANALYSIS_SCHEMA
-        ) return null
+        // A defines the release/mix-out and therefore must be final schema 4.
+        // B may be a trusted opening preview: that is enough to choose an
+        // incoming cue/style while its full-track analysis refines in parallel.
+        if (outgoing.analysisSchema < REQUIRED_ANALYSIS_SCHEMA) return null
 
-        // Normal path: Render just analysed both tracks, so ids are enough.
+        val incomingIsFull = incoming.analysisSchema >= REQUIRED_ANALYSIS_SCHEMA
+
+        // Fastest path when both sides are already in Render's schema-4 cache.
         val compactPayload = JSONObject()
             .put("version", VERSION)
             .put("automixVersion", "2.5")
@@ -236,11 +239,14 @@ internal object RemoteAutomixClient {
             .put("outgoing", JSONObject().put("trackId", outgoing.trackId).put("analysisSchema", outgoing.analysisSchema))
             .put("incoming", JSONObject().put("trackId", incoming.trackId).put("analysisSchema", incoming.analysisSchema))
 
-        val compact = executePlanRequest(compactPayload, allowCacheMiss = true)
-        if (compact.directive != null) return compact.directive
-        if (!compact.cacheMiss) return null
+        if (incomingIsFull) {
+            val compact = executePlanRequest(compactPayload, allowCacheMiss = true)
+            if (compact.directive != null) return compact.directive
+            if (!compact.cacheMiss) return null
+        }
 
-        // If Render restarted and lost its RAM cache, send only the transition
+        // If B is only planning-ready (or Render restarted and lost its RAM cache),
+        // send only the transition windows.
         // windows: the final 90 s of A and the first 90 s of B, plus global
         // tempo/key/landmarks. The middle of either song is irrelevant to A->B.
         val windowPayload = JSONObject()
