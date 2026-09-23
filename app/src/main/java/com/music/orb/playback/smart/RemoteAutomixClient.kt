@@ -86,7 +86,7 @@ internal object RemoteAutomixClient {
     private const val TAG = "OrbRemoteAutomix"
     private const val BASE_URL = "https://orb-4mrh.onrender.com"
     private const val VERSION = 7
-    private const val REQUIRED_PLANNER_REVISION = "mix-v8"
+    private const val REQUIRED_PLANNER_REVISION = "mix-v9"
     private const val REQUIRED_ANALYSIS_SCHEMA = 4
     private const val MAX_REMOTE_AUDIO_BYTES = 24L * 1024L * 1024L
     private const val MAX_PLAN_CURVE_POINTS = 1800
@@ -260,12 +260,14 @@ internal object RemoteAutomixClient {
     private fun parsePlan(plan: JSONObject): RemoteTransitionDirective? {
         if (!plan.optBoolean("serverAuthoritative", false)) return null
         val rawStyle = plan.optString("style").uppercase()
-        val noTransition = rawStyle == "NO_TRANSITION"
-        val style = if (noTransition) TransitionStyle.EQUAL_POWER else parseStyle(rawStyle) ?: return null
-        val start = plan.optDouble("transitionStart", if (noTransition) 0.0 else Double.NaN)
-        val end = plan.optDouble("transitionEnd", if (noTransition) start else Double.NaN)
-        val cue = plan.optDouble("incomingCueTime", if (noTransition) 0.0 else Double.NaN)
-        val handoff = plan.optDouble("incomingHandoffTime", if (noTransition) cue else Double.NaN)
+        // Automix 2.5 never accepts "NO_TRANSITION" during normal playback.
+        // Album-original-order playback is intercepted before remote planning.
+        if (rawStyle == "NO_TRANSITION") return null
+        val style = parseStyle(rawStyle) ?: return null
+        val start = plan.optDouble("transitionStart", Double.NaN)
+        val end = plan.optDouble("transitionEnd", Double.NaN)
+        val cue = plan.optDouble("incomingCueTime", Double.NaN)
+        val handoff = plan.optDouble("incomingHandoffTime", Double.NaN)
         if (!start.isFinite() || !end.isFinite() || !cue.isFinite() || !handoff.isFinite()) return null
         return RemoteTransitionDirective(
             style = style,
