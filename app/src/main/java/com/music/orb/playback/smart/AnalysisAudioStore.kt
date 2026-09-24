@@ -42,6 +42,9 @@ class AnalysisAudioStore(private val context: Context) {
     private val downloadMutex = Mutex()
     private val inFlight = ConcurrentHashMap.newKeySet<String>()
     private val callbacks = ConcurrentHashMap<String, MutableList<(File?) -> Unit>>()
+    private val seekableResolved = ConcurrentHashMap<String, ResolvedSeekable>()
+    private val seekableBlocks =
+        ConcurrentHashMap<String, ConcurrentHashMap<Long, ByteArray>>()
 
     private val directory: File by lazy {
         File(context.cacheDir, DIRECTORY).apply { mkdirs() }
@@ -101,10 +104,107 @@ class AnalysisAudioStore(private val context: Context) {
         }
     }
 
+    /**
+     * Lightweight random-access carrier for schema-6 analysis.
+     *
+     * Unlike [request], this does not download the whole song before analysis can
+     * begin. MediaExtractor reads the exact container ranges it needs for the head
+     * and tail windows; 512 KiB HTTP blocks are cached for the life of the analysis.
+     */
+    data class SeekableSource internal constructor(
+        val label: String,
+        internal val openSource: () -> MediaDataSource?,
+    ) {
+        fun open(): MediaDataSource? = openSource()
+    }
+
+    fun requestSeekable(uri: Uri, onReady: (SeekableSource?) -> Unit) {
+        val videoId = uri.getQueryParameter("v") ?: run {
+            onReady(null)
+            return
+        }
+
+        readyFile(uri)?.let { file ->
+            onReady(
+                SeekableSource("analysis file ${file.name}") {
+                    dataSource(file)
+                },
+            )
+            return
+        }
+
+        if (AppSettings.meteredConnection.value == null) {
+            onReady(null)
+            return
+        }
+
+        val cached = seekableResolved[videoId]
+            ?.takeIf { SystemClock.elapsedRealtime() - it.resolvedAtMs <= SEEKABLE_URL_TTL_MS }
+        if (cached != null) {
+            onReady(seekableSource(videoId, cached))
+            return
+        }
+
+        scope.launch {
+            val resolved = runCatching { resolveSeekable(videoId) }
+                .onFailure { Log.w(TAG, "Automix seekable source resolve failed for $videoId", it) }
+                .getOrNull()
+            if (resolved != null) seekableResolved[videoId] = resolved
+            onReady(resolved?.let { seekableSource(videoId, it) })
+        }
+    }
+
+    /** Resolves B's immutable URL/length while A is being analysed, without downloading B. */
+    fun prewarmSeekable(uri: Uri) {
+        requestSeekable(uri) { /* URL/headers/length cache only */ }
+    }
+
+    fun releaseSeekable(uri: Uri) {
+        val videoId = uri.getQueryParameter("v") ?: return
+        seekableBlocks.remove(videoId)
+    }
+
+    private data class ResolvedSeekable(
+        val url: String,
+        val headers: Map<String, String>,
+        val length: Long,
+        val resolvedAtMs: Long,
+    )
+
+    private suspend fun resolveSeekable(videoId: String): ResolvedSeekable? {
+        val resolvedUrl = StreamResolver.resolve(videoId)
+        val headers = PlayerClient.forStreamUrl(resolvedUrl).mediaHeaders()
+        val total = resolvedUrl.toHttpUrlOrNull()?.queryParameter("clen")?.toLongOrNull()
+            ?.takeIf { it > 0L }
+            ?: probeLength(resolvedUrl, headers)
+            ?: return null
+        if (total < MIN_VALID_BYTES || total > MAX_ANALYSIS_BYTES) return null
+        return ResolvedSeekable(
+            url = resolvedUrl,
+            headers = headers,
+            length = total,
+            resolvedAtMs = SystemClock.elapsedRealtime(),
+        )
+    }
+
+    private fun seekableSource(videoId: String, resolved: ResolvedSeekable): SeekableSource {
+        val blocks = seekableBlocks.computeIfAbsent(videoId) { ConcurrentHashMap() }
+        return SeekableSource("range carrier $videoId") {
+            HttpRangeMediaDataSource(
+                url = resolved.url,
+                headers = resolved.headers,
+                totalBytes = resolved.length,
+                blocks = blocks,
+            )
+        }
+    }
+
     fun discard(uri: Uri): Boolean {
         val videoId = uri.getQueryParameter("v") ?: return false
         val target = fileFor(videoId)
         val partial = partialFor(videoId)
+        seekableBlocks.remove(videoId)
+        seekableResolved.remove(videoId)
         val a = !target.exists() || target.delete()
         val b = !partial.exists() || partial.delete()
         return a && b
@@ -114,6 +214,8 @@ class AnalysisAudioStore(private val context: Context) {
         scope.cancel()
         callbacks.clear()
         inFlight.clear()
+        seekableResolved.clear()
+        seekableBlocks.clear()
     }
 
     private suspend fun download(videoId: String): File? {
@@ -258,6 +360,74 @@ class AnalysisAudioStore(private val context: Context) {
     private fun partialFor(videoId: String): File = File(directory, "${safe(videoId)}.part")
     private fun safe(videoId: String): String = videoId.replace(Regex("[^A-Za-z0-9_-]"), "_")
 
+    private class HttpRangeMediaDataSource(
+        private val url: String,
+        private val headers: Map<String, String>,
+        private val totalBytes: Long,
+        private val blocks: ConcurrentHashMap<Long, ByteArray>,
+    ) : MediaDataSource() {
+
+        @Synchronized
+        override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
+            if (position < 0L || position >= totalBytes || size <= 0) return -1
+            val wanted = minOf(size.toLong(), totalBytes - position).toInt()
+            var copied = 0
+            while (copied < wanted) {
+                val absolute = position + copied
+                val blockIndex = absolute / SEEKABLE_BLOCK_BYTES
+                val blockOffset = (absolute % SEEKABLE_BLOCK_BYTES).toInt()
+                val block = blocks[blockIndex] ?: loadBlock(blockIndex)?.also {
+                    blocks[blockIndex] = it
+                } ?: return if (copied > 0) copied else -1
+                val take = minOf(wanted - copied, block.size - blockOffset)
+                if (take <= 0) return if (copied > 0) copied else -1
+                System.arraycopy(block, blockOffset, buffer, offset + copied, take)
+                copied += take
+            }
+            return copied
+        }
+
+        private fun loadBlock(blockIndex: Long): ByteArray? {
+            val start = blockIndex * SEEKABLE_BLOCK_BYTES
+            if (start >= totalBytes) return null
+            val end = minOf(totalBytes - 1L, start + SEEKABLE_BLOCK_BYTES - 1L)
+            val expected = (end - start + 1L).toInt()
+            val request = Request.Builder()
+                .url(url)
+                .header("Range", "bytes=$start-$end")
+                .apply { headers.forEach { (name, value) -> header(name, value) } }
+                .build()
+
+            return runCatching {
+                Http.client.newCall(request).execute().use { response ->
+                    if (response.code != 206) {
+                        error("analysis seek range HTTP ${response.code} at $start")
+                    }
+                    val contentRange = response.header("Content-Range")
+                        ?: error("analysis seek range missing Content-Range at $start")
+                    val returnedStart = contentRange
+                        .substringAfter("bytes ", "")
+                        .substringBefore('-')
+                        .toLongOrNull()
+                    if (returnedStart != start) {
+                        error("analysis seek range started at $returnedStart, expected $start")
+                    }
+                    val bytes = response.body?.bytes()
+                        ?: error("analysis seek range missing body at $start")
+                    if (bytes.size != expected) {
+                        error("analysis seek range short: ${bytes.size} of $expected at $start")
+                    }
+                    bytes
+                }
+            }.onFailure {
+                Log.d(TAG, "Seekable analysis block failed at $start: ${it.message}")
+            }.getOrNull()
+        }
+
+        override fun getSize(): Long = totalBytes
+        override fun close() = Unit
+    }
+
     private class FileMediaDataSource(file: File) : MediaDataSource() {
         private val random = RandomAccessFile(file, "r")
         private val size = random.length()
@@ -279,6 +449,8 @@ class AnalysisAudioStore(private val context: Context) {
         const val DIRECTORY = "automix-analysis-audio-v1"
         const val CHUNK_BYTES = 2L * 1024L * 1024L
         const val BUFFER_BYTES = 64 * 1024
+        const val SEEKABLE_BLOCK_BYTES = 512L * 1024L
+        const val SEEKABLE_URL_TTL_MS = 5L * 60L * 1000L
         const val MIN_VALID_BYTES = 64L * 1024L
         const val MAX_ANALYSIS_BYTES = 64L * 1024L * 1024L
         const val MAX_RETAINED_FILES = 6
