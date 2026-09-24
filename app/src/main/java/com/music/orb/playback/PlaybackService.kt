@@ -3855,7 +3855,7 @@ class PlaybackService : MediaSessionService() {
      * The transition planner still decides the eventual A -> B recipe later.
      */
     private fun scheduleAutoplayMusicalOrdering(live: ExoPlayer) {
-        if (!AppSettings.autoplay.value || !AppSettings.smartFadeEnabled.value) return
+        if (!AppSettings.autoplay.value) return
         if (crossfade?.isTransitioning() == true) return
         val currentIndex = live.currentMediaItemIndex
         if (currentIndex !in 0 until live.mediaItemCount) return
@@ -3918,7 +3918,7 @@ class PlaybackService : MediaSessionService() {
 
     private fun applyAutoplayMusicalOrder() {
         val live = player ?: return
-        if (!AppSettings.autoplay.value || !AppSettings.smartFadeEnabled.value) return
+        if (!AppSettings.autoplay.value) return
         if (crossfade?.isTransitioning() == true) return
         val currentIndex = live.currentMediaItemIndex
         if (currentIndex !in 0 until live.mediaItemCount) return
