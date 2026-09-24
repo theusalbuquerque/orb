@@ -1904,20 +1904,25 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
         // one. As a local it would nonetheless stay reachable through `tracker.track` and
         // `vocalMask` below, which is where the analysis allocates most heavily and where the
         // process was dying. Same reasoning [derived] already had, one level further out.
-        val inputs = regionInputs(stereo, seconds, deriveFeatures)
+        val inputs = regionInputs(
+            stereo = stereo,
+            seconds = seconds,
+            deriveFeatures = deriveFeatures,
+            preferTailModelWindow = startSeconds > 0.5,
+        )
 
         val maskFeatures = features ?: inputs.derived
         return Region(
-            grid = inputs.forModel?.let { tracker.track(it, offsetSeconds = actualStart) },
-            vocalMask = maskFeatures?.let {
-                vocalMask(
-                    stereo,
+            grid = inputs.forModel?.let {
+                tracker.track(
                     it,
-                    actualStart,
-                    featureOffsetSeconds = if (features == null) actualStart else 0.0,
-                    preferTailCoverage = startSeconds > 0.5,
+                    offsetSeconds = actualStart + inputs.modelOffsetSeconds,
                 )
             },
+            // The native DSP mask already covers the complete 60 s transition
+            // region. Open-Unmix is a refinement and must not hold READY_FOR_PLAN
+            // hostage; real stem/vocal inference can run after the recipe exists.
+            vocalMask = maskFeatures?.vocalActivityMask?.toDoubleArray(),
             seconds = seconds,
             actualStart = actualStart,
             features = inputs.derived,
@@ -1925,7 +1930,11 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
     }
 
     /** A region's model input, and its DSP features when the caller asked for them. */
-    private class RegionInputs(val forModel: FloatArray?, val derived: TrackFeatures.Features?)
+    private class RegionInputs(
+        val forModel: FloatArray?,
+        val modelOffsetSeconds: Double,
+        val derived: TrackFeatures.Features?,
+    )
 
     /**
      * Reduces a decoded region to the buffers the models and the DSP actually read.
@@ -1938,13 +1947,33 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
         stereo: AudioDecoder.StereoPcm,
         seconds: Double,
         deriveFeatures: Boolean,
+        preferTailModelWindow: Boolean,
     ): RegionInputs {
         val mono = FloatArray(stereo.left.size) { index -> (stereo.left[index] + stereo.right[index]) * 0.5f }
-        val forModel = if (abs(stereo.sampleRate - MelSpectrogram.sampleRate) > 1.0) {
-            MelSpectrogram.resample(mono, stereo.sampleRate, MelSpectrogram.sampleRate)
+        // Beat This!'s efficient window is one 1500-frame inference (~30 s).
+        // Running a 60 s region through the model doubles inference work. Keep
+        // TrackFeatures on the full region, but feed Beat This! only the transition-
+        // relevant side: opening for B/head, ending for A/tail.
+        val beatWindowSeconds = minOf(seconds, BeatTracker.WINDOW_SECONDS)
+        val beatWindowSamples = (beatWindowSeconds * stereo.sampleRate)
+            .toInt()
+            .coerceIn(1, mono.size)
+        val beatStartSample = if (preferTailModelWindow) {
+            (mono.size - beatWindowSamples).coerceAtLeast(0)
         } else {
-            mono
+            0
         }
+        val beatMono = if (beatStartSample == 0 && beatWindowSamples == mono.size) {
+            mono
+        } else {
+            mono.copyOfRange(beatStartSample, beatStartSample + beatWindowSamples)
+        }
+        val forModel = if (abs(stereo.sampleRate - MelSpectrogram.sampleRate) > 1.0) {
+            MelSpectrogram.resample(beatMono, stereo.sampleRate, MelSpectrogram.sampleRate)
+        } else {
+            beatMono
+        }
+        val modelOffsetSeconds = beatStartSample / stereo.sampleRate
 
         // Derived here rather than by the caller so the mono buffer is still
         // live: handing it back would keep several megabytes reachable for the
@@ -1961,13 +1990,13 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
             null
         }
 
-        return RegionInputs(forModel, derived)
+        return RegionInputs(forModel, modelOffsetSeconds, derived)
     }
 
     /**
-     * Builds a full transition-window vocal curve without making Open-Unmix process all 60-90 s.
+     * Optional refinement path for a transition-window vocal curve. The critical schema-6 pass
      *
-     * The native DSP mask is the baseline for the whole region. Open-Unmix then overwrites the
+     * uses the native DSP mask directly; Open-Unmix can later overwrite the
      * transition-critical probes it actually measured: the opening of an incoming track, the real
      * ending of an outgoing track, and one late-intro probe when B exposes a long runway. This
      * keeps the expensive model bounded while avoiding the old failure mode where every unmeasured
