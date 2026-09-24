@@ -2469,8 +2469,15 @@ private fun validatedRemoteDirective(
         incomingPitchSemitones = remote.incomingPitchSemitones,
         harmonicLockScore = remote.harmonicLockScore,
         vocalOverlap = vocalOverlap,
-        outgoingBpm = analysis.bpm.orZero(),
-        incomingBpm = nextAnalysis.bpm.orZero(),
+        // Use the server's local/folded transition tempi when available.
+        // Global BPM can be an octave away (for example 64 vs 128) or simply
+        // differ from the actual tail/head tempo used to author the recipe.
+        outgoingBpm = remote.outgoingLocalBpm
+            .takeIf { it in 40.0..220.0 }
+            ?: analysis.bpm.orZero(),
+        incomingBpm = remote.incomingLocalBpm
+            .takeIf { it in 40.0..220.0 }
+            ?: nextAnalysis.bpm.orZero(),
         transitionStyle = remote.style,
         reason = if (started) "server-authoritative-v5-${remote.reason}" else "before-server-authoritative-v5-${remote.reason}",
     )
