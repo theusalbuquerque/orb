@@ -699,6 +699,193 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
     }
 
     /**
+     * Fast authoritative pass for the currently playing/outgoing track.
+     *
+     * A -> B planning needs A.TAIL, not A.HEAD. This avoids paying for a second
+     * 60 s region before B is even allowed to start its cheap head preview.
+     */
+    @Synchronized
+    fun requestOutgoingTail(trackId: String, uri: Uri, durationSeconds: Double) {
+        if (trackId.isBlank()) return
+        restoreOnce(trackId)
+
+        val recorded = results[trackId]
+        if (recorded?.isUsable == true &&
+            trackId !in provisional &&
+            recorded.analysisSchema >= REMOTE_CURVE_SCHEMA &&
+            recorded.tailKey.isNotBlank() &&
+            recorded.energyCurve.any { it.time >= durationSeconds - LOCAL_TRANSITION_WINDOW_SECONDS - 2.0 }
+        ) return
+
+        if (trackId in running || reliablePending.isNotEmpty()) return
+        if (!reliablePending.add(trackId)) return
+
+        reliableAudio.requestSeekable(uri) { seekable ->
+            synchronized(this@TrackAnalyzer) {
+                if (seekable == null) {
+                    reliablePending.remove(trackId)
+                    deferReliableRetry(trackId)
+                    return@requestSeekable
+                }
+                reliableFailures.remove(trackId)
+                reliableRetryAt.remove(trackId)
+                try {
+                    scheduleOutgoingTailAnalysis(trackId, uri, durationSeconds, seekable)
+                } finally {
+                    reliablePending.remove(trackId)
+                }
+            }
+        }
+    }
+
+    private fun scheduleOutgoingTailAnalysis(
+        trackId: String,
+        uri: Uri,
+        durationSeconds: Double,
+        source: AnalysisAudioStore.SeekableSource,
+    ) {
+        if (!running.add(trackId)) return
+        executor.execute {
+            val started = SystemClock.elapsedRealtime()
+            try {
+                val analysis = analyzeTailSource(
+                    trackId = trackId,
+                    durationSeconds = durationSeconds,
+                    openSource = { source.open() },
+                )
+                if (analysis?.isUsable == true) {
+                    results[trackId] = analysis
+                    provisional.remove(trackId)
+                    store.save(trackId, analysis)
+                    restoreAttempted.add(trackId)
+                    notifyAnalysisUpdated(trackId)
+                    Log.d(
+                        TAG,
+                        "TAIL-ready $trackId in ${SystemClock.elapsedRealtime() - started}ms " +
+                            "bpm=${analysis.bpm} conf=${analysis.beatConfidence}",
+                    )
+                } else {
+                    deferReliableRetry(trackId)
+                }
+            } catch (error: Throwable) {
+                Log.w(TAG, "TAIL analysis of $trackId failed", error)
+                deferReliableRetry(trackId)
+            } finally {
+                reliableAudio.releaseSeekable(uri)
+                running.remove(trackId)
+                if (running.isEmpty()) {
+                    tracker.release()
+                    vocals.release()
+                }
+            }
+        }
+    }
+
+    private fun analyzeTailSource(
+        trackId: String,
+        durationSeconds: Double,
+        openSource: () -> MediaDataSource?,
+    ): TrackAnalysis? {
+        var effectiveDuration = durationSeconds
+        if (!effectiveDuration.isFinite() || effectiveDuration <= 0.0) {
+            effectiveDuration = openSource()?.use(AudioDecoder::containerDurationSeconds) ?: 0.0
+        }
+        if (effectiveDuration <= 0.0) return null
+
+        val window = minOf(LOCAL_TRANSITION_WINDOW_SECONDS, effectiveDuration)
+        val tailStart = max(0.0, effectiveDuration - window)
+        val tail = region(
+            openSource = openSource,
+            startSeconds = tailStart,
+            endSeconds = effectiveDuration,
+            features = null,
+            deriveFeatures = true,
+        ) ?: return null
+        val features = tail.features ?: return null
+        val grid = tail.grid
+
+        fun shift(value: Double): Double =
+            if (value.isFinite() && value > 0.0) value + tail.actualStart else value
+        fun shiftEnergy(values: List<EnergySample>): List<EnergySample> =
+            values.map { EnergySample(it.time + tail.actualStart, it.energy) }
+        fun shiftCandidates(values: List<MixCandidate>): List<MixCandidate> =
+            values.map { it.copy(time = it.time + tail.actualStart) }
+
+        val energy = shiftEnergy(features.energyCurve)
+        val low = shiftEnergy(features.lowEnergyCurve)
+        val mid = shiftEnergy(features.midEnergyCurve)
+        val high = shiftEnergy(features.highEnergyCurve)
+        val brightness = energy.mapIndexed { index, point ->
+            val lo = low.getOrNull(index)?.energy ?: 0.0
+            val mi = mid.getOrNull(index)?.energy ?: point.energy
+            val hi = high.getOrNull(index)?.energy ?: 0.0
+            val total = lo + mi + hi
+            EnergySample(point.time, if (total > 1e-9) (hi + 0.35 * mi) / total else 0.0)
+        }
+        var previous = 0.0
+        val onset = energy.map { point ->
+            val value = max(0.0, point.energy - previous)
+            previous = point.energy
+            EnergySample(point.time, value)
+        }
+        val vocal = (tail.vocalMask?.toList() ?: features.vocalActivityMask)
+            .take(features.energyCurve.size)
+
+        return TrackAnalysis(
+            status = TrackAnalysis.STATUS_READY,
+            trackId = trackId,
+            analysisSchema = LOCAL_METADATA_SCHEMA,
+            duration = effectiveDuration,
+            bpm = grid?.bpm ?: features.bpm,
+            beatInterval = grid?.beatInterval ?: features.beatInterval,
+            beatConfidence = grid?.beatConfidence ?: features.beatConfidence,
+            beats = grid?.beats.orEmpty(),
+            tempoCurve = grid?.let {
+                listOf(
+                    TempoSample(
+                        tail.actualStart + tail.seconds * 0.5,
+                        it.bpm,
+                        it.beatConfidence,
+                    ),
+                )
+            }.orEmpty(),
+            downbeats = grid?.downbeats ?: features.downbeats.map { it + tail.actualStart },
+            phraseBoundaries = features.phraseBoundaries.map { it + tail.actualStart },
+            firstBeat = grid?.firstBeat ?: shift(features.firstBeat),
+            key = features.key,
+            keyConfidence = features.keyConfidence,
+            tailKey = features.key,
+            tailKeyConfidence = features.keyConfidence,
+            contentEndTime = shift(features.contentEndTime).takeIf { it > 0.0 } ?: effectiveDuration,
+            outroStartTime = shift(features.outroStartTime),
+            mixOutTime = shift(features.mixOutTime),
+            mixOutCandidates = shiftCandidates(features.mixOutCandidates),
+            energyCurve = energy,
+            lowEnergyCurve = low,
+            midEnergyCurve = mid,
+            highEnergyCurve = high,
+            brightnessCurve = brightness,
+            onsetCurve = onset,
+            chromaCurve = if (features.chroma.size == 12) {
+                listOf(
+                    ChromaSample(
+                        tail.actualStart + tail.seconds * 0.5,
+                        features.chroma,
+                    ),
+                )
+            } else {
+                emptyList()
+            },
+            vocalActivityMask = if (vocal.size == energy.size) {
+                vocal
+            } else {
+                List(energy.size) { index -> vocal.getOrElse(index) { NEUTRAL_VOCAL } }
+            },
+            vocalProbability = features.vocalProbability,
+        )
+    }
+
+    /**
      * Starts a best-effort real stem separation for B's transition window.
      *
      * It reuses the same immutable analysis carrier already used by Automix. The expensive work
