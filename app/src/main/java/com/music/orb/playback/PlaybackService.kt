@@ -4070,9 +4070,14 @@ class PlaybackService : MediaSessionService() {
         primeImmediateSuccessorQuality(live)
     }
 
-    /** A must finish every analysis job before B is eligible, on every network. */
+    /**
+     * B may start as soon as A has enough transition evidence to plan A -> B.
+     * Refinements that do not change readiness must not serialize the pair for
+     * another tens of seconds. The A -> B ordering is preserved because B is
+     * still gated on A reaching READY_FOR_PLAN first.
+     */
     private fun automixOutgoingReadyForIncoming(mediaId: String): Boolean =
-        trackAnalyzer.isFullyAnalysed(mediaId) && !trackAnalyzer.isAnalysing(mediaId)
+        trackAnalyzer.isReadyForPlan(mediaId, incoming = false)
 
     private fun requestAutomixAnalysisFor(player: ExoPlayer, index: Int, item: MediaItem) {
         val uri = item.localConfiguration?.uri ?: return
