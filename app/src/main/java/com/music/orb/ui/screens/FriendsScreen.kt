@@ -479,20 +479,24 @@ fun FriendsScreen(
                         } else {
                             itemsIndexed(
                                 items = artistRanking,
-                                key = { _, entry -> "artist-ranking:${entry.stableKey}" },
+                                // Period is part of visual identity. Reusing the same
+                                // artist key across Week/Month/etc can visually preserve
+                                // the previous period row in the new slot.
+                                key = { _, entry -> "artist-ranking:${statsPeriod.name}:${entry.stableKey}" },
                             ) { index, entry ->
+                                val rowKey = "artist-ranking:${statsPeriod.name}:${entry.stableKey}"
                                 ArtistRankingEntrance(
                                     index = index,
                                     listState = listState,
-                                    itemKey = "artist-ranking:${entry.stableKey}",
+                                    itemKey = rowKey,
+                                    animationKey = "${statsPeriod.name}:$index:${entry.stableKey}",
                                 ) {
                                     ArtistRankingRow(
                                         entry = entry,
                                         modifier = Modifier.animateItem(),
                                     )
                                 }
-                            }
-                        }
+                            }                        }
                     }
 
                     else -> {
@@ -1687,14 +1691,16 @@ private fun ArtistRankingEntrance(
     index: Int,
     listState: LazyListState,
     itemKey: String,
+    animationKey: String,
     content: @Composable () -> Unit,
 ) {
-    val progress = remember { Animatable(0f) }
+    val progress = remember(animationKey) { Animatable(0f) }
     val density = LocalDensity.current
     val minFadeDistancePx = with(density) { 72.dp.toPx() }
     val topOcclusionPx = with(density) { 144.dp.toPx() }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(animationKey) {
+        progress.snapTo(0f)
         delay((index * 72L).coerceAtMost(720L))
         progress.animateTo(
             targetValue = 1f,
