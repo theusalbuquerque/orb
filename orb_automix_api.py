@@ -110,7 +110,7 @@ def _plan_cache_key(outgoing: dict[str, Any], incoming: dict[str, Any]) -> str:
             f"{_finite(track.get('mixOutTime')):.3f}",
             f"{_finite(track.get('contentEndTime')):.3f}",
         ])
-    return f"mix-v10::{fingerprint(outgoing)}>>{fingerprint(incoming)}"
+    return f"mix-v11::{fingerprint(outgoing)}>>{fingerprint(incoming)}"
 
 
 def _plan_cache_get(key: str) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
@@ -1164,7 +1164,7 @@ async def health() -> dict[str, Any]:
         "version": API_VERSION,
         "automixVersion": "2.5",
         "analyzer": "orb-metadata-planner-v8",
-        "plannerRevision": "mix-v10",
+        "plannerRevision": "mix-v11",
         "analysisSchema": ANALYSIS_SCHEMA,
     }
 
@@ -1666,6 +1666,138 @@ def _value_near(points: list[tuple[float, float]], time_s: float, default: float
     if not points:
         return default
     return min(points, key=lambda p: abs(p[0] - time_s))[1]
+
+
+def _smooth_unit(value: float) -> float:
+    t = _clamp(value, 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _adaptive_overlap_gain_envelope(
+    a: dict[str, Any],
+    b: dict[str, Any],
+    a_start: float,
+    a_end: float,
+    b_start: float,
+    outgoing_rate: float,
+    incoming_rate: float,
+    handoff_fraction: float,
+    filter_strength: float = 0.0,
+) -> tuple[list[dict[str, float]], float, float]:
+    """Derive deck gains from the actual overlapping material.
+
+    No fixed BED/BUILD/IMPACT percentages live here. At every point we ask how
+    much room A leaves, how useful B is at that moment, and whether vocals,
+    transients or spectral bands would mask each other. A filter can relieve
+    spectral masking, but never excuses a vocal collision.
+    """
+    if a_end <= a_start:
+        return [], 0.0, 1.0
+
+    a_energy = _curve(a, "energyCurve")
+    b_energy = _curve(b, "energyCurve")
+    a_vocal = _vocal_curve(a)
+    b_vocal = _vocal_curve(b)
+    a_low = _curve(a, "lowEnergyCurve")
+    b_low = _curve(b, "lowEnergyCurve")
+    a_mid = _curve(a, "midEnergyCurve")
+    b_mid = _curve(b, "midEnergyCurve")
+    a_high = _curve(a, "highEnergyCurve")
+    b_high = _curve(b, "highEnergyCurve")
+    a_onset = _curve(a, "onsetCurve")
+    b_onset = _curve(b, "onsetCurve")
+
+    wall_seconds = (a_end - a_start) / max(outgoing_rate, 1e-6)
+    probe = _clamp(wall_seconds / 36.0, 0.35, 1.35)
+    filter_relief = _clamp(filter_strength, 0.0, 1.0) * 0.55
+    points: list[dict[str, float]] = []
+    mixability_samples: list[float] = []
+    clutter_samples: list[float] = []
+
+    for index in range(17):
+        progress = index / 16.0
+        wall = wall_seconds * progress
+        a_time = a_start + wall * outgoing_rate
+        b_time = b_start + wall * incoming_rate
+
+        ae = _mean_window(a_energy, max(0.0, a_time - probe), a_time + probe, 0.5)
+        be = _mean_window(b_energy, max(0.0, b_time - probe), b_time + probe, 0.45)
+        av = _mean_window(a_vocal, max(0.0, a_time - probe), a_time + probe, _finite(a.get("vocalProbability"), 0.5))
+        bv = _mean_window(b_vocal, max(0.0, b_time - probe), b_time + probe, _finite(b.get("vocalProbability"), 0.5))
+        al = _mean_window(a_low, max(0.0, a_time - probe), a_time + probe, ae)
+        bl = _mean_window(b_low, max(0.0, b_time - probe), b_time + probe, be)
+        am = _mean_window(a_mid, max(0.0, a_time - probe), a_time + probe, ae)
+        bm = _mean_window(b_mid, max(0.0, b_time - probe), b_time + probe, be)
+        ah = _mean_window(a_high, max(0.0, a_time - probe), a_time + probe, ae)
+        bh = _mean_window(b_high, max(0.0, b_time - probe), b_time + probe, be)
+        ao = _mean_window(a_onset, max(0.0, a_time - probe), a_time + probe, 0.0)
+        bo = _mean_window(b_onset, max(0.0, b_time - probe), b_time + probe, 0.0)
+
+        spectral_collision = _clamp((min(al, bl) + min(am, bm) + min(ah, bh)) / 3.0, 0.0, 1.0)
+        vocal_collision = min(av, bv)
+        transient_collision = min(ao, bo)
+        density_collision = min(ae, be)
+        non_vocal_collision = _clamp(
+            0.46 * spectral_collision + 0.31 * density_collision + 0.23 * transient_collision,
+            0.0,
+            1.0,
+        )
+        effective_collision = _clamp(
+            0.58 * vocal_collision + 0.42 * non_vocal_collision * (1.0 - filter_relief),
+            0.0,
+            1.0,
+        )
+
+        a_foreground = _clamp(0.58 * av + 0.27 * ae + 0.15 * max(al, am, ah), 0.0, 1.0)
+        b_presence = _clamp(0.44 * be + 0.28 * max(bl, bm, bh) + 0.18 * bo + 0.10 * (1.0 - bv), 0.0, 1.0)
+        room_for_b = _clamp(1.0 - 0.72 * a_foreground - 0.62 * effective_collision, 0.0, 1.0)
+        mixability = _clamp(room_for_b * (0.35 + 0.65 * b_presence), 0.0, 1.0)
+        mixability_samples.append(mixability)
+        clutter_samples.append(effective_collision)
+
+        # The underlay is evidence-driven: it can stay nearly silent, share the
+        # foreground, or anything between. There is intentionally no fixed 10/30/60 ladder.
+        attack = _smooth_unit(wall / max(1.5, min(8.0, wall_seconds * 0.16)))
+        underlay = _clamp(attack * mixability, 0.0, 0.96)
+
+        # Structural handoff remains a musical anchor, but it only governs who
+        # owns the end of the mix. It does not prescribe B's level beforehand.
+        takeover_start = _clamp(handoff_fraction - 0.10 - 0.12 * room_for_b, 0.0, 0.98)
+        takeover = _smooth_unit(
+            (progress - takeover_start) / max(1e-6, 1.0 - takeover_start)
+        )
+
+        # If A becomes sparse/instrumental while B is useful, allow an earlier
+        # shared foreground. If A is still vocal/dense, it stays dominant.
+        shared_claim = _clamp(
+            b_presence * (1.0 - av) * (1.0 - effective_collision) - 0.32 * a_foreground,
+            0.0,
+            1.0,
+        )
+        incoming = _clamp(
+            underlay * (1.0 - takeover) + takeover + 0.22 * shared_claim * (1.0 - takeover),
+            0.0,
+            1.0,
+        )
+
+        dynamic_duck = _clamp(
+            incoming * shared_claim * (1.0 - av) * (0.15 + 0.35 * room_for_b),
+            0.0,
+            0.32,
+        )
+        outgoing = _clamp((1.0 - dynamic_duck) * (1.0 - takeover), 0.0, 1.0)
+
+        points.append({
+            "progress": round(progress, 4),
+            "incomingGain": round(incoming, 4),
+            "outgoingGain": round(outgoing, 4),
+        })
+
+    points[0] = {"progress": 0.0, "incomingGain": 0.0, "outgoingGain": 1.0}
+    points[-1] = {"progress": 1.0, "incomingGain": 1.0, "outgoingGain": 0.0}
+    mixability = float(sum(mixability_samples) / max(1, len(mixability_samples)))
+    clutter = float(sum(clutter_samples) / max(1, len(clutter_samples)))
+    return points, _clamp(mixability, 0.0, 1.0), _clamp(clutter, 0.0, 1.0)
 
 
 def _first_sustained_vocal(track: dict[str, Any]) -> float | None:
@@ -4231,7 +4363,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
             4,
         )
 
-    best["planner"] = "orb-automix-2.5-mix-v10"
+    best["planner"] = "orb-automix-2.5-mix-v11"
     best["serverAuthoritative"] = True
     return best, candidates[:5]
 
@@ -4291,7 +4423,7 @@ def _resilient_plan_fallback(
         "filterSweep": 0.0,
         "gainEnvelope": [],
         "tempoEnvelope": [],
-        "planner": "orb-automix-2.5-mix-v10",
+        "planner": "orb-automix-2.5-mix-v11",
         "serverAuthoritative": True,
     }
     return plan_result, [dict(plan_result)]
@@ -4344,7 +4476,7 @@ async def plan(request: PlanRequest) -> dict[str, Any]:
     # minimal fallback is selected here on the server; Android may only reject impossible bounds.
     plan_result = dict(plan_result)
     plan_result["serverAuthoritative"] = True
-    plan_result["planner"] = "orb-automix-2.5-mix-v10"
+    plan_result["planner"] = "orb-automix-2.5-mix-v11"
     return {
         "version": API_VERSION,
         "automixVersion": "2.5",
