@@ -2127,7 +2127,7 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
         /** Server analysis schema required by curve-aware Automix 2.5 mix-v6. */
         const val REMOTE_CURVE_SCHEMA = 6
         const val LOCAL_METADATA_SCHEMA = 6
-        const val LOCAL_TRANSITION_WINDOW_SECONDS = 90.0
+        const val LOCAL_TRANSITION_WINDOW_SECONDS = 60.0
         const val READY_FOR_PLAN_MIN_BEAT_CONFIDENCE = 0.45
         const val TAG = "BitChordTrackAnalyzer"
 
