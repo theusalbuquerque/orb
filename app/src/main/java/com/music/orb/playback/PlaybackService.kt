@@ -4043,7 +4043,7 @@ class PlaybackService : MediaSessionService() {
 
         if (item.mediaId == current.mediaId) {
             item.localConfiguration?.uri?.let { uri ->
-                trackAnalyzer.requestReliable(item.mediaId, uri, durationMs / 1000.0)
+                trackAnalyzer.requestOutgoingTail(item.mediaId, uri, durationMs / 1000.0)
             }
             return
         }
@@ -4065,7 +4065,6 @@ class PlaybackService : MediaSessionService() {
                     durationMs / 1000.0,
                 )
             }
-            trackAnalyzer.requestReliable(item.mediaId, uri, durationMs / 1000.0)
         }
         primeImmediateSuccessorQuality(live)
     }
@@ -4094,7 +4093,12 @@ class PlaybackService : MediaSessionService() {
                 ?.times(1000L)
             ?: 0L
 
-        trackAnalyzer.requestReliable(item.mediaId, uri, durationMs / 1000.0)
+        val currentIndex = player.currentMediaItemIndex
+        if (index == currentIndex) {
+            trackAnalyzer.requestOutgoingTail(item.mediaId, uri, durationMs / 1000.0)
+        } else {
+            trackAnalyzer.requestQueuePreview(item.mediaId, uri, durationMs / 1000.0)
+        }
     }
 
     /**
