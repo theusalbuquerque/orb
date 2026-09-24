@@ -309,8 +309,8 @@ class CrossfadeController(
     private val PHASE_LOCK_CAPTURE_MS = 1_800.0
     private val PHASE_LOCK_MAX_DELTA = 0.012
     private val PHASE_LOCK_DEADBAND_MS = 3.0
-    private val PHASE_LOCK_MIN_RATE = 0.95
-    private val PHASE_LOCK_MAX_RATE = 1.05
+    private val PHASE_LOCK_MIN_RATE = 0.94
+    private val PHASE_LOCK_MAX_RATE = 1.06
     private val PHASE_LOCK_LOG_PROGRESS = 0.08f
 
     private var phaseLockPeakErrorMs = 0.0
@@ -331,6 +331,10 @@ class CrossfadeController(
         val gainEnvelope: List<TransitionGainPoint> = emptyList(),
         val tempoEnvelope: List<TransitionTempoPoint> = emptyList(),
         val incomingPitchSemitones: Double = 0.0,
+        val initialBeatPhaseOffsetMs: Double = 0.0,
+        val outgoingBpm: Double = 0.0,
+        val incomingBpm: Double = 0.0,
+        val beatLockEnabled: Boolean = false,
         /** Dynamic release point for INTRO_BED after A's last measured lead vocal. */
         val handoffFraction: Double = 0.66,
         /** True only for a server-authored Premium Automix 2.5 recipe. */
@@ -968,6 +972,10 @@ class CrossfadeController(
                 gainEnvelope = plan.gainEnvelope,
                 tempoEnvelope = plan.tempoEnvelope,
                 incomingPitchSemitones = plan.incomingPitchSemitones,
+                initialBeatPhaseOffsetMs = initialBeatPhaseOffsetMs(currentAnalysis, nextAnalysis, plan),
+                outgoingBpm = plan.outgoingBpm,
+                incomingBpm = plan.incomingBpm,
+                beatLockEnabled = shouldBeatLock(plan, currentAnalysis, nextAnalysis),
                 handoffFraction = plan.handoffFraction,
                 automix25 = useAutomix25,
             ),
@@ -2491,19 +2499,47 @@ class CrossfadeController(
         return null
     }
 
-    /** Families whose identity depends on A and B sharing a beat grid. */
-    private fun usesTempoBridgeStyle(): Boolean {
-        if (!render.automix25) return false
-        if (render.tempoEnvelope.isNotEmpty()) return true
-        return when (render.style) {
-            TransitionStyle.RUNWAY_BLEND,
-            TransitionStyle.PHRASE_TAKEOVER,
-            TransitionStyle.DJ_BLEND,
-            TransitionStyle.DJ_FILTER,
-            TransitionStyle.EQ_SWAP -> true
-            else -> false
-        }
+    private fun shouldBeatLock(
+        plan: com.music.orb.playback.smart.TransitionPlan,
+        outgoingAnalysis: TrackAnalysis,
+        incomingAnalysis: TrackAnalysis,
+    ): Boolean {
+        if (plan.transitionStyle == TransitionStyle.CUT ||
+            plan.transitionStyle == TransitionStyle.PHRASE_CUT ||
+            plan.transitionStyle == TransitionStyle.EQUAL_POWER ||
+            plan.transitionStyle == TransitionStyle.GAPLESS
+        ) return false
+        val outgoingGrid = if (outgoingAnalysis.beats.isNotEmpty()) outgoingAnalysis.beats else outgoingAnalysis.downbeats
+        val incomingGrid = if (incomingAnalysis.beats.isNotEmpty()) incomingAnalysis.beats else incomingAnalysis.downbeats
+        val bpmA = plan.outgoingBpm.takeIf { it in 40.0..220.0 }
+            ?: outgoingAnalysis.bpm.takeIf { it in 40.0..220.0 }
+        val bpmB = plan.incomingBpm.takeIf { it in 40.0..220.0 }
+            ?: incomingAnalysis.bpm.takeIf { it in 40.0..220.0 }
+        return outgoingGrid.isNotEmpty() && incomingGrid.isNotEmpty() && bpmA != null && bpmB != null
     }
+
+    private fun initialBeatPhaseOffsetMs(
+        outgoingAnalysis: TrackAnalysis,
+        incomingAnalysis: TrackAnalysis,
+        plan: com.music.orb.playback.smart.TransitionPlan,
+    ): Double {
+        val outgoingGrid = if (outgoingAnalysis.beats.isNotEmpty()) outgoingAnalysis.beats else outgoingAnalysis.downbeats
+        val incomingGrid = if (incomingAnalysis.beats.isNotEmpty()) incomingAnalysis.beats else incomingAnalysis.downbeats
+        if (outgoingGrid.isEmpty() || incomingGrid.isEmpty()) return 0.0
+        val aTime = plan.transitionStart
+        val bTime = plan.incomingCueTime
+        val aBeat = outgoingGrid.minByOrNull { abs(it - aTime) } ?: return 0.0
+        val bBeat = incomingGrid.minByOrNull { abs(it - bTime) } ?: return 0.0
+        val aRate = plan.outgoingPlaybackRate.coerceIn(0.90, 1.10)
+        val bRate = plan.incomingPlaybackRate.coerceIn(0.90, 1.10)
+        val aOffsetWall = (aTime - aBeat) / aRate.coerceAtLeast(1e-6)
+        val bOffsetWall = (bTime - bBeat) / bRate.coerceAtLeast(1e-6)
+        return ((bOffsetWall - aOffsetWall) * 1000.0).coerceIn(-500.0, 500.0)
+    }
+
+    /** Any 2.5 overlap with a trustworthy pair of beat grids uses the central beat lock. */
+    private fun usesTempoBridgeStyle(): Boolean =
+        render.automix25 && render.beatLockEnabled
 
     /**
      * Follow the server tempo curves and bounded harmonic correction through the overlap.
@@ -2511,29 +2547,28 @@ class CrossfadeController(
     private fun rideTempoBridge(progress: Float, out: ExoPlayer, into: ExoPlayer) {
         val base = AppSettings.playbackSpeed.value.toDouble().coerceAtLeast(0.01)
         val handoff = render.handoffFraction.toFloat().coerceIn(0.42f, 0.97f)
-        val releaseStart = maxOf(TEMPO_RELEASE_MIN, (handoff + 0.06f).coerceAtMost(0.92f))
-        val release = smoothStep(
-            ((progress - releaseStart) / (1f - releaseStart)).coerceIn(0f, 1f),
-        ).toDouble()
+        val phaseLockUntil = maxOf(
+            TEMPO_RELEASE_MIN,
+            (handoff + 0.18f).coerceAtMost(0.985f),
+        )
 
         if (!render.automix25) {
-            val release = smoothStep(releaseStart, 1f, progress).toDouble()
             out.setPlaybackSpeed((base * outgoingPlaybackRate).toFloat())
-            into.setPlaybackSpeed((base * (incomingPlaybackRate + (1.0 - incomingPlaybackRate) * release)).toFloat())
+            into.setPlaybackSpeed((base * incomingPlaybackRate).toFloat())
             return
         }
         val frame = tempoFrameAt(progress)
         val curveOutRate = (frame?.outgoingRate ?: outgoingPlaybackRate).coerceIn(0.94, 1.06)
         val curveInRate = (frame?.incomingRate ?: incomingPlaybackRate).coerceIn(0.94, 1.06)
-        val outBpm = frame?.outgoingBpm ?: 0.0
-        val inBpm = frame?.incomingBpm ?: 0.0
+        val outBpm = frame?.outgoingBpm?.takeIf { it > 0.0 } ?: render.outgoingBpm
+        val inBpm = frame?.incomingBpm?.takeIf { it > 0.0 } ?: render.incomingBpm
 
         setDeckPlayback(out, speed = base * curveOutRate, pitchSemitones = 0.0)
 
-        val nominalIncomingRate = curveInRate + (1.0 - curveInRate) * release
+        val nominalIncomingRate = curveInRate
         val phaseCorrection = phaseLockCorrection(
             progress = progress,
-            releaseStart = releaseStart,
+            releaseStart = phaseLockUntil,
             baseRate = base,
             out = out,
             into = into,
@@ -2544,7 +2579,7 @@ class CrossfadeController(
         )
         val correctedIncomingRate = (nominalIncomingRate * (1.0 + phaseCorrection))
             .coerceIn(PHASE_LOCK_MIN_RATE, PHASE_LOCK_MAX_RATE)
-        val pitchSemitones = render.incomingPitchSemitones.coerceIn(-1.0, 1.0) * (1.0 - release)
+        val pitchSemitones = render.incomingPitchSemitones.coerceIn(-1.0, 1.0)
         setDeckPlayback(
             into,
             speed = base * correctedIncomingRate,
@@ -2563,21 +2598,13 @@ class CrossfadeController(
         outgoingBpm: Double,
         incomingBpm: Double,
     ): Double {
-        val beatMatchedStyle = when (render.style) {
-            TransitionStyle.RUNWAY_BLEND,
-            TransitionStyle.PHRASE_TAKEOVER,
-            TransitionStyle.DJ_BLEND,
-            TransitionStyle.DJ_FILTER,
-            TransitionStyle.EQ_SWAP -> true
-            else -> false
-        }
-        if (!smartFadeActive || !beatMatchedStyle || progress >= releaseStart) return 0.0
+        if (!smartFadeActive || !render.beatLockEnabled || progress >= releaseStart) return 0.0
 
         val transitionStartMs = fadeStartMs.coerceAtLeast(0L)
         val outMediaElapsed = (out.currentPosition - transitionStartMs).coerceAtLeast(0L).toDouble()
         val inMediaElapsed = (into.currentPosition - incomingCueTimeMs).coerceAtLeast(0L).toDouble()
 
-        val errorMs = if (outgoingBpm > 0.0 && incomingBpm > 0.0) {
+        val dynamicErrorMs = if (outgoingBpm > 0.0 && incomingBpm > 0.0) {
             val outBeats = outMediaElapsed * outgoingBpm / 60_000.0
             val inBeats = inMediaElapsed * incomingBpm / 60_000.0
             var cycleError = inBeats - outBeats
@@ -2591,6 +2618,7 @@ class CrossfadeController(
             val inElapsedMs = inMediaElapsed / (baseRate * incomingRate).coerceAtLeast(0.01)
             inElapsedMs - outElapsedMs
         }
+        val errorMs = render.initialBeatPhaseOffsetMs + dynamicErrorMs
         phaseLockPeakErrorMs = maxOf(phaseLockPeakErrorMs, abs(errorMs))
 
         if (!phaseLockLogged && progress >= PHASE_LOCK_LOG_PROGRESS) {
