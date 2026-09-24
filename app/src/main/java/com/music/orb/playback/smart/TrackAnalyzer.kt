@@ -589,7 +589,9 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
     fun prewarmReliableAudio(uri: Uri) {
         if (AppSettings.wifiConnection.value != true) return
         if (uri.getQueryParameter("v").isNullOrBlank()) return
-        reliableAudio.request(uri) { /* byte-only prewarm; requestReliable owns analysis */ }
+        // Resolve URL/headers/length only. Schema-6 analysis itself will fetch
+        // just the head/tail byte ranges it needs when B becomes eligible.
+        reliableAudio.prewarmSeekable(uri)
     }
 
     /**
@@ -677,21 +679,21 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
         if (!reliablePending.add(trackId)) return
 
         NerdStats.onAutomixAnalysisSource(trackId, NerdStats.AutomixAnalysisSource.RELIABLE_DOWNLOAD)
-        reliableAudio.request(uri) { file ->
+        reliableAudio.requestSeekable(uri) { seekable ->
             synchronized(this@TrackAnalyzer) {
-            if (file == null) {
-                NerdStats.onAutomixAnalysisSource(trackId, NerdStats.AutomixAnalysisSource.FAILED)
-                deferReliableRetry(trackId)
-                reliablePending.remove(trackId)
-                return@request
-            }
-            reliableFailures.remove(trackId)
-            reliableRetryAt.remove(trackId)
-            try {
-                scheduleReliableAnalysis(trackId, uri, durationSeconds, file)
-            } finally {
-                reliablePending.remove(trackId)
-            }
+                if (seekable == null) {
+                    NerdStats.onAutomixAnalysisSource(trackId, NerdStats.AutomixAnalysisSource.FAILED)
+                    deferReliableRetry(trackId)
+                    reliablePending.remove(trackId)
+                    return@requestSeekable
+                }
+                reliableFailures.remove(trackId)
+                reliableRetryAt.remove(trackId)
+                try {
+                    scheduleSeekableAnalysis(trackId, uri, durationSeconds, seekable)
+                } finally {
+                    reliablePending.remove(trackId)
+                }
             }
         }
     }
@@ -1102,6 +1104,76 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
 
     private fun safeStemName(trackId: String): String =
         trackId.replace(Regex("[^A-Za-z0-9_-]"), "_")
+
+    private fun scheduleSeekableAnalysis(
+        trackId: String,
+        uri: Uri,
+        durationSeconds: Double,
+        source: AnalysisAudioStore.SeekableSource,
+    ) {
+        val recorded = results[trackId]
+        val curveAware25 =
+            AppSettings.automixVersion.value == AutomixVersion.V2_5 &&
+                AppSettings.automix25Available.value &&
+                RemoteAutomixClient.isAvailable()
+        if (recorded?.isUsable == true && trackId !in provisional &&
+            (!curveAware25 || recorded.analysisSchema >= REMOTE_CURVE_SCHEMA)
+        ) return
+        if (!running.add(trackId)) return
+
+        executor.execute {
+            try {
+                val landed = results[trackId]
+                val needsCurveRemote =
+                    AppSettings.automixVersion.value == AutomixVersion.V2_5 &&
+                        AppSettings.automix25Available.value &&
+                        RemoteAutomixClient.isAvailable()
+                if (landed?.isUsable == true && trackId !in provisional &&
+                    (!needsCurveRemote || landed.analysisSchema >= REMOTE_CURVE_SCHEMA)
+                ) return@execute
+
+                val outcome = analyzeSource(
+                    trackId = trackId,
+                    durationSeconds = durationSeconds,
+                    sourceLabel = source.label,
+                    openSource = { source.open() },
+                    onDecodedShort = {},
+                )
+                val complete = outcome.analysis
+                if (complete != null && complete.isUsable) {
+                    results[trackId] = complete
+                    provisional.remove(trackId)
+                    shortDecodes.remove(trackId)
+                    store.save(trackId, complete)
+                    restoreAttempted.add(trackId)
+                    notifyAnalysisUpdated(trackId)
+                    Log.d(
+                        TAG,
+                        "Seekable schema-6 analysis ready for $trackId: bpm=${complete.bpm} " +
+                            "conf=${complete.beatConfidence}",
+                    )
+                } else {
+                    NerdStats.onAutomixAnalysisSource(trackId, NerdStats.AutomixAnalysisSource.FAILED)
+                    deferReliableRetry(trackId)
+                    if (trackId !in provisional && results[trackId]?.isUsable != true) {
+                        results.remove(trackId)
+                        notifyAnalysisUpdated(trackId)
+                    }
+                }
+            } catch (error: Throwable) {
+                Log.w(TAG, "Seekable analysis of $trackId failed", error)
+                NerdStats.onAutomixAnalysisSource(trackId, NerdStats.AutomixAnalysisSource.FAILED)
+                deferReliableRetry(trackId)
+            } finally {
+                reliableAudio.releaseSeekable(uri)
+                running.remove(trackId)
+                if (running.isEmpty()) {
+                    tracker.release()
+                    vocals.release()
+                }
+            }
+        }
+    }
 
     private fun scheduleReliableAnalysis(
         trackId: String,
@@ -2078,7 +2150,7 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
         /** Network/source errors are retried, but never from the one-second planning heartbeat. */
         const val RELIABLE_RETRY_BASE_MS = 15_000L
         const val RELIABLE_RETRY_MAX_MS = 5L * 60L * 1000L
-        const val RELIABLE_CACHE_GRACE_MS = 8_000L
+        const val RELIABLE_CACHE_GRACE_MS = 0L
 
         /**
          * How much more than the average-bitrate estimate of the opening window
