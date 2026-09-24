@@ -1851,43 +1851,67 @@ private fun BitChordApp(
         // two songs early; on an existing AutoPlay run it means refilling from
         // the current tail rather than repeatedly from an older seed.
         val tail = player.queue.lastOrNull() ?: song
-        val tailSeed = youtubeSeedFor(tail)
-        val seedOwner = if (tailSeed != null) tail else song
-        val seed = tailSeed ?: youtubeSeedFor(song) ?: return@LaunchedEffect
-        val seedId = seedOwner.videoId
+        val seedOwners = buildList {
+            add(tail)
+            if (song.videoId != tail.videoId) add(song)
+            player.queue
+                .asReversed()
+                .asSequence()
+                .filter { candidate -> candidate.videoId != tail.videoId && candidate.videoId != song.videoId }
+                .take(AUTOPLAY_SEED_FALLBACKS)
+                .forEach(::add)
+        }.distinctBy { it.videoId }
+
+        val seedId = tail.videoId
         if (autoplaySeed == seedId) return@LaunchedEffect
         autoplaySeed = seedId
 
-        YtMusicRepository.radio(seed)
-            .onSuccess { related ->
-                val candidates = related
-                    .filterNot(viewModel::shouldAvoidPlayback)
-                    .sortedByDescending(viewModel::shouldPreferPlayback)
-                val extra = QueueBuilder.extend(
-                    player.queue,
-                    candidates,
-                    AUTOPLAY_REFILL_BATCH,
-                )
-                if (extra.isNotEmpty()) {
-                    val resolved = coroutineScope {
-                        extra.map { async { YtMusicRepository.resolveAudio(it) } }.awaitAll()
-                    }
-                    controller?.addMediaItems(
-                        resolved
-                            .filterNot(viewModel::shouldAvoidPlayback)
-                            .take(AUTOPLAY_REFILL_BATCH)
-                            .map { it.copy(fromAutoplay = true).toMediaItem() },
+        // De-dupe only against the recent listening tail. Keeping the entire
+        // session as an exclusion set eventually exhausts a radio neighbourhood
+        // and makes AutoPlay stop after a few batches.
+        val recentQueue = player.queue.takeLast(AUTOPLAY_RECENT_DEDUPE_WINDOW)
+        val discovered = mutableListOf<Song>()
+        var anyRadioSucceeded = false
+
+        for (owner in seedOwners) {
+            if (discovered.size >= AUTOPLAY_REFILL_BATCH) break
+            val ytSeed = youtubeSeedFor(owner) ?: continue
+            YtMusicRepository.radio(ytSeed)
+                .onSuccess { related ->
+                    anyRadioSucceeded = true
+                    val ordered = related
+                        .filterNot(viewModel::shouldAvoidPlayback)
+                        .sortedByDescending(viewModel::shouldPreferPlayback)
+                    val extra = QueueBuilder.extend(
+                        recentQueue + discovered,
+                        ordered,
+                        AUTOPLAY_REFILL_BATCH - discovered.size,
                     )
-                } else if (autoplaySeed == seedId) {
-                    autoplaySeed = null
+                    discovered += extra
                 }
+        }
+
+        if (discovered.isNotEmpty()) {
+            val resolved = coroutineScope {
+                discovered
+                    .take(AUTOPLAY_REFILL_BATCH)
+                    .map { async { YtMusicRepository.resolveAudio(it) } }
+                    .awaitAll()
             }
-            .onFailure {
-                // A network loss must not poison this seed for the rest of the
-                // session. Connectivity is a LaunchedEffect key, so clearing it
-                // here makes the same tail eligible the moment the network returns.
-                if (autoplaySeed == seedId) autoplaySeed = null
-            }
+            controller?.addMediaItems(
+                resolved
+                    .filterNot(viewModel::shouldAvoidPlayback)
+                    .take(AUTOPLAY_REFILL_BATCH)
+                    .map { it.copy(fromAutoplay = true).toMediaItem() },
+            )
+        }
+
+        // Never permanently poison an exhausted/failed seed. A later queue/song
+        // update can immediately try again, and fallback seeds widen discovery
+        // without abandoning the previous-track musical anchor.
+        if (discovered.isEmpty() || !anyRadioSucceeded) {
+            if (autoplaySeed == seedId) autoplaySeed = null
+        }
     }
 
     val syncedLyricsEnabled by AppSettings.syncedLyrics.collectAsStateWithLifecycle()
@@ -4773,6 +4797,12 @@ private const val AUTOPLAY_PREFETCH_REMAINING = 2
 
 /** AutoPlay grows in small musical batches so Automix can curate each A -> B -> C chain. */
 private const val AUTOPLAY_REFILL_BATCH = 3
+
+/** Avoid immediate/recent repeats without turning a long session into an ever-growing blacklist. */
+private const val AUTOPLAY_RECENT_DEDUPE_WINDOW = 36
+
+/** If the immediate radio neighbourhood is exhausted, walk a few recent seeds and keep going. */
+private const val AUTOPLAY_SEED_FALLBACKS = 4
 
 private const val SEEK_END_GUARD_MS = 1_000L
 private const val ALBUM_VERSION_FIRST_NOTE_BUDGET_MS = 850L
