@@ -1731,27 +1731,12 @@ private fun overlayGainEnvelope(
 ): List<TransitionGainPoint> {
     if (wallDuration <= 0.0) return emptyList()
 
-    /*
-     * Three distinct phases:
-     *
-     *  BED    - B becomes audible without challenging A.
-     *  BUILD  - B follows the energy of its own intro and progressively gains body.
-     *  IMPACT - B is already present before the structural impact; only ownership changes at end.
-     *
-     * The old curve pinned B around 8-20% until [handoffFraction]. With a protected A that fraction
-     * can be 0.995, which turned "Entrada Instrumental" into an audible 20% -> 100% jump during the
-     * final few hundred milliseconds. The release landmark still protects A's foreground, but it
-     * no longer prevents B's instrumental arrangement from developing naturally underneath it.
-     */
-    val release = handoffFraction.coerceIn(0.50, 0.995)
-    val incomingFinalRiseStart = min(
-        release,
-        (1.0 - OVERLAY_INCOMING_FINAL_RISE_SECONDS / wallDuration).coerceIn(0.60, 0.985),
-    )
-    val outgoingReleaseStart = min(
-        release,
-        (1.0 - OVERLAY_OUTGOING_FINAL_RELEASE_SECONDS / wallDuration).coerceIn(0.72, 0.992),
-    )
+    fun curveNear(curve: List<EnergySample>, time: Double, fallback: Double): Double {
+        if (curve.isEmpty()) return fallback
+        return curve.minByOrNull { abs(it.time - time) }?.energy ?: fallback
+    }
+
+    val release = handoffFraction.coerceIn(0.35, 0.995)
     val points = ArrayList<TransitionGainPoint>(OVERLAY_GAIN_SAMPLES)
 
     repeat(OVERLAY_GAIN_SAMPLES) { index ->
@@ -1759,7 +1744,7 @@ private fun overlayGainEnvelope(
         val wall = wallDuration * progress
         val aPos = transitionStart + wall * outgoingRate
         val bPos = loopedIncomingPosition(incomingCue, wall, incomingRate, loop, repeats)
-        val probe = max(0.45, min(1.5, wallDuration / 28.0))
+        val probe = max(0.35, min(1.35, wallDuration / 36.0))
 
         val activityA = musicalActivityBetween(
             analysis,
@@ -1775,73 +1760,90 @@ private fun overlayGainEnvelope(
             analysis,
             max(0.0, aPos - probe),
             aPos + probe,
-        ) ?: 0.45
+        ) ?: analysis.vocalProbability
+        val vocalB = vocalActivityBetween(
+            nextAnalysis,
+            max(0.0, bPos - probe),
+            bPos + probe,
+        ) ?: nextAnalysis.vocalProbability
 
-        val densityA = max(activityA, 0.90 * vocalA).coerceIn(0.0, 1.0)
-        val attackSpan = min(0.18, max(0.055, 8.0 / wallDuration))
-        val attack = smoothUnit(progress / attackSpan)
+        val lowA = curveNear(analysis.lowEnergyCurve, aPos, activityA)
+        val lowB = curveNear(nextAnalysis.lowEnergyCurve, bPos, activityB)
+        val midA = curveNear(analysis.midEnergyCurve, aPos, activityA)
+        val midB = curveNear(nextAnalysis.midEnergyCurve, bPos, activityB)
+        val highA = curveNear(analysis.highEnergyCurve, aPos, activityA)
+        val highB = curveNear(nextAnalysis.highEnergyCurve, bPos, activityB)
+        val onsetA = curveNear(analysis.onsetCurve, aPos, 0.0)
+        val onsetB = curveNear(nextAnalysis.onsetCurve, bPos, 0.0)
 
-        // BED: roughly 7-18%. A dense/vocal A keeps B smaller; a lighter A lets the first
-        // instrumental details become perceptible sooner.
-        val bedTarget = (
-            0.09 +
-                0.075 * (1.0 - densityA) +
-                0.035 * activityB
-            ).coerceIn(0.07, 0.18)
+        val spectralCollision = (
+            min(lowA, lowB) + min(midA, midB) + min(highA, highB)
+        ).div(3.0).coerceIn(0.0, 1.0)
+        val vocalCollision = min(vocalA, vocalB).coerceIn(0.0, 1.0)
+        val transientCollision = min(onsetA, onsetB).coerceIn(0.0, 1.0)
+        val densityCollision = min(activityA, activityB).coerceIn(0.0, 1.0)
+        val clutter = (
+            0.52 * vocalCollision +
+                0.22 * spectralCollision +
+                0.14 * transientCollision +
+                0.12 * densityCollision
+            ).coerceIn(0.0, 1.0)
 
-        // BUILD: B is no longer frozen at "background noise" level. Its own arrangement/energy
-        // drives a gradual rise while A remains the perceptual foreground.
-        val buildTarget = (
-            0.31 +
-                0.22 * activityB -
-                0.11 * densityA
-            ).coerceIn(OVERLAY_BUILD_TARGET_MIN, OVERLAY_BUILD_TARGET_MAX)
-        val buildStart = attackSpan * 0.78
-        val buildEnd = max(buildStart + 0.08, incomingFinalRiseStart)
-        val build = smoothUnit((progress - buildStart) / (buildEnd - buildStart).coerceAtLeast(0.01))
-        var incoming = (bedTarget + (buildTarget - bedTarget) * build) * attack
+        val aForeground = (
+            0.58 * vocalA +
+                0.27 * activityA +
+                0.15 * max(lowA, max(midA, highA))
+            ).coerceIn(0.0, 1.0)
+        val bPresence = (
+            0.44 * activityB +
+                0.28 * max(lowB, max(midB, highB)) +
+                0.18 * onsetB +
+                0.10 * (1.0 - vocalB)
+            ).coerceIn(0.0, 1.0)
 
-        // IMPACT PREP: during the last few seconds of B's intro it is allowed to become a
-        // substantial layer (about 46-70%) without fading A. EQ/bass carve does the separation.
-        val impactWindow = min(0.16, 5.0 / wallDuration).coerceAtLeast(0.025)
-        val impactStart = (incomingFinalRiseStart - impactWindow).coerceAtLeast(buildStart)
-        val impactPrep = smoothUnit(
-            (progress - impactStart) / (incomingFinalRiseStart - impactStart).coerceAtLeast(0.01),
+        val roomForB = (
+            1.0 - 0.72 * aForeground - 0.66 * clutter
+            ).coerceIn(0.0, 1.0)
+        val mixability = (
+            roomForB * (0.35 + 0.65 * bPresence)
+            ).coerceIn(0.0, 1.0)
+
+        val attackSeconds = min(8.0, max(1.5, wallDuration * 0.16))
+        val attack = smoothUnit(wall / attackSeconds)
+        val underlay = (attack * mixability).coerceIn(0.0, 0.96)
+
+        val takeoverStart = (
+            release - 0.10 - 0.12 * roomForB
+            ).coerceIn(0.0, 0.98)
+        val takeover = smoothUnit(
+            (progress - takeoverStart) / (1.0 - takeoverStart).coerceAtLeast(0.005),
         )
-        val impactTarget = (
-            0.52 +
-                0.20 * activityB -
-                0.10 * vocalA
-            ).coerceIn(OVERLAY_IMPACT_PREP_MIN, OVERLAY_IMPACT_PREP_MAX)
-        incoming += (impactTarget - incoming) * impactPrep
+        val sharedClaim = (
+            bPresence * (1.0 - vocalA) * (1.0 - clutter) - 0.32 * aForeground
+            ).coerceIn(0.0, 1.0)
 
-        // Final incoming rise starts several seconds before the impact, so there is no 20->100%
-        // cliff. A remains essentially full until its much shorter final release window.
-        val incomingTakeover = smoothUnit(
-            (progress - incomingFinalRiseStart) /
-                (1.0 - incomingFinalRiseStart).coerceAtLeast(0.005),
-        )
-        incoming += (1.0 - incoming) * incomingTakeover
+        val incoming = (
+            underlay * (1.0 - takeover) +
+                takeover +
+                0.22 * sharedClaim * (1.0 - takeover)
+            ).coerceIn(0.0, 1.0)
 
-        // Preserve A. Only a tiny density-aware duck is allowed during the bed/build. The actual
-        // A fade starts close to the natural end and is independent from B's earlier build.
-        val bedDuck = (0.018 * (1.0 - densityA) * attack).coerceIn(0.0, 0.018)
-        val outgoingTakeover = smoothUnit(
-            (progress - outgoingReleaseStart) /
-                (1.0 - outgoingReleaseStart).coerceAtLeast(0.004),
-        )
-        val outgoing = ((1.0 - bedDuck) * (1.0 - outgoingTakeover)).coerceIn(0.0, 1.0)
+        val dynamicDuck = (
+            incoming * sharedClaim * (1.0 - vocalA) * (0.15 + 0.35 * roomForB)
+            ).coerceIn(0.0, 0.32)
+        val outgoing = (
+            (1.0 - dynamicDuck) * (1.0 - takeover)
+            ).coerceIn(0.0, 1.0)
 
         points += TransitionGainPoint(
             progress = progress,
-            incomingGain = incoming.coerceIn(0.0, 1.0),
+            incomingGain = incoming,
             outgoingGain = outgoing,
         )
     }
 
-    // Exact endpoints prevent interpolation/decoder noise from producing a click or a lingering deck.
     if (points.isNotEmpty()) {
-        points[0] = points[0].copy(incomingGain = 0.0, outgoingGain = 1.0)
+        points[0] = TransitionGainPoint(0.0, 0.0, 1.0)
         points[points.lastIndex] = TransitionGainPoint(1.0, 1.0, 0.0)
     }
     return points
