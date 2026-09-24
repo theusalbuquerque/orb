@@ -784,10 +784,20 @@ class AutomixPlannerTest(unittest.TestCase):
 
         best, _ = automix._remote_plan(a, b)
 
-        if best["style"] in {"RUNWAY_BLEND", "DJ_BLEND", "DJ_FILTER", "EQ_SWAP"}:
+        long_overlap_styles = {
+            "RUNWAY_BLEND",
+            "INTRO_BED",
+            "INTRO_BRIDGE_FILTER",
+            "DJ_BLEND",
+            "DJ_FILTER",
+            "EQ_SWAP",
+        }
+        if best["style"] in long_overlap_styles:
+            # Long overlaps are valid for a protected A only when foreground
+            # ownership stays with A until very late in the transition.
             self.assertGreaterEqual(float(best["handoffFraction"]), 0.84)
         else:
-            self.assertIn(best["style"], {"PHRASE_TAKEOVER", "PHRASE_CUT", "CUT", "DJ_FILTER"})
+            self.assertIn(best["style"], {"PHRASE_TAKEOVER", "PHRASE_CUT", "CUT"})
 
 
     def test_heavy_vocal_collision_rejects_long_overlap(self) -> None:
