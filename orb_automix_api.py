@@ -3036,6 +3036,19 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                 )
                 pre_handoff = max(0.08, handoff_fraction - 0.16)
                 post_handoff = min(0.98, handoff_fraction + 0.12)
+                runway_gain, runway_mixability, runway_clutter = _adaptive_overlap_gain_envelope(
+                    a, b, desired_start, a_end, b_start,
+                    runway_out_rate, runway_in_rate, handoff_fraction,
+                    filter_strength=_clamp(
+                        (0.24 if key_fit >= 0.58 else 0.54)
+                        + 0.20 * (1.0 - runway_spectral_fit)
+                        + 0.16 * runway_low_collision,
+                        0.20, 0.92,
+                    ),
+                )
+                runway_score += 0.18 * runway_mixability - 0.20 * runway_clutter
+                if runway_mixability < 0.16 and runway_vocal_clash > 0.28:
+                    runway_score -= 0.22
                 candidates.append(_candidate_plan(
                     "RUNWAY_BLEND",
                     runway_score,
@@ -3085,30 +3098,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                     localTempoCompatibility=round(runway_tempo_fit, 4),
                     outgoingLocalBpm=round(runway_a_bpm, 4),
                     incomingLocalBpm=round(runway_b_bpm, 4),
-                    gainEnvelope=[
-                        {"progress": 0.0, "incomingGain": 0.0, "outgoingGain": 1.0},
-                        {
-                            "progress": round(min(0.14, handoff_fraction * 0.28), 4),
-                            "incomingGain": 0.12,
-                            "outgoingGain": 1.0,
-                        },
-                        {
-                            "progress": round(pre_handoff, 4),
-                            "incomingGain": 0.34,
-                            "outgoingGain": 0.99,
-                        },
-                        {
-                            "progress": round(handoff_fraction, 4),
-                            "incomingGain": 0.62,
-                            "outgoingGain": 0.94,
-                        },
-                        {
-                            "progress": round(post_handoff, 4),
-                            "incomingGain": 0.92,
-                            "outgoingGain": 0.38,
-                        },
-                        {"progress": 1.0, "incomingGain": 1.0, "outgoingGain": 0.0},
-                    ],
+                    gainEnvelope=runway_gain,
                 ))
 
     # 0.5) Verified instrumental bed / filtered instrumental bridge.
@@ -3231,6 +3221,17 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
 
                     pre_handoff = max(0.08, handoff_fraction - 0.18)
                     post_handoff = min(0.985, handoff_fraction + 0.10)
+                    bed_gain, bed_mixability, bed_clutter = _adaptive_overlap_gain_envelope(
+                        a, b, bed_start, a_end, b_start,
+                        bed_out_rate, bed_in_rate, handoff_fraction,
+                        filter_strength=0.0,
+                    )
+                    filtered_bed_gain, filtered_mixability, filtered_clutter = _adaptive_overlap_gain_envelope(
+                        a, b, bed_start, a_end, b_start,
+                        bed_out_rate, bed_in_rate, handoff_fraction,
+                        filter_strength=0.72,
+                    )
+                    base_bed_score += 0.18 * bed_mixability - 0.22 * bed_clutter
                     common_bed = dict(
                         transitionStart=round(bed_start, 4),
                         transitionEnd=round(a_end, 4),
@@ -3268,19 +3269,12 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                         localTempoCompatibility=round(bed_tempo_fit, 4),
                         outgoingLocalBpm=round(bed_a_bpm, 4),
                         incomingLocalBpm=round(bed_b_bpm, 4),
-                        gainEnvelope=[
-                            {"progress": 0.0, "incomingGain": 0.0, "outgoingGain": 1.0},
-                            {"progress": round(min(0.14, handoff_fraction * 0.24), 4), "incomingGain": 0.10, "outgoingGain": 1.0},
-                            {"progress": round(pre_handoff, 4), "incomingGain": 0.32, "outgoingGain": 1.0},
-                            {"progress": round(handoff_fraction, 4), "incomingGain": 0.66, "outgoingGain": 0.94},
-                            {"progress": round(post_handoff, 4), "incomingGain": 0.94, "outgoingGain": 0.34},
-                            {"progress": 1.0, "incomingGain": 1.0, "outgoingGain": 0.0},
-                        ],
+                        gainEnvelope=bed_gain,
                     )
 
                     # Open instrumental bed: the cleanest version of the move.
                     intro_bed_score = base_bed_score - (0.10 if filtered_needed else 0.0)
-                    if overlap_vocal < 0.44:
+                    if overlap_vocal < 0.44 and bed_mixability >= 0.18:
                         candidates.append(_candidate_plan(
                             "INTRO_BED",
                             intro_bed_score,
@@ -3291,7 +3285,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
 
                     # Filtered instrumental bridge: same arrangement logic, but with
                     # complementary spectral carving when the records are dense.
-                    if filtered_needed and overlap_vocal < 0.52:
+                    if filtered_needed and overlap_vocal < 0.52 and filtered_mixability >= 0.18:
                         bridge_filter = _clamp(
                             0.30
                             + 0.24 * density
@@ -3300,12 +3294,18 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
                             0.32,
                             0.82,
                         )
+                        filtered_common_bed = dict(common_bed)
+                        filtered_common_bed["gainEnvelope"] = filtered_bed_gain
                         candidates.append(_candidate_plan(
                             "INTRO_BRIDGE_FILTER",
-                            base_bed_score + 0.06 * density + 0.04 * bed_low_collision,
+                            base_bed_score
+                                + 0.06 * density
+                                + 0.04 * bed_low_collision
+                                + 0.18 * filtered_mixability
+                                - 0.18 * filtered_clutter,
                             "server-filtered-instrumental-bridge",
                             filterSweep=round(bridge_filter, 4),
-                            **common_bed,
+                            **filtered_common_bed,
                         ))
 
     # 0.75) Foreground takeover. B is allowed to become the perceptual foreground
