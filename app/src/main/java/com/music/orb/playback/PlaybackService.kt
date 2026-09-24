@@ -4059,7 +4059,7 @@ class PlaybackService : MediaSessionService() {
             // If that produces enough BPM/beat/key/entry evidence, planning can
             // start immediately while requestReliable continues the full refinement.
             if (!trackAnalyzer.isReadyForPlan(item.mediaId, incoming = true)) {
-                trackAnalyzer.requestQueuePreview(
+                trackAnalyzer.requestIncomingHead(
                     item.mediaId,
                     uri,
                     durationMs / 1000.0,
@@ -4097,7 +4097,7 @@ class PlaybackService : MediaSessionService() {
         if (index == currentIndex) {
             trackAnalyzer.requestOutgoingTail(item.mediaId, uri, durationMs / 1000.0)
         } else {
-            trackAnalyzer.requestQueuePreview(item.mediaId, uri, durationMs / 1000.0)
+            trackAnalyzer.requestIncomingHead(item.mediaId, uri, durationMs / 1000.0)
         }
     }
 
