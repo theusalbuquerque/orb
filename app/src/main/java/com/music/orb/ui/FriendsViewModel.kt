@@ -481,9 +481,10 @@ class FriendsViewModel : ViewModel() {
         cachedStatsByPeriod[period]?.let { _listeningStats.value = it }
 
         if (_artistRankingOpen.value) {
-            // Ranking positions are a page-open snapshot. Switching the period
-            // only reveals the snapshot captured when this ranking page opened;
-            // it must never silently recalculate positions in the background.
+            // Ranking positions are a page-open snapshot. Switching periods must
+            // publish that period's list immediately. The UI keys the animated
+            // rows by period as well, so an artist that happened to be #1 in the
+            // previous period cannot survive visually in slot #1 of the new one.
             _artistRanking.value = rankingSnapshots[period].orEmpty()
         }
 
