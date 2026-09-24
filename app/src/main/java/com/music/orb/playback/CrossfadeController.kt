@@ -996,9 +996,21 @@ class CrossfadeController(
         val nextItem = if (nextIndex == C.INDEX_UNSET) null else player.getMediaItemAt(nextIndex)
         val requireIncomingRoute = AppSettings.automixVersion.value != AutomixVersion.V2_5
         AppSettings.smartAnalysis.value = SmartAnalysis(
-            current = currentItem?.let { stateOf(it, analysisFor(it)) } ?: TrackAnalysisState.WAITING,
+            current = currentItem?.let {
+                stateOf(
+                    item = it,
+                    analysis = analysisFor(it),
+                    incomingRole = false,
+                    requireIncomingAudioReady = false,
+                )
+            } ?: TrackAnalysisState.WAITING,
             next = nextItem?.let {
-                stateOf(it, analysisFor(it), requireIncomingAudioReady = requireIncomingRoute)
+                stateOf(
+                    item = it,
+                    analysis = analysisFor(it),
+                    incomingRole = true,
+                    requireIncomingAudioReady = requireIncomingRoute,
+                )
             } ?: TrackAnalysisState.WAITING,
         )
     }
@@ -1012,6 +1024,7 @@ class CrossfadeController(
     private fun stateOf(
         item: MediaItem,
         analysis: TrackAnalysis,
+        incomingRole: Boolean,
         requireIncomingAudioReady: Boolean = false,
     ): TrackAnalysisState = when {
         analysis.isUsable && requireIncomingAudioReady && !incomingAudioReadyFor(item) ->
@@ -1019,13 +1032,12 @@ class CrossfadeController(
         AppSettings.automixVersion.value == AutomixVersion.V2_5 &&
             AppSettings.automix25Available.value &&
             analysis.isUsable &&
-            !analysisReadyForPlan(item, requireIncomingAudioReady) ->
+            !analysisReadyForPlan(item, incomingRole) ->
             if (analysisRunningFor(item)) TrackAnalysisState.REFINING else TrackAnalysisState.ANALYSING
         analysis.isUsable &&
             AppSettings.automixVersion.value == AutomixVersion.V2_5 &&
             AppSettings.automix25Available.value &&
-            requireIncomingAudioReady &&
-            analysisReadyForPlan(item, true) &&
+            analysisReadyForPlan(item, incomingRole) &&
             analysisRunningFor(item) ->
             TrackAnalysisState.READY_FOR_PLAN
         analysis.isUsable ->
