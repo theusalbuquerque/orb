@@ -2148,6 +2148,7 @@ fun NowPlayingScreen(
                     val badgeQuality = rememberTrackLosslessBadgeState(song, allowProbe = false)
                     val smartAnalysis by AppSettings.smartAnalysis.collectAsStateWithLifecycle()
                     val smartTransitionWindow by AppSettings.smartTransitionWindow.collectAsStateWithLifecycle()
+                    val smartMixInProgress by AppSettings.smartMixInProgress.collectAsStateWithLifecycle()
                     val onWifi by AppSettings.wifiConnection.collectAsStateWithLifecycle()
                     val wifiQuality by AppSettings.audioQualityWifi.collectAsStateWithLifecycle()
                     val cellularQuality by AppSettings.audioQualityCellular.collectAsStateWithLifecycle()
@@ -2192,6 +2193,7 @@ fun NowPlayingScreen(
                             showNerdStats = showNerdStats,
                             smartAnalysis = smartAnalysis,
                             transitionWindow = smartTransitionWindow,
+                            smartMixInProgress = smartMixInProgress,
                             onWifi = onWifi,
                             activeQuality = activeQuality,
                             activeMaximum = activeMaximum,
@@ -4109,6 +4111,7 @@ private fun LosslessOrStats(
     showNerdStats: Boolean,
     smartAnalysis: SmartAnalysis,
     transitionWindow: TransitionWindow?,
+    smartMixInProgress: Boolean,
     onWifi: Boolean?,
     activeQuality: AudioQuality,
     activeMaximum: Boolean,
@@ -4138,7 +4141,11 @@ private fun LosslessOrStats(
     }
     val isHiQuality = if (rendererHasCodec) trackStats?.isHiQuality == true else badgeQuality.isHiQuality
     val automixEnabled by AppSettings.automixEnabled.collectAsStateWithLifecycle()
-    val automixMixing = automixStats?.stage == NerdStats.AutomixStage.MIXING
+    // Playback state is authoritative here. NerdStats is diagnostic and can be
+    // replaced/re-keyed at handoff; the two-deck engine knows exactly when both
+    // tracks are audibly participating in the mix.
+    val automixMixing = smartMixInProgress ||
+        automixStats?.stage == NerdStats.AutomixStage.MIXING
 
     when {
         !showNerdStats && automixEnabled && automixMixing -> LosslessLabel(
