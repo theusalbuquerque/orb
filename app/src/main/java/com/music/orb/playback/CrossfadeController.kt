@@ -366,7 +366,15 @@ class CrossfadeController(
     /** One full remote recipe per immutable A -> B pair. Local validation remains final. */
     private val remotePlanByPair = ConcurrentHashMap<String, RemoteTransitionDirective>()
     private val remotePlanAttempted = ConcurrentHashMap.newKeySet<String>()
-    /** First instant both tracks were ready to plan; bounds how long UI can wait on the network. */
+    /**
+     * Immediate on-device recipe for a measured pair.
+     *
+     * The remote planner is a refinement source, never a prerequisite for having
+     * a plan. As soon as A.TAIL + B.HEAD are ready, this cache makes
+     * "both analysed + awaiting plan" an impossible steady state.
+     */
+    private val localPlanByPair = ConcurrentHashMap<String, com.music.orb.playback.smart.TransitionPlan>()
+    /** First instant both tracks were ready to plan; retained for diagnostics/remote latency. */
     private val remotePlanReadyAtMs = ConcurrentHashMap<String, Long>()
     /** Pair whose preview-authored recipe has already been replaced once by full B evidence. */
     private val remotePlanRefined = ConcurrentHashMap.newKeySet<String>()
@@ -499,6 +507,7 @@ class CrossfadeController(
             ) {
                 remotePlanByPair.remove(pair)
                 remotePlanAttempted.remove(pair)
+                localPlanByPair.remove(pair)
             }
         }
 
@@ -716,8 +725,40 @@ class CrossfadeController(
 
         if (useAutomix25 && currentReadyForPlan && nextReadyForPlan) {
             remotePlanReadyAtMs.putIfAbsent(analysisPair, SystemClock.elapsedRealtime())
+
+            // Build a usable recipe immediately from the measured pair. Remote
+            // planning races this in parallel and may replace it before arming,
+            // but network/probe state can never leave the UI without a plan.
+            localPlanByPair.computeIfAbsent(analysisPair) {
+                val local = planTransition(
+                    analysis = currentAnalysis,
+                    nextAnalysis = nextAnalysis,
+                    currentTrack = currentItem.toTransitionInfo(duration),
+                    nextTrack = nextItem.toTransitionInfo(nextDuration),
+                    currentTime = player.currentPosition / 1000.0,
+                    duration = duration / 1000.0,
+                    fadeSeconds = fallbackSeconds,
+                    mode = CrossfadeMode.SMART,
+                    styleHint = null,
+                    remoteDirective = null,
+                    serverAuthoritative = false,
+                )
+                if (!local.blocked) {
+                    local.copy(reason = "automix-2.5-local-immediate-${local.reason}")
+                } else {
+                    resilientAutomix25Fallback(
+                        analysis = currentAnalysis,
+                        nextAnalysis = nextAnalysis,
+                        currentTrack = currentItem.toTransitionInfo(duration),
+                        nextTrack = nextItem.toTransitionInfo(nextDuration),
+                        currentTime = player.currentPosition / 1000.0,
+                        duration = duration / 1000.0,
+                    )
+                }
+            }
         } else {
             remotePlanReadyAtMs.remove(analysisPair)
+            localPlanByPair.remove(analysisPair)
         }
 
         if (useAutomix25 &&
@@ -732,6 +773,7 @@ class CrossfadeController(
                 val backendReady =
                     RemoteAutomixClient.isAvailable() || RemoteAutomixClient.probe()
                 if (!backendReady) {
+                    Log.d(TAG, "remote plan unavailable for $analysisPair; keeping immediate local plan")
                     delay(REMOTE_PLAN_RETRY_MS)
                     remotePlanAttempted.remove(analysisPair)
                     return@launch
@@ -739,6 +781,7 @@ class CrossfadeController(
 
                 val directive = RemoteAutomixClient.requestPlan(currentAnalysis, nextAnalysis)
                 if (directive != null) {
+                    Log.d(TAG, "remote plan accepted for $analysisPair style=${directive.style}")
                     if (remotePlanByPair.size >= REMOTE_STYLE_CACHE_LIMIT) {
                         remotePlanByPair.clear()
                         remotePlanAttempted.clear()
@@ -746,68 +789,57 @@ class CrossfadeController(
                     }
                     remotePlanByPair[analysisPair] = directive
                 } else {
+                    Log.d(TAG, "remote plan returned no directive for $analysisPair; keeping immediate local plan")
                     delay(REMOTE_PLAN_RETRY_MS)
                     remotePlanAttempted.remove(analysisPair)
                 }
             }
         }
         val remotePlan = if (useAutomix25) remotePlanByPair[analysisPair] else null
-        val readySince = remotePlanReadyAtMs[analysisPair] ?: Long.MAX_VALUE
-        val rescueDue = useAutomix25 &&
-            remotePlan == null &&
-            currentReadyForPlan && nextReadyForPlan &&
-            SystemClock.elapsedRealtime() - readySince >= REMOTE_PLAN_GRACE_MS
-
         val currentInfo = currentItem.toTransitionInfo(duration)
         val nextInfo = nextItem.toTransitionInfo(nextDuration)
-        val plan = if (rescueDue) {
-            // Remote planning is preferred, never mandatory. Once the pair has
-            // waited its short grace period, hand the same measured A/B evidence
-            // to the complete on-device adaptive planner. It may choose any local
-            // Automix family; the minimal structural handoff remains only a final
-            // continuity guard if even the local planner refuses the pair.
-            val local = planTransition(
-                analysis = currentAnalysis,
-                nextAnalysis = nextAnalysis,
-                currentTrack = currentInfo,
-                nextTrack = nextInfo,
-                currentTime = player.currentPosition / 1000.0,
-                duration = duration / 1000.0,
-                fadeSeconds = fallbackSeconds,
-                mode = CrossfadeMode.SMART,
-                styleHint = null,
-                remoteDirective = null,
-                serverAuthoritative = false,
-            )
-            if (!local.blocked) {
-                local.copy(reason = "automix-2.5-local-fallback-${local.reason}")
-            } else {
-                resilientAutomix25Fallback(
+        val plan = when {
+            useAutomix25 && remotePlan != null -> {
+                planTransition(
                     analysis = currentAnalysis,
                     nextAnalysis = nextAnalysis,
                     currentTrack = currentInfo,
                     nextTrack = nextInfo,
                     currentTime = player.currentPosition / 1000.0,
                     duration = duration / 1000.0,
+                    fadeSeconds = fallbackSeconds,
+                    mode = CrossfadeMode.SMART,
+                    styleHint = null,
+                    remoteDirective = remotePlan,
+                    serverAuthoritative = true,
                 )
             }
-        } else {
-            planTransition(
-                analysis = currentAnalysis,
-                nextAnalysis = nextAnalysis,
-                currentTrack = currentInfo,
-                nextTrack = nextInfo,
-                currentTime = player.currentPosition / 1000.0,
-                duration = duration / 1000.0,
-                fadeSeconds = fallbackSeconds,
-                mode = CrossfadeMode.SMART,
-                styleHint = null,
-                remoteDirective = remotePlan,
-                // Automix 2.5 prefers the remote recipe. If it cannot arrive
-                // within the grace window above, the complete local planner
-                // takes over instead of leaving the pair pending.
-                serverAuthoritative = useAutomix25,
-            )
+            useAutomix25 && currentReadyForPlan && nextReadyForPlan -> {
+                localPlanByPair[analysisPair]
+                    ?: resilientAutomix25Fallback(
+                        analysis = currentAnalysis,
+                        nextAnalysis = nextAnalysis,
+                        currentTrack = currentInfo,
+                        nextTrack = nextInfo,
+                        currentTime = player.currentPosition / 1000.0,
+                        duration = duration / 1000.0,
+                    )
+            }
+            else -> {
+                planTransition(
+                    analysis = currentAnalysis,
+                    nextAnalysis = nextAnalysis,
+                    currentTrack = currentInfo,
+                    nextTrack = nextInfo,
+                    currentTime = player.currentPosition / 1000.0,
+                    duration = duration / 1000.0,
+                    fadeSeconds = fallbackSeconds,
+                    mode = CrossfadeMode.SMART,
+                    styleHint = null,
+                    remoteDirective = null,
+                    serverAuthoritative = useAutomix25,
+                )
+            }
         }
         // A blocked 2.5 plan means the recipe is still unavailable/invalid,
         // not that the musical decision is "no transition". Normal 2.5 playback
