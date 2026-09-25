@@ -4867,7 +4867,39 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
 
     best["planner"] = "orb-automix-2.5-mix-v12"
     best["serverAuthoritative"] = True
-    return best, candidates[:5]
+
+    # Keep the diagnostic shortlist musically diverse. mix-v12 can generate many
+    # near-neighbour creative candidates around the winning choreography; a pure
+    # score slice may therefore hide a valid long-runway/reference behaviour from
+    # tests and telemetry even though it was generated correctly.
+    shortlist = list(candidates[:5])
+    runway_seconds = max(0.0, b_impact - b_start)
+    if runway_seconds >= 8.0:
+        runway_candidates = [
+            candidate for candidate in candidates
+            if abs(_finite(candidate.get("incomingCueTime"), -999.0) - b_start) <= 0.75
+            and abs(_finite(candidate.get("incomingHandoffTime"), -999.0) - b_impact)
+                <= max(2.5, 0.14 * runway_seconds)
+            and (
+                _finite(candidate.get("transitionEnd"), 0.0)
+                - _finite(candidate.get("transitionStart"), 0.0)
+            ) >= max(8.0, 0.90 * runway_seconds)
+        ]
+        if runway_candidates:
+            runway_reference = max(
+                runway_candidates,
+                key=lambda candidate: (
+                    candidate.get("selectionScore", 0.0),
+                    candidate.get("score", 0.0),
+                ),
+            )
+            if runway_reference not in shortlist:
+                if len(shortlist) >= 5:
+                    shortlist[-1] = runway_reference
+                else:
+                    shortlist.append(runway_reference)
+
+    return best, shortlist
 
 
 
