@@ -213,6 +213,8 @@ class CrossfadeController(
      * traded places.
      */
     private var handedOff = false
+    /** Pause-aware mix-clock position where B became the MediaSession foreground. */
+    private var visualHandoffElapsedMs = -1L
 
     /**
      * The session deck normally auto-advances through its queue. During an audible two-deck
@@ -1196,6 +1198,7 @@ class CrossfadeController(
         render = renderStyle
         armDeadline = SystemClock.elapsedRealtime() + ARM_TIMEOUT_MS
         handedOff = false
+        visualHandoffElapsedMs = -1L
         outgoing = out
         incoming = into
         outgoingPauseAtEndBeforeTransition = out.pauseAtEndOfMediaItems
@@ -1642,6 +1645,7 @@ class CrossfadeController(
                     )
                     return bail()
                 }
+                visualHandoffElapsedMs = elapsed
                 commitHandoff(out, player)
             }
         }
@@ -1663,16 +1667,6 @@ class CrossfadeController(
             incomingGain = authoredGain.first
             outgoingGain = authoredGain.second
 
-            AppSettings.automixVisualTransition.value?.let { visual ->
-                if (visual.incomingMediaId == player.currentMediaItem?.mediaId) {
-                    AppSettings.automixVisualTransition.value = visual.copy(
-                        progress = progress,
-                        outgoingPositionMs = out.currentPosition.coerceAtLeast(0L),
-                        outgoingDurationMs = out.duration
-                            .takeIf { it != C.TIME_UNSET && it > 0L } ?: visual.outgoingDurationMs,
-                    )
-                }
-            }
         } else {
             when (render.style) {
                 TransitionStyle.INTRO_BED,
@@ -1681,34 +1675,11 @@ class CrossfadeController(
                     incomingGain = introBedIncomingGain(progress, render.handoffFraction.toFloat())
                     outgoingGain = introBedOutgoingGain(progress, render.handoffFraction.toFloat())
 
-                    AppSettings.automixVisualTransition.value?.let { visual ->
-                        if (visual.incomingMediaId == player.currentMediaItem?.mediaId) {
-                            AppSettings.automixVisualTransition.value = visual.copy(
-                                progress = introBedVisualProgress(
-                                    progress,
-                                    render.handoffFraction.toFloat(),
-                                ),
-                                outgoingPositionMs = out.currentPosition.coerceAtLeast(0L),
-                                outgoingDurationMs = out.duration
-                                    .takeIf { it != C.TIME_UNSET && it > 0L } ?: visual.outgoingDurationMs,
-                            )
-                        }
-                    }
                 }
                 TransitionStyle.FOREGROUND_TAKEOVER,
                 TransitionStyle.PHRASE_TAKEOVER -> {
                     incomingGain = riseGain(progress)
                     outgoingGain = fallGain(progress)
-                    AppSettings.automixVisualTransition.value?.let { visual ->
-                        if (visual.incomingMediaId == player.currentMediaItem?.mediaId) {
-                            AppSettings.automixVisualTransition.value = visual.copy(
-                                progress = progress,
-                                outgoingPositionMs = out.currentPosition.coerceAtLeast(0L),
-                                outgoingDurationMs = out.duration.takeIf { it != C.TIME_UNSET && it > 0L }
-                                    ?: visual.outgoingDurationMs,
-                            )
-                        }
-                    }
                 }
                 TransitionStyle.DJ_BLEND -> {
                     if (render.automix25) {
@@ -1778,6 +1749,35 @@ class CrossfadeController(
                 stepMs = if (out.isPlaying && player.isPlaying) levelStep else 0L,
             )
         } else plannedIncomingGain
+        // Reference-style Now Playing handoff: keep the artwork clock at zero
+        // until B actually owns the session, then dissolve A -> B over a short,
+        // perceptible window inside the remaining audible overlap. This avoids
+        // arriving in Now Playing halfway through an animation that began while
+        // A still owned MediaSession metadata.
+        AppSettings.automixVisualTransition.value?.let { visual ->
+            if (visual.incomingMediaId == player.currentMediaItem?.mediaId) {
+                val visualProgress = if (!handedOff || visualHandoffElapsedMs < 0L) {
+                    0f
+                } else {
+                    val remainingAtHandoff = (fadeMs - visualHandoffElapsedMs).coerceAtLeast(1L)
+                    val visualDuration = (remainingAtHandoff * 0.55f)
+                        .toLong()
+                        .coerceIn(AUTOMIX_ARTWORK_DISSOLVE_MIN_MS, AUTOMIX_ARTWORK_DISSOLVE_MAX_MS)
+                        .coerceAtMost(remainingAtHandoff)
+                        .coerceAtLeast(1L)
+                    val raw = ((elapsed - visualHandoffElapsedMs).coerceAtLeast(0L).toFloat() /
+                        visualDuration.toFloat()).coerceIn(0f, 1f)
+                    smoothStep(0f, 1f, raw)
+                }
+                AppSettings.automixVisualTransition.value = visual.copy(
+                    progress = visualProgress,
+                    outgoingPositionMs = out.currentPosition.coerceAtLeast(0L),
+                    outgoingDurationMs = out.duration
+                        .takeIf { it != C.TIME_UNSET && it > 0L } ?: visual.outgoingDurationMs,
+                )
+            }
+        }
+
         renderIncomingStemAware(player, desiredIncomingGain, progress)
         if (isInstrumentalOverlayStyle() && now - lastOverlayTraceMs >= 2000L) {
             lastOverlayTraceMs = now
@@ -2127,6 +2127,7 @@ class CrossfadeController(
         outgoing = null
         incoming = null
         handedOff = false
+        visualHandoffElapsedMs = -1L
         outgoingPauseAtEndBeforeTransition = false
         queuedItemCount = 0
         incomingCueTimeMs = 0L
@@ -2989,6 +2990,8 @@ class CrossfadeController(
         const val TEMPO_RELEASE_STEPS = 36
         const val TEMPO_RELEASE_STEP_MS = 70L
         const val MIX_CLOCK_MAX_STEP_MS = 250L
+        const val AUTOMIX_ARTWORK_DISSOLVE_MIN_MS = 900L
+        const val AUTOMIX_ARTWORK_DISSOLVE_MAX_MS = 2_400L
         const val LOOP_TRIGGER_EARLY_MS = 35L
         const val LOOP_SEEK_GUARD_MS = 160L
 
