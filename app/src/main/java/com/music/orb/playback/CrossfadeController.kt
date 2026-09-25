@@ -1490,7 +1490,12 @@ class CrossfadeController(
      */
     private fun incomingOwnsForeground(progress: Float): Boolean {
         val p = progress.coerceIn(0f, 1f)
-        val (incoming, outgoing) = when (render.style) {
+        val authored = if (render.automix25 && render.gainEnvelope.size >= 2) {
+            introBedGainAt(p, render.gainEnvelope)
+        } else {
+            null
+        }
+        val (incoming, outgoing) = authored ?: when (render.style) {
             TransitionStyle.INTRO_BED,
             TransitionStyle.INTRO_BRIDGE_FILTER,
             TransitionStyle.RUNWAY_BLEND -> {
@@ -1643,79 +1648,97 @@ class CrossfadeController(
 
         val incomingGain: Float
         val outgoingGain: Float
-        when (render.style) {
-            TransitionStyle.INTRO_BED,
-            TransitionStyle.INTRO_BRIDGE_FILTER,
-            TransitionStyle.RUNWAY_BLEND -> {
-                // Reference-style intro runway: B can be audible from 0:00 while
-                // A remains the foreground record. The real gain handoff begins
-                // only after A's confirmed vocal release.
-                val automated = introBedGainAt(progress, render.gainEnvelope)
-                incomingGain = automated?.first
-                    ?: introBedIncomingGain(progress, render.handoffFraction.toFloat())
-                outgoingGain = automated?.second
-                    ?: introBedOutgoingGain(progress, render.handoffFraction.toFloat())
 
-                AppSettings.automixVisualTransition.value?.let { visual ->
-                    if (visual.incomingMediaId == player.currentMediaItem?.mediaId) {
-                        AppSettings.automixVisualTransition.value = visual.copy(
-                            progress = introBedVisualProgress(
-                                progress,
-                                render.handoffFraction.toFloat(),
-                            ),
-                            outgoingPositionMs = out.currentPosition.coerceAtLeast(0L),
-                            outgoingDurationMs = out.duration
-                                .takeIf { it != C.TIME_UNSET && it > 0L } ?: visual.outgoingDurationMs,
-                        )
-                    }
+        // mix-v12 authors the choreography first and labels it afterwards.
+        // Therefore a 2.5 gain envelope is authoritative regardless of the
+        // descriptive family name. The style still chooses DSP/filter flavour,
+        // but it must never rewrite the server's fader choreography.
+        val authoredGain = if (render.automix25 && render.gainEnvelope.size >= 2) {
+            introBedGainAt(progress, render.gainEnvelope)
+        } else {
+            null
+        }
+
+        if (authoredGain != null) {
+            incomingGain = authoredGain.first
+            outgoingGain = authoredGain.second
+
+            AppSettings.automixVisualTransition.value?.let { visual ->
+                if (visual.incomingMediaId == player.currentMediaItem?.mediaId) {
+                    AppSettings.automixVisualTransition.value = visual.copy(
+                        progress = progress,
+                        outgoingPositionMs = out.currentPosition.coerceAtLeast(0L),
+                        outgoingDurationMs = out.duration
+                            .takeIf { it != C.TIME_UNSET && it > 0L } ?: visual.outgoingDurationMs,
+                    )
                 }
             }
-            TransitionStyle.FOREGROUND_TAKEOVER,
-            TransitionStyle.PHRASE_TAKEOVER -> {
-                val automated = introBedGainAt(progress, render.gainEnvelope)
-                incomingGain = automated?.first ?: riseGain(progress)
-                outgoingGain = automated?.second ?: fallGain(progress)
-                AppSettings.automixVisualTransition.value?.let { visual ->
-                    if (visual.incomingMediaId == player.currentMediaItem?.mediaId) {
-                        AppSettings.automixVisualTransition.value = visual.copy(
-                            progress = progress,
-                            outgoingPositionMs = out.currentPosition.coerceAtLeast(0L),
-                            outgoingDurationMs = out.duration.takeIf { it != C.TIME_UNSET && it > 0L }
-                                ?: visual.outgoingDurationMs,
-                        )
+        } else {
+            when (render.style) {
+                TransitionStyle.INTRO_BED,
+                TransitionStyle.INTRO_BRIDGE_FILTER,
+                TransitionStyle.RUNWAY_BLEND -> {
+                    incomingGain = introBedIncomingGain(progress, render.handoffFraction.toFloat())
+                    outgoingGain = introBedOutgoingGain(progress, render.handoffFraction.toFloat())
+
+                    AppSettings.automixVisualTransition.value?.let { visual ->
+                        if (visual.incomingMediaId == player.currentMediaItem?.mediaId) {
+                            AppSettings.automixVisualTransition.value = visual.copy(
+                                progress = introBedVisualProgress(
+                                    progress,
+                                    render.handoffFraction.toFloat(),
+                                ),
+                                outgoingPositionMs = out.currentPosition.coerceAtLeast(0L),
+                                outgoingDurationMs = out.duration
+                                    .takeIf { it != C.TIME_UNSET && it > 0L } ?: visual.outgoingDurationMs,
+                            )
+                        }
                     }
                 }
-            }
-            TransitionStyle.DJ_BLEND -> {
-                if (render.automix25) {
-                    incomingGain = djBlendIncomingGain(progress)
-                    outgoingGain = djBlendOutgoingGain(progress)
-                } else {
+                TransitionStyle.FOREGROUND_TAKEOVER,
+                TransitionStyle.PHRASE_TAKEOVER -> {
+                    incomingGain = riseGain(progress)
+                    outgoingGain = fallGain(progress)
+                    AppSettings.automixVisualTransition.value?.let { visual ->
+                        if (visual.incomingMediaId == player.currentMediaItem?.mediaId) {
+                            AppSettings.automixVisualTransition.value = visual.copy(
+                                progress = progress,
+                                outgoingPositionMs = out.currentPosition.coerceAtLeast(0L),
+                                outgoingDurationMs = out.duration.takeIf { it != C.TIME_UNSET && it > 0L }
+                                    ?: visual.outgoingDurationMs,
+                            )
+                        }
+                    }
+                }
+                TransitionStyle.DJ_BLEND -> {
+                    if (render.automix25) {
+                        incomingGain = djBlendIncomingGain(progress)
+                        outgoingGain = djBlendOutgoingGain(progress)
+                    } else {
+                        incomingGain = riseGain(progress)
+                        outgoingGain = fallGain(progress)
+                    }
+                }
+                TransitionStyle.EQ_SWAP -> {
+                    incomingGain = eqSwapIncomingGain(progress)
+                    outgoingGain = eqSwapOutgoingGain(progress)
+                }
+                TransitionStyle.DJ_FILTER -> {
+                    incomingGain = if (render.automix25) djFilterIncomingGain(progress) else riseGain(progress)
+                    outgoingGain = djFilterOutgoingGain(progress)
+                }
+                TransitionStyle.CUT -> {
+                    incomingGain = cutIncomingGain(progress)
+                    outgoingGain = cutOutgoingGain(progress)
+                }
+                TransitionStyle.PHRASE_CUT -> {
+                    incomingGain = phraseCutIncomingGain(progress, render.handoffFraction.toFloat())
+                    outgoingGain = phraseCutOutgoingGain(progress, render.handoffFraction.toFloat())
+                }
+                else -> {
                     incomingGain = riseGain(progress)
                     outgoingGain = fallGain(progress)
                 }
-            }
-            TransitionStyle.EQ_SWAP -> {
-                incomingGain = eqSwapIncomingGain(progress)
-                outgoingGain = eqSwapOutgoingGain(progress)
-            }
-            TransitionStyle.DJ_FILTER -> {
-                // 2.5 establishes B early under the spectral handoff; 2.0 keeps its historical
-                // sine-rise renderer unchanged.
-                incomingGain = if (render.automix25) djFilterIncomingGain(progress) else riseGain(progress)
-                outgoingGain = djFilterOutgoingGain(progress)
-            }
-            TransitionStyle.CUT -> {
-                incomingGain = cutIncomingGain(progress)
-                outgoingGain = cutOutgoingGain(progress)
-            }
-            TransitionStyle.PHRASE_CUT -> {
-                incomingGain = phraseCutIncomingGain(progress, render.handoffFraction.toFloat())
-                outgoingGain = phraseCutOutgoingGain(progress, render.handoffFraction.toFloat())
-            }
-            else -> {
-                incomingGain = riseGain(progress)
-                outgoingGain = fallGain(progress)
             }
         }
 
