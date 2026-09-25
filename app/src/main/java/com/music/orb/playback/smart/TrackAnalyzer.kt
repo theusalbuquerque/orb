@@ -865,11 +865,14 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
 
     private fun hasIncomingHeadEvidence(analysis: TrackAnalysis): Boolean =
         analysis.analysisSchema >= REMOTE_CURVE_SCHEMA &&
-            analysis.bpm > 0.0 &&
-            analysis.beatConfidence >= READY_FOR_PLAN_MIN_BEAT_CONFIDENCE &&
+            analysis.bpm in 40.0..220.0 &&
             analysis.energyCurve.any { it.time <= LOCAL_TRANSITION_WINDOW_SECONDS + 2.0 } &&
             (
-                analysis.headKey.isNotBlank() ||
+                analysis.beats.isNotEmpty() ||
+                    analysis.downbeats.isNotEmpty() ||
+                    analysis.phraseBoundaries.isNotEmpty() ||
+                    analysis.mixInCandidates.isNotEmpty() ||
+                    analysis.headKey.isNotBlank() ||
                     analysis.key.isNotBlank() ||
                     analysis.mixInTime > 0.0 ||
                     analysis.audibleStartTime != null
@@ -879,11 +882,14 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
         val duration = analysis.duration.takeIf { it.isFinite() && it > 0.0 } ?: return false
         val tailFloor = (duration - LOCAL_TRANSITION_WINDOW_SECONDS - 2.0).coerceAtLeast(0.0)
         return analysis.analysisSchema >= REMOTE_CURVE_SCHEMA &&
-            analysis.bpm > 0.0 &&
-            analysis.beatConfidence >= READY_FOR_PLAN_MIN_BEAT_CONFIDENCE &&
+            analysis.bpm in 40.0..220.0 &&
             analysis.energyCurve.any { it.time >= tailFloor } &&
             (
-                analysis.tailKey.isNotBlank() ||
+                analysis.beats.any { it >= tailFloor } ||
+                    analysis.downbeats.any { it >= tailFloor } ||
+                    analysis.phraseBoundaries.any { it >= tailFloor } ||
+                    analysis.mixOutCandidates.isNotEmpty() ||
+                    analysis.tailKey.isNotBlank() ||
                     analysis.mixOutTime > 0.0 ||
                     analysis.outroStartTime > 0.0 ||
                     analysis.contentEndTime > 0.0
@@ -2534,7 +2540,6 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
         const val REMOTE_CURVE_SCHEMA = 6
         const val LOCAL_METADATA_SCHEMA = 6
         const val LOCAL_TRANSITION_WINDOW_SECONDS = 60.0
-        const val READY_FOR_PLAN_MIN_BEAT_CONFIDENCE = 0.45
         const val TAG = "BitChordTrackAnalyzer"
 
         /**
