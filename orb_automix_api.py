@@ -3425,11 +3425,64 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     # A's measured foreground release. The same prepared B deck then keeps running through the
     # handoff; there is no restart at release.
     runway_markers = [b_impact]
+    annotated_runway_markers: set[float] = set()
     for raw_marker in (b.get("mixInTime"), b.get("introEndTime")):
         marker = _finite(raw_marker, -1.0)
         if b_start + 8.0 <= marker <= min(b_end, b_start + 72.0):
             runway_markers.append(marker)
-    runway_impact = max(runway_markers)
+            annotated_runway_markers.add(marker)
+
+    # Do not pick the latest marker merely because it is later. A later phrase
+    # boundary can be perfectly valid while still being a worse "arrival" than
+    # the first real drop/impact. Score the actual before/after material and let
+    # explicit mix-in / intro-end annotations break close ties.
+    runway_markers = sorted(set(runway_markers))
+    def runway_arrival_score(marker: float) -> float:
+        pre_energy = _mean_window(
+            b_energy,
+            max(b_start, marker - 6.0),
+            marker,
+            0.0,
+        )
+        post_energy = _mean_window(
+            b_energy,
+            marker,
+            min(b_end, marker + 4.0),
+            pre_energy,
+        )
+        pre_low = _mean_window(
+            _low_curve(b),
+            max(b_start, marker - 6.0),
+            marker,
+            0.0,
+        )
+        post_low = _mean_window(
+            _low_curve(b),
+            marker,
+            min(b_end, marker + 4.0),
+            pre_low,
+        )
+        energy_rise = _clamp((post_energy - pre_energy) / 0.35, 0.0, 1.0)
+        low_rise = _clamp((post_low - pre_low) / 0.35, 0.0, 1.0)
+        structure = _creative_structure_fit(b, marker)
+        explicit = 1.0 if marker in annotated_runway_markers else 0.0
+        early = 1.0 - _clamp((marker - b_start - 8.0) / 64.0, 0.0, 1.0)
+        return (
+            0.40 * energy_rise
+            + 0.25 * low_rise
+            + 0.13 * post_energy
+            + 0.10 * structure
+            + 0.08 * explicit
+            + 0.04 * early
+        )
+
+    runway_impact = max(
+        runway_markers,
+        key=lambda marker: (
+            runway_arrival_score(marker),
+            -(marker - b_start),
+        ),
+    )
     runway = max(0.0, runway_impact - b_start)
 
     runway_a_bpm, runway_a_conf = _tempo_near(a, a_release, a_bpm)
@@ -4873,31 +4926,34 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     # score slice may therefore hide a valid long-runway/reference behaviour from
     # tests and telemetry even though it was generated correctly.
     shortlist = list(candidates[:5])
-    runway_seconds = max(0.0, b_impact - b_start)
-    if runway_seconds >= 8.0:
+    runway_candidates = [
+        candidate for candidate in candidates
+        if candidate.get("reason") == "server-long-runway-impact"
+    ]
+    if not runway_candidates:
+        runway_seconds = max(0.0, b_impact - b_start)
         runway_candidates = [
             candidate for candidate in candidates
-            if abs(_finite(candidate.get("incomingCueTime"), -999.0) - b_start) <= 0.75
-            and abs(_finite(candidate.get("incomingHandoffTime"), -999.0) - b_impact)
-                <= max(2.5, 0.14 * runway_seconds)
+            if runway_seconds >= 8.0
+            and abs(_finite(candidate.get("incomingCueTime"), -999.0) - b_start) <= 0.75
             and (
                 _finite(candidate.get("transitionEnd"), 0.0)
                 - _finite(candidate.get("transitionStart"), 0.0)
             ) >= max(8.0, 0.90 * runway_seconds)
         ]
-        if runway_candidates:
-            runway_reference = max(
+    if runway_candidates:
+        runway_reference = max(
                 runway_candidates,
                 key=lambda candidate: (
                     candidate.get("selectionScore", 0.0),
                     candidate.get("score", 0.0),
                 ),
-            )
-            if runway_reference not in shortlist:
-                if len(shortlist) >= 5:
-                    shortlist[-1] = runway_reference
-                else:
-                    shortlist.append(runway_reference)
+        )
+        if runway_reference not in shortlist:
+            if len(shortlist) >= 5:
+                shortlist[-1] = runway_reference
+            else:
+                shortlist.append(runway_reference)
 
     return best, shortlist
 
