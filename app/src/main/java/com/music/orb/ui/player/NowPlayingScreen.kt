@@ -298,36 +298,34 @@ fun fullBleedArtworkAvailable(): Boolean {
 }
 
 /**
- * Reveals B over A from the top edge down with a feathered boundary.
- * Artwork is the first visible element allowed to acknowledge B; title and
- * lyrics intentionally remain owned by A until later in the handoff.
+ * Automix artwork dissolve inspired by the reference player: both covers occupy
+ * the same geometry and B materialises over the whole image instead of entering
+ * through a directional wipe. The tiny scale settle gives the eye depth without
+ * making the cover visibly zoom.
  */
-private fun Modifier.automixTopDownArtworkReveal(progress: Float): Modifier {
+private fun Modifier.automixIncomingArtworkDissolve(progress: Float): Modifier {
     val p = progress.coerceIn(0f, 1f)
-    if (p >= 1f) return this
-    return this
-        .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
-        .drawWithContent {
-            if (p <= 0f) return@drawWithContent
+    val eased = p * p * (3f - 2f * p)
+    return graphicsLayer {
+        alpha = eased
+        val scale = 1.010f - 0.010f * eased
+        scaleX = scale
+        scaleY = scale
+    }
+}
 
-            // Mask the *whole* incoming artwork, not only the feather strip.
-            // The feather itself travels continuously from just above the top
-            // edge to just below the bottom edge. That geometry matters: at
-            // p=1 the mask is already fully white over the whole cover, so there
-            // is no last-frame jump when B finally becomes the only artwork.
-            drawContent()
-            val feather = (size.height * AUTOMIX_ARTWORK_FEATHER_FRACTION).coerceAtLeast(1f)
-            val endY = p * (size.height + feather)
-            val startY = endY - feather
-            drawRect(
-                brush = Brush.verticalGradient(
-                    colors = listOf(Color.White, Color.Transparent),
-                    startY = startY,
-                    endY = endY.coerceAtLeast(startY + 1f),
-                ),
-                blendMode = BlendMode.DstIn,
-            )
-        }
+private fun Modifier.automixOutgoingArtworkDissolve(progress: Float): Modifier {
+    val p = progress.coerceIn(0f, 1f)
+    val eased = p * p * (3f - 2f * p)
+    return graphicsLayer {
+        // Incoming artwork is composited above this layer, so A does not need a
+        // full alpha fade. A very small recession keeps the dissolve dimensional
+        // while avoiding a luminance dip at the midpoint.
+        alpha = 1f
+        val scale = 1f - 0.006f * eased
+        scaleX = scale
+        scaleY = scale
+    }
 }
 
 /**
@@ -813,20 +811,15 @@ fun NowPlayingScreen(
     // The artwork owns the opening phase. Only after it is fully B may the
     // title/artist change; the ThinSlider follows later; transport/control
     // surfaces occupy the remainder of the trip to the bottom edge.
-    val automixIdentitySwitchProgress =
-        (automixArtworkEndFraction + automixLowerSpan * 0.22f).coerceIn(0f, 1f)
+    // In the reference behaviour B's title/artist switch near the beginning of
+    // the dissolve while A's cover remains visible underneath for a moment.
+    val automixIdentitySwitchProgress = 0.08f
     val automixSliderSwitchProgress =
         (automixArtworkEndFraction + automixLowerSpan * 0.48f).coerceIn(0f, 1f)
-    // One global boundary travels from the top of the artwork to the bottom of
-    // the whole Now Playing window. Convert that clock into artwork-local
-    // progress so the cover is complete exactly when the frontier reaches its
-    // lower edge; the same frontier then keeps moving through title/artist,
-    // ThinSlider and finally the transport/control area.
-    val automixArtworkProgress = if (isAutomixArtworkTransition) {
-        (visualTrackProgress / automixArtworkEndFraction).coerceIn(0f, 1f)
-    } else {
-        visualTrackProgress
-    }
+    // Artwork now has its own post-handoff dissolve clock. It is deliberately
+    // not divided by screen geometry: A and B share the same bounds and the
+    // dissolve duration comes from the real remaining mix window.
+    val automixArtworkProgress = visualTrackProgress.coerceIn(0f, 1f)
     // The lower-edge colour field belongs to the control-surface phase, not
     // the artwork phase. Keep it completely on A until the square cover has
     // finished its own top-down reveal; only then let the same boundary begin
@@ -1264,10 +1257,10 @@ fun NowPlayingScreen(
                             alignment = Alignment.TopCenter,
                             modifier = heroArtworkModifier
                                 .then(
-                                    if (!isAutomixArtworkTransition) {
-                                        Modifier.normalOutgoingArtworkTransition(visualTrackProgress)
+                                    if (isAutomixArtworkTransition) {
+                                        Modifier.automixOutgoingArtworkDissolve(automixArtworkProgress)
                                     } else {
-                                        Modifier
+                                        Modifier.normalOutgoingArtworkTransition(visualTrackProgress)
                                     },
                                 )
                                 .graphicsLayer { alpha = heroT },
@@ -1287,11 +1280,7 @@ fun NowPlayingScreen(
                                 when {
                                     visualFromSong == null -> Modifier
                                     isAutomixArtworkTransition ->
-                                        if (isTabletLandscape) {
-                                            Modifier.automixLeftToRightArtworkReveal(automixArtworkProgress)
-                                        } else {
-                                            Modifier.automixTopDownArtworkReveal(automixArtworkProgress)
-                                        }
+                                        Modifier.automixIncomingArtworkDissolve(automixArtworkProgress)
                                     else ->
                                         Modifier.normalIncomingArtworkTransition(visualTrackProgress)
                                 },
