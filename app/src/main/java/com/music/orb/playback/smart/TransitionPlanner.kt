@@ -2315,6 +2315,138 @@ private fun foregroundTakeoverTransition(
 
 private data class AdaptiveSpecialCandidate(val plan: TransitionPlan, val score: Double)
 
+/**
+ * Short evidence-driven underlay for a protected A ending.
+ *
+ * "Protected" means B must not steal foreground early; it does NOT mean the
+ * only legal move is a cut. If B's opening can sit underneath A without a
+ * material vocal collision, keep A authoritative and let B arrive quietly.
+ */
+private fun protectedUnderlayTransition(
+    analysis: TrackAnalysis,
+    nextAnalysis: TrackAnalysis,
+    playbackTime: Double,
+    finalAnchor: Double,
+    nextLength: Double,
+): TransitionPlan? {
+    if (finalAnchor <= 4.0 || nextLength <= 0.0) return null
+
+    val cue = audibleStartOf(nextAnalysis).coerceAtLeast(0.0)
+    val openingEnd = min(nextLength, cue + 8.0)
+    if (openingEnd <= cue + 0.25) return null
+
+    val aActivity = musicalActivityBetween(
+        analysis,
+        max(0.0, finalAnchor - 10.0),
+        finalAnchor,
+    ) ?: 0.5
+    val aVocal = vocalActivityBetween(
+        analysis,
+        max(0.0, finalAnchor - 10.0),
+        finalAnchor,
+    ) ?: analysis.vocalProbability
+    val bActivity = musicalActivityBetween(nextAnalysis, cue, openingEnd) ?: 0.45
+    val bVocal = vocalActivityBetween(nextAnalysis, cue, openingEnd) ?: nextAnalysis.vocalProbability
+
+    // Strong simultaneous lead vocals are the one hard musical veto here.
+    val vocalCollision = min(aVocal, bVocal).coerceIn(0.0, 1.0)
+    if (vocalCollision >= 0.58) return null
+
+    val tempo = overlayTempoPlan(analysis, nextAnalysis)
+    val outRate = tempo.outgoingRate.coerceAtLeast(0.01)
+    val inRate = tempo.incomingRate.coerceAtLeast(0.01)
+    val bpm = tempo.mixBpm.takeIf { it > 0.0 }
+        ?: analysis.bpm.takeIf { it in 40.0..220.0 }
+        ?: nextAnalysis.bpm.takeIf { it in 40.0..220.0 }
+        ?: 120.0
+
+    // Span follows the material: enough time to establish B, but never so long
+    // that a "protected" A stops reading as the foreground record.
+    val room = (
+        (1.0 - vocalCollision) *
+            (0.58 + 0.42 * (1.0 - aActivity).coerceIn(0.0, 1.0)) *
+            (0.45 + 0.55 * bActivity.coerceIn(0.0, 1.0))
+        ).coerceIn(0.0, 1.0)
+    if (room < 0.16) return null
+
+    val beatSpan = (12.0 + 20.0 * room) * 60.0 / bpm
+    val wallSpan = beatSpan.coerceIn(4.0, 14.0)
+    val transitionStart = (finalAnchor - wallSpan * outRate)
+        .coerceAtLeast(max(0.0, playbackTime))
+    val actualWall = (finalAnchor - transitionStart) / outRate
+    if (actualWall < 3.5) return null
+
+    val handoffFraction = (
+        0.76 + 0.18 * (0.62 * aActivity + 0.38 * aVocal).coerceIn(0.0, 1.0)
+        ).coerceIn(0.72, 0.96)
+
+    val gainEnvelope = overlayGainEnvelope(
+        analysis = analysis,
+        nextAnalysis = nextAnalysis,
+        transitionStart = transitionStart,
+        wallDuration = actualWall,
+        handoffFraction = handoffFraction,
+        outgoingRate = outRate,
+        incomingCue = cue,
+        incomingRate = inRate,
+        loop = null,
+        repeats = 0,
+    )
+    if (gainEnvelope.size < 2) return null
+
+    val measuredOverlap = overlayVocalOverlap(
+        analysis = analysis,
+        nextAnalysis = nextAnalysis,
+        transitionStart = transitionStart,
+        wallDuration = actualWall,
+        outgoingRate = outRate,
+        incomingCue = cue,
+        incomingRate = inRate,
+        loop = null,
+        repeats = 0,
+    )
+    if (measuredOverlap >= 0.60) return null
+
+    val spectralDense = aActivity >= 0.72 && bActivity >= 0.58
+    val style = if (spectralDense || measuredOverlap >= 0.30) {
+        TransitionStyle.INTRO_BRIDGE_FILTER
+    } else {
+        TransitionStyle.INTRO_BED
+    }
+
+    return TransitionPlan(
+        shouldStart = playbackTime >= transitionStart,
+        markerVisible = true,
+        transitionStart = transitionStart,
+        transitionEnd = finalAnchor,
+        fadeSeconds = finalAnchor - transitionStart,
+        handoffDuration = finalAnchor - transitionStart,
+        incomingCueTime = cue,
+        incomingHandoffTime = cue + actualWall * inRate,
+        outgoingPlaybackRate = outRate,
+        incomingPlaybackRate = inRate,
+        pickupSeconds = cue,
+        bassSwap = spectralDense,
+        bassSwapFraction = handoffFraction,
+        handoffFraction = handoffFraction,
+        filterSweep = if (style == TransitionStyle.INTRO_BRIDGE_FILTER) {
+            (0.30 + 0.45 * room).coerceIn(0.30, 0.78)
+        } else {
+            0.0
+        },
+        gainEnvelope = gainEnvelope,
+        vocalOverlap = measuredOverlap,
+        outgoingBpm = tempo.mixBpm.takeIf { it > 0.0 } ?: analysis.bpm.orZero(),
+        incomingBpm = tempo.mixBpm.takeIf { it > 0.0 } ?: nextAnalysis.bpm.orZero(),
+        transitionStyle = style,
+        reason = if (playbackTime >= transitionStart) {
+            "protected-adaptive-underlay"
+        } else {
+            "before-protected-adaptive-underlay"
+        },
+    )
+}
+
 private fun chooseAdaptiveSpecialTransition(
     analysis: TrackAnalysis,
     nextAnalysis: TrackAnalysis,
@@ -2362,6 +2494,25 @@ private fun chooseAdaptiveSpecialTransition(
         candidates += AdaptiveSpecialCandidate(plan, score)
     }
 
+    if (protected) {
+        protectedUnderlayTransition(
+            analysis = analysis,
+            nextAnalysis = nextAnalysis,
+            playbackTime = playbackTime,
+            finalAnchor = finalMixAnchor,
+            nextLength = nextLength,
+        )?.let { plan ->
+            val clash = plan.vocalOverlap.coerceIn(0.0, 1.0)
+            val spanFit = ((plan.fadeSeconds - 4.0) / 10.0).coerceIn(0.0, 1.0)
+            val score =
+                0.52 +
+                    0.18 * (1.0 - clash) +
+                    0.10 * spanFit +
+                    0.08 * tempoCompatibility
+            candidates += AdaptiveSpecialCandidate(plan, score)
+        }
+    }
+
     foregroundTakeoverTransition(analysis, nextAnalysis, playbackTime, finalMixAnchor)?.let { plan ->
         val outgoingRelease = (1.0 - (0.62 * aTailActivity + 0.38 * aTailVocal)).coerceIn(0.0, 1.0)
         val incomingAssert = (0.68 * bOpenActivity + 0.32 * bOpenVocal).coerceIn(0.0, 1.0)
@@ -2392,15 +2543,26 @@ private fun chooseAdaptiveSpecialTransition(
 
     if (candidates.isEmpty()) return null
 
-    // A protected ending is a hard musical-integrity rail, not a scoring preference. If B can
-    // safely sit underneath it, use that intro. Otherwise preserve A to its natural end and use
-    // the short clean handoff. A symmetric blend must never win merely because its grid score is high.
+    // A protected ending keeps foreground ownership of A, but no longer implies a cut.
+    // Prefer any measured underlay that can coexist safely; CUT is the last resort only
+    // when every overlapping candidate would create a material vocal/arrangement collision.
     if (protected) {
         candidates
-            .filter { it.plan.transitionStyle == TransitionStyle.INTRO_BED || it.plan.transitionStyle == TransitionStyle.INTRO_BRIDGE_FILTER }
+            .filter {
+                it.plan.transitionStyle == TransitionStyle.INTRO_BED ||
+                    it.plan.transitionStyle == TransitionStyle.INTRO_BRIDGE_FILTER
+            }
+            .filter { it.plan.vocalOverlap < 0.60 }
             .maxByOrNull { it.score }
-            ?.takeIf { it.score >= 0.50 }
+            ?.takeIf { it.score >= 0.46 }
             ?.let { return it.plan }
+
+        candidates
+            .filter { it.plan.transitionStyle != TransitionStyle.CUT }
+            .maxByOrNull { it.score }
+            ?.takeIf { it.score >= 0.52 }
+            ?.let { return it.plan }
+
         candidates.firstOrNull { it.plan.transitionStyle == TransitionStyle.CUT }?.let { return it.plan }
     }
 
