@@ -110,7 +110,7 @@ def _plan_cache_key(outgoing: dict[str, Any], incoming: dict[str, Any]) -> str:
             f"{_finite(track.get('mixOutTime')):.3f}",
             f"{_finite(track.get('contentEndTime')):.3f}",
         ])
-    return f"mix-v11::{fingerprint(outgoing)}>>{fingerprint(incoming)}"
+    return f"mix-v12::{fingerprint(outgoing)}>>{fingerprint(incoming)}"
 
 
 def _plan_cache_get(key: str) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
@@ -1164,7 +1164,7 @@ async def health() -> dict[str, Any]:
         "version": API_VERSION,
         "automixVersion": "2.5",
         "analyzer": "orb-metadata-planner-v8",
-        "plannerRevision": "mix-v11",
+        "plannerRevision": "mix-v12",
         "analysisSchema": ANALYSIS_SCHEMA,
     }
 
@@ -2888,6 +2888,494 @@ def _candidate_selection_score(candidate: dict[str, Any]) -> float:
     )
 
 
+
+def _creative_cue_candidates(track: dict[str, Any], start: float, end: float) -> list[float]:
+    """Musically meaningful B entry points, independent of any transition family."""
+    ceiling = min(end, start + 62.0)
+    raw: set[float] = {start}
+
+    for key in ("mixInTime", "introEndTime", "pickupTime", "firstBeat"):
+        value = _finite(track.get(key), -1.0)
+        if start <= value <= ceiling:
+            raw.add(value)
+
+    for key in ("mixInCandidates",):
+        items = track.get(key) or []
+        if isinstance(items, list):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                value = _finite(item.get("time"), -1.0)
+                if start <= value <= ceiling:
+                    raw.add(value)
+
+    # Phrase/downbeat entry is deliberately allowed well after 0:00. The supplied
+    # reference mixes sometimes skip an unhelpful opening and enter where B's
+    # arrangement actually speaks to A.
+    for key in ("phraseBoundaries", "downbeats"):
+        values = track.get(key) or []
+        if isinstance(values, list):
+            for item in values:
+                value = _finite(item, -1.0)
+                if start <= value <= ceiling:
+                    raw.add(value)
+
+    first_vocal = _first_sustained_vocal(track)
+    if first_vocal is not None:
+        # A useful pre-vocal launch point often sits one short phrase before the
+        # first sustained lead rather than at the vocal itself.
+        for lead in (0.0, 4.0, 8.0):
+            value = max(start, first_vocal - lead)
+            if value <= ceiling:
+                raw.add(value)
+
+    energy = _curve(track, "energyCurve")
+    for index, (time_s, value) in enumerate(energy):
+        if time_s < start + 2.0 or time_s > ceiling or value < 0.20:
+            continue
+        previous = _mean_window(energy, max(start, time_s - 3.0), time_s, value)
+        if value - previous >= 0.08:
+            raw.add(time_s)
+
+    ordered = sorted(value for value in raw if start <= value < end - 0.25)
+    # Merge nearly-identical structural detections so the search spends its budget
+    # exploring genuinely different musical entrances.
+    merged: list[float] = []
+    for value in ordered:
+        if not merged or value - merged[-1] >= 0.85:
+            merged.append(value)
+
+    if len(merged) <= 16:
+        return merged
+    # Preserve early, middle and later choices rather than truncating at the intro.
+    indexes = sorted(set(
+        [0, 1, 2, 3, 4]
+        + [round(i * (len(merged) - 1) / 10.0) for i in range(1, 10)]
+        + [len(merged) - 2, len(merged) - 1]
+    ))
+    return [merged[index] for index in indexes[:16]]
+
+
+def _creative_takeover_targets(
+    track: dict[str, Any],
+    release: float,
+    end: float,
+    protected: bool,
+) -> list[float]:
+    """Possible moments where B may become foreground while A can continue as a tail."""
+    floor = max(0.0, end - 42.0)
+    raw: set[float] = {release, end}
+    mix_out = _finite(track.get("mixOutTime"), -1.0)
+    if floor <= mix_out <= end:
+        raw.add(mix_out)
+    items = track.get("mixOutCandidates") or []
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            value = _finite(item.get("time"), -1.0)
+            if floor <= value <= end:
+                raw.add(value)
+    for key in ("phraseBoundaries", "downbeats"):
+        values = track.get(key) or []
+        if isinstance(values, list):
+            for item in values:
+                value = _finite(item, -1.0)
+                if floor <= value <= end:
+                    raw.add(value)
+
+    candidates = sorted(raw)
+    # A protected ending may still carry B underneath it, but foreground ownership
+    # cannot be handed over materially before the measured release.
+    if protected:
+        candidates = [value for value in candidates if value >= release - 0.15]
+    else:
+        candidates = [value for value in candidates if value >= max(floor, release - 12.0)]
+
+    # Keep a small, distributed set around the musically important release/end.
+    candidates.sort(key=lambda value: (abs(value - release), abs(value - end)))
+    return sorted(candidates[:6])
+
+
+def _creative_b_landmarks(
+    track: dict[str, Any],
+    cue: float,
+    end: float,
+    impact: float,
+) -> list[float]:
+    raw: set[float] = set()
+    for value in (
+        impact,
+        _finite(track.get("mixInTime"), -1.0),
+        _finite(track.get("introEndTime"), -1.0),
+        _first_sustained_vocal(track) or -1.0,
+    ):
+        if cue + 1.5 <= value <= min(end, cue + 48.0):
+            raw.add(value)
+    for key in ("phraseBoundaries", "downbeats"):
+        values = track.get(key) or []
+        if isinstance(values, list):
+            for item in values:
+                value = _finite(item, -1.0)
+                if cue + 2.0 <= value <= min(end, cue + 48.0):
+                    raw.add(value)
+    # A virtual landmark lets the search consider a clean short entrance even if
+    # the analyzer found no named structural event nearby.
+    for delta in (6.0, 10.0, 16.0, 24.0, 32.0):
+        value = cue + delta
+        if value < end - 0.25:
+            raw.add(value)
+    values = sorted(raw)
+    if len(values) <= 8:
+        return values
+    indexes = sorted(set(round(i * (len(values) - 1) / 7.0) for i in range(8)))
+    return [values[index] for index in indexes]
+
+
+def _creative_vocal_clash(
+    a: dict[str, Any],
+    b: dict[str, Any],
+    start: float,
+    end: float,
+    cue: float,
+    outgoing_rate: float,
+    incoming_rate: float,
+) -> float:
+    a_vocal = _vocal_curve(a)
+    b_vocal = _vocal_curve(b)
+    default_a = _clamp(_finite(a.get("vocalProbability"), 0.5), 0.0, 1.0)
+    default_b = _clamp(_finite(b.get("vocalProbability"), 0.5), 0.0, 1.0)
+    wall = (end - start) / max(outgoing_rate, 1e-6)
+    if wall <= 0.0:
+        return 1.0
+    samples: list[float] = []
+    for index in range(13):
+        p = index / 12.0
+        elapsed = wall * p
+        a_time = start + elapsed * outgoing_rate
+        b_time = cue + elapsed * incoming_rate
+        av = _mean_window(a_vocal, max(0.0, a_time - 0.45), a_time + 0.45, default_a)
+        bv = _mean_window(b_vocal, max(0.0, b_time - 0.45), b_time + 0.45, default_b)
+        samples.append(min(av, bv))
+    return _clamp(
+        0.68 * (sum(samples) / max(1, len(samples))) + 0.32 * max(samples),
+        0.0,
+        1.0,
+    )
+
+
+def _creative_structure_fit(track: dict[str, Any], time_s: float) -> float:
+    distances: list[float] = []
+    for key in ("phraseBoundaries", "downbeats"):
+        values = track.get(key) or []
+        if isinstance(values, list):
+            for item in values:
+                value = _finite(item, -1.0)
+                if value >= 0.0:
+                    distances.append(abs(value - time_s))
+    if not distances:
+        return 0.50
+    return _clamp(1.0 - min(distances) / 2.0, 0.0, 1.0)
+
+
+def _label_creative_choreography(
+    *,
+    span: float,
+    cue_skip: float,
+    handoff_fraction: float,
+    b_open_vocal: float,
+    filter_strength: float,
+    tempo_fit: float,
+    phase_fit: float,
+    key_fit: float,
+    low_collision: float,
+) -> str:
+    """Describe an already-authored choreography; never use the label to author it."""
+    if handoff_fraction <= 0.50:
+        return "PHRASE_TAKEOVER" if cue_skip >= 4.0 else "FOREGROUND_TAKEOVER"
+
+    if span >= 16.0 and b_open_vocal < 0.42:
+        if filter_strength >= 0.44:
+            return "INTRO_BRIDGE_FILTER"
+        if cue_skip <= 3.0:
+            return "RUNWAY_BLEND"
+        return "INTRO_BED"
+
+    beat_coherent = tempo_fit >= 0.68 and phase_fit >= 0.58
+    if beat_coherent:
+        if low_collision >= 0.34 and key_fit >= 0.45:
+            return "EQ_SWAP"
+        if filter_strength >= 0.48 or key_fit < 0.42:
+            return "DJ_FILTER"
+        return "DJ_BLEND"
+
+    if b_open_vocal < 0.40 and span >= 6.0:
+        return "INTRO_BRIDGE_FILTER" if filter_strength >= 0.40 else "INTRO_BED"
+
+    return "DJ_FILTER" if filter_strength >= 0.34 else "PHRASE_TAKEOVER"
+
+
+def _creative_choreography_candidates(
+    a: dict[str, Any],
+    b: dict[str, Any],
+    *,
+    a_release: float,
+    a_end: float,
+    protected: bool,
+    b_start: float,
+    b_end: float,
+    b_impact: float,
+    key_fit: float,
+) -> list[dict[str, Any]]:
+    """Search choreography first, label second.
+
+    The search is deliberately continuous-ish rather than family-first: B may
+    start at 0:00 or well into its opening, coexist quietly with A, take over
+    before A ends, or remain subordinate until the final phrase. Gain, tempo and
+    DSP are derived from the actual overlap. Only after a candidate is complete
+    do we attach a familiar family name for UI/rendering semantics.
+    """
+    if a_end <= 0.0 or b_end <= b_start + 0.5:
+        return []
+
+    cues = _creative_cue_candidates(b, b_start, b_end)
+    takeovers = _creative_takeover_targets(a, a_release, a_end, protected)
+    if not cues or not takeovers:
+        return []
+
+    a_energy = _curve(a, "energyCurve")
+    b_energy = _curve(b, "energyCurve")
+    b_vocal_curve = _vocal_curve(b)
+    results: list[dict[str, Any]] = []
+
+    for cue in cues:
+        landmarks = _creative_b_landmarks(b, cue, b_end, b_impact)
+        if not landmarks:
+            continue
+
+        b_probe_end = min(b_end, cue + 8.0)
+        b_open_vocal = _mean_window(
+            b_vocal_curve,
+            cue,
+            b_probe_end,
+            _finite(b.get("vocalProbability"), 0.5),
+        )
+        b_open_activity = _mean_window(b_energy, cue, b_probe_end, 0.45)
+
+        for takeover in takeovers:
+            if takeover <= 0.0:
+                continue
+            for landmark in landmarks:
+                b_local_bpm, b_local_conf = _tempo_near(b, landmark, _transition_bpm(b, "incoming"))
+                a_local_bpm, a_local_conf = _tempo_near(a, takeover, _transition_bpm(a, "outgoing"))
+                if a_local_bpm > 0.0 and b_local_bpm > 0.0:
+                    while b_local_bpm / a_local_bpm > 1.5:
+                        b_local_bpm /= 2.0
+                    while b_local_bpm / a_local_bpm < 0.67:
+                        b_local_bpm *= 2.0
+                tempo_fit = (
+                    _clamp(1.0 - abs(b_local_bpm / a_local_bpm - 1.0) / 0.16, 0.0, 1.0)
+                    if a_local_bpm > 0.0 and b_local_bpm > 0.0
+                    else 0.0
+                )
+                out_rate, in_rate = _tempo_bridge_rates(a_local_bpm, b_local_bpm)
+
+                b_runway = landmark - cue
+                if b_runway <= 0.0:
+                    continue
+                start = takeover - b_runway * out_rate / max(in_rate, 1e-6)
+                # The creative references include long overlaps, but 52 seconds is
+                # a generous upper rail that prevents consuming entire songs.
+                earliest = max(0.0, a_end - 52.0)
+                if start < earliest or start >= takeover - 1.0:
+                    continue
+
+                span = a_end - start
+                if span < 3.5 or span > 54.0:
+                    continue
+                wall = span / max(out_rate, 1e-6)
+                b_end_during_mix = cue + wall * in_rate
+                if b_end_during_mix > b_end + 0.35:
+                    continue
+
+                handoff_fraction = _clamp(
+                    (takeover - start) / max(span, 1e-6),
+                    0.16,
+                    0.97,
+                )
+                curve = _transition_curve_metrics(
+                    a,
+                    b,
+                    start,
+                    a_end,
+                    cue,
+                    out_rate,
+                    in_rate,
+                )
+                curve_fit = float(curve.get("compatibility", 0.5))
+                harmonic_fit = float(curve.get("harmonicFit", 0.5))
+                spectral_fit = float(curve.get("spectralFit", 0.5))
+                energy_fit = float(curve.get("energyShapeFit", 0.5))
+                low_collision = float(curve.get("lowCollision", 0.0))
+                phase_fit, phase_error_ms = _beat_phase_metrics(
+                    a,
+                    b,
+                    takeover,
+                    landmark,
+                    a_local_bpm,
+                    b_local_bpm,
+                    out_rate,
+                    in_rate,
+                )
+                vocal_clash = _creative_vocal_clash(
+                    a,
+                    b,
+                    start,
+                    a_end,
+                    cue,
+                    out_rate,
+                    in_rate,
+                )
+
+                filter_strength = _clamp(
+                    0.54 * (1.0 - spectral_fit)
+                    + 0.30 * low_collision
+                    + 0.24 * vocal_clash
+                    - 0.18 * key_fit,
+                    0.0,
+                    0.86,
+                )
+                gain, mixability, clutter = _adaptive_overlap_gain_envelope(
+                    a,
+                    b,
+                    start,
+                    a_end,
+                    cue,
+                    out_rate,
+                    in_rate,
+                    handoff_fraction,
+                    filter_strength=filter_strength,
+                )
+
+                # Hard veto only for a true duet/clutter disaster. Everything else
+                # competes continuously instead of being discarded for not matching
+                # a named family.
+                if vocal_clash >= 0.72 and mixability < 0.20:
+                    continue
+                if clutter >= 0.84 and mixability < 0.18:
+                    continue
+
+                a_structure = _creative_structure_fit(a, takeover)
+                b_structure = _creative_structure_fit(b, landmark)
+                phrase_fit = min(a_structure, b_structure)
+                cue_skip = max(0.0, cue - b_start)
+                deep_skip_penalty = _clamp((cue_skip - 48.0) / 16.0, 0.0, 1.0)
+                span_fit = _clamp(1.0 - abs(span - 14.0) / 42.0, 0.0, 1.0)
+                pair_fit = _clamp(
+                    0.23 * mixability
+                    + 0.16 * curve_fit
+                    + 0.13 * tempo_fit
+                    + 0.11 * phase_fit
+                    + 0.10 * key_fit
+                    + 0.09 * phrase_fit
+                    + 0.07 * energy_fit
+                    + 0.06 * (1.0 - vocal_clash)
+                    + 0.05 * (1.0 - clutter),
+                    0.0,
+                    1.0,
+                )
+                score = _clamp(
+                    0.24
+                    + 0.28 * pair_fit
+                    + 0.16 * mixability
+                    + 0.10 * (1.0 - vocal_clash)
+                    + 0.08 * curve_fit
+                    + 0.06 * phrase_fit
+                    + 0.05 * tempo_fit
+                    + 0.03 * b_open_activity
+                    - 0.10 * deep_skip_penalty,
+                    0.0,
+                    1.0,
+                )
+
+                style = _label_creative_choreography(
+                    span=span,
+                    cue_skip=cue_skip,
+                    handoff_fraction=handoff_fraction,
+                    b_open_vocal=b_open_vocal,
+                    filter_strength=filter_strength,
+                    tempo_fit=tempo_fit,
+                    phase_fit=phase_fit,
+                    key_fit=key_fit,
+                    low_collision=low_collision,
+                )
+                handoff_media = cue + (
+                    (takeover - start) / max(out_rate, 1e-6)
+                ) * in_rate
+                handoff_media = _clamp(handoff_media, cue, max(cue, b_end - 0.25))
+
+                results.append(_candidate_plan(
+                    style,
+                    score,
+                    "server-freeform-choreography",
+                    transitionStart=round(start, 4),
+                    transitionEnd=round(a_end, 4),
+                    incomingCueTime=round(cue, 4),
+                    incomingHandoffTime=round(handoff_media, 4),
+                    outgoingPlaybackRate=round(out_rate, 6),
+                    incomingPlaybackRate=round(in_rate, 6),
+                    outgoingLocalBpm=round(a_local_bpm, 4),
+                    incomingLocalBpm=round(b_local_bpm, 4),
+                    transitionBeats=max(1, round(span * max(a_local_bpm, 60.0) / 60.0)),
+                    requestedTransitionBeats=max(1, round(span * max(a_local_bpm, 60.0) / 60.0)),
+                    handoffFraction=round(handoff_fraction, 4),
+                    bassSwap=bool(low_collision >= 0.26 and tempo_fit >= 0.42),
+                    bassSwapFraction=round(handoff_fraction, 4),
+                    filterSweep=round(filter_strength, 4),
+                    gainEnvelope=gain,
+                    pairCompatibility=round(pair_fit, 4),
+                    curveCompatibility=round(curve_fit, 4),
+                    phraseAlignment=round(phrase_fit, 4),
+                    tempoCompatibility=round(tempo_fit, 4),
+                    keyCompatibility=round(key_fit, 4),
+                    overlapVocalClash=round(vocal_clash, 4),
+                    energyCompatibility=round(energy_fit, 4),
+                    spanCompatibility=round(span_fit, 4),
+                    lowBandCollision=round(low_collision, 4),
+                    harmonicCurveFit=round(harmonic_fit, 4),
+                    spectralCurveFit=round(spectral_fit, 4),
+                    beatPhaseFit=round(phase_fit, 4),
+                    beatPhaseErrorMs=round(phase_error_ms, 2),
+                    cueSkipSeconds=round(cue_skip, 4),
+                    choreographyAuthored=True,
+                    protectedOutgoing=protected,
+                ))
+
+    # Keep the strongest diverse choreographies rather than flooding the old
+    # compatibility generators with tiny variants of the same cue.
+    for candidate in results:
+        candidate["selectionScore"] = round(_candidate_selection_score(candidate), 4)
+    results.sort(
+        key=lambda candidate: (
+            candidate.get("selectionScore", 0.0),
+            candidate.get("score", 0.0),
+        ),
+        reverse=True,
+    )
+    diverse: list[dict[str, Any]] = []
+    for candidate in results:
+        if any(
+            abs(_finite(candidate.get("incomingCueTime")) - _finite(existing.get("incomingCueTime"))) < 1.0
+            and abs(_finite(candidate.get("transitionStart")) - _finite(existing.get("transitionStart"))) < 1.5
+            for existing in diverse
+        ):
+            continue
+        diverse.append(candidate)
+        if len(diverse) >= 12:
+            break
+    return diverse
+
+
 def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     a_release, a_end, protected = _release_landmarks(a)
     b_audible_start = _audible_start(b)
@@ -2915,6 +3403,20 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
     tempo_bridge_ok = tempo_distance <= 0.08
     vocal_clash = min(a_tail_vocal, b_open_vocal)
     candidates: list[dict[str, Any]] = []
+
+    # Primary mix-v12 search: author choreography without choosing a family first.
+    # Legacy family generators below remain as compatibility/fallback search paths.
+    candidates.extend(_creative_choreography_candidates(
+        a,
+        b,
+        a_release=a_release,
+        a_end=a_end,
+        protected=protected,
+        b_start=b_start,
+        b_end=b_end,
+        b_impact=b_impact,
+        key_fit=key_fit,
+    ))
 
     # 0) Long runway blend. The references supplied for 2.5 show a recurring pattern:
     # B can already be 13-30+ seconds into its opening when ownership changes, while A still
@@ -4363,7 +4865,7 @@ def _remote_plan(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], 
             4,
         )
 
-    best["planner"] = "orb-automix-2.5-mix-v11"
+    best["planner"] = "orb-automix-2.5-mix-v12"
     best["serverAuthoritative"] = True
     return best, candidates[:5]
 
@@ -4423,7 +4925,7 @@ def _resilient_plan_fallback(
         "filterSweep": 0.0,
         "gainEnvelope": [],
         "tempoEnvelope": [],
-        "planner": "orb-automix-2.5-mix-v11",
+        "planner": "orb-automix-2.5-mix-v12",
         "serverAuthoritative": True,
     }
     return plan_result, [dict(plan_result)]
@@ -4476,7 +4978,7 @@ async def plan(request: PlanRequest) -> dict[str, Any]:
     # minimal fallback is selected here on the server; Android may only reject impossible bounds.
     plan_result = dict(plan_result)
     plan_result["serverAuthoritative"] = True
-    plan_result["planner"] = "orb-automix-2.5-mix-v11"
+    plan_result["planner"] = "orb-automix-2.5-mix-v12"
     return {
         "version": API_VERSION,
         "automixVersion": "2.5",
