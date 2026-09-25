@@ -1641,10 +1641,10 @@ fun NowPlayingScreen(
                                     modifier = Modifier
                                         .fillMaxSize()
                                         .then(
-                                            if (!isAutomixArtworkTransition) {
-                                                Modifier.normalOutgoingArtworkTransition(visualTrackProgress)
+                                            if (isAutomixArtworkTransition) {
+                                                Modifier.automixOutgoingArtworkDissolve(automixArtworkProgress)
                                             } else {
-                                                Modifier
+                                                Modifier.normalOutgoingArtworkTransition(visualTrackProgress)
                                             },
                                         ),
                                 )
@@ -1663,7 +1663,7 @@ fun NowPlayingScreen(
                                         when {
                                             visualFromSong == null -> Modifier
                                             isAutomixArtworkTransition ->
-                                                Modifier.automixTopDownArtworkReveal(automixArtworkProgress)
+                                                Modifier.automixIncomingArtworkDissolve(automixArtworkProgress)
                                             else ->
                                                 Modifier.normalIncomingArtworkTransition(visualTrackProgress)
                                         },
