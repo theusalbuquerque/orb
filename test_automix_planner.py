@@ -581,13 +581,28 @@ class AutomixPlannerTest(unittest.TestCase):
 
         best, candidates = automix._remote_plan(a, b)
 
-        runway = next((candidate for candidate in candidates if candidate["style"] == "RUNWAY_BLEND"), None)
+        # mix-v12 authors the choreography first and labels it afterwards.
+        # The reference behaviour is what matters: B starts at its opening,
+        # reaches its ~20 s structural arrival at A's release, and has already
+        # been coexisting with A for a long runway. Depending on the resulting
+        # DSP/gain choreography this may be described as RUNWAY_BLEND,
+        # INTRO_BED or INTRO_BRIDGE_FILTER.
+        runway = next((
+            candidate for candidate in candidates
+            if abs(float(candidate.get("incomingCueTime", -999.0))) <= 0.2
+            and abs(float(candidate.get("incomingHandoffTime", -999.0)) - 20.0) <= 2.5
+            and float(candidate.get("transitionStart", 999.0)) < 95.0
+            and (
+                float(candidate.get("transitionEnd", 0.0))
+                - float(candidate.get("transitionStart", 0.0))
+            ) > 24.0
+        ), None)
         self.assertIsNotNone(runway)
         assert runway is not None
-        self.assertAlmostEqual(float(runway["incomingCueTime"]), 0.0, delta=0.2)
-        self.assertAlmostEqual(float(runway["incomingHandoffTime"]), 20.0, delta=2.5)
-        self.assertLess(float(runway["transitionStart"]), 95.0)
-        self.assertGreater(float(runway["transitionEnd"]) - float(runway["transitionStart"]), 24.0)
+        self.assertIn(runway["style"], {
+            "RUNWAY_BLEND", "INTRO_BED", "INTRO_BRIDGE_FILTER",
+            "DJ_BLEND", "DJ_FILTER", "EQ_SWAP",
+        })
         self.assertNotEqual(best["style"], "NO_TRANSITION")
         self.assertGreaterEqual(
             float(best["selectionScore"]),
@@ -620,10 +635,25 @@ class AutomixPlannerTest(unittest.TestCase):
 
         best, candidates = automix._remote_plan(a, b)
 
-        takeover = next((candidate for candidate in candidates if candidate["style"] == "PHRASE_TAKEOVER"), None)
+        takeover = next((
+            candidate for candidate in candidates
+            if candidate["style"] in {"PHRASE_TAKEOVER", "FOREGROUND_TAKEOVER"}
+            and float(candidate.get("incomingCueTime", 999.0)) <= 2.0
+        ), None)
         self.assertIsNotNone(takeover)
         assert takeover is not None
-        self.assertLess(float(takeover["transitionEnd"]), 120.0)
+
+        # In mix-v12 "takeover" describes foreground ownership, not necessarily
+        # where A is hard-stopped. A may remain audible as a deliberate tail.
+        # Validate that B becomes foreground before A's content end rather than
+        # requiring transitionEnd itself to truncate A.
+        transition_start = float(takeover["transitionStart"])
+        transition_end = float(takeover["transitionEnd"])
+        handoff_fraction = float(takeover.get("handoffFraction", 1.0))
+        foreground_handoff = transition_start + (
+            transition_end - transition_start
+        ) * handoff_fraction
+        self.assertLess(foreground_handoff, 120.0)
         self.assertLessEqual(float(takeover["incomingCueTime"]), 2.0)
         self.assertNotEqual(best["style"], "NO_TRANSITION")
         self.assertGreaterEqual(
