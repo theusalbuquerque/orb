@@ -758,7 +758,9 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
                     Log.d(
                         TAG,
                         "HEAD-ready $trackId in ${SystemClock.elapsedRealtime() - started}ms " +
-                            "bpm=${analysis.bpm} conf=${analysis.beatConfidence}",
+                            "bpm=${analysis.bpm} conf=${analysis.beatConfidence} " +
+                            "planReady=${hasIncomingHeadEvidence(analysis)} " +
+                            "energyPoints=${analysis.energyCurve.size}",
                     )
                 } else {
                     deferReliableRetry(trackId)
@@ -866,34 +868,22 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
     private fun hasIncomingHeadEvidence(analysis: TrackAnalysis): Boolean =
         analysis.analysisSchema >= REMOTE_CURVE_SCHEMA &&
             analysis.bpm in 40.0..220.0 &&
-            analysis.energyCurve.any { it.time <= LOCAL_TRANSITION_WINDOW_SECONDS + 2.0 } &&
-            (
-                analysis.beats.isNotEmpty() ||
-                    analysis.downbeats.isNotEmpty() ||
-                    analysis.phraseBoundaries.isNotEmpty() ||
-                    analysis.mixInCandidates.isNotEmpty() ||
-                    analysis.headKey.isNotBlank() ||
-                    analysis.key.isNotBlank() ||
-                    analysis.mixInTime > 0.0 ||
-                    analysis.audibleStartTime != null
-            )
+            analysis.energyCurve.any { point ->
+                point.time.isFinite() &&
+                    point.energy.isFinite() &&
+                    point.time <= LOCAL_TRANSITION_WINDOW_SECONDS + 2.0
+            }
 
     private fun hasOutgoingTailEvidence(analysis: TrackAnalysis): Boolean {
         val duration = analysis.duration.takeIf { it.isFinite() && it > 0.0 } ?: return false
         val tailFloor = (duration - LOCAL_TRANSITION_WINDOW_SECONDS - 2.0).coerceAtLeast(0.0)
         return analysis.analysisSchema >= REMOTE_CURVE_SCHEMA &&
             analysis.bpm in 40.0..220.0 &&
-            analysis.energyCurve.any { it.time >= tailFloor } &&
-            (
-                analysis.beats.any { it >= tailFloor } ||
-                    analysis.downbeats.any { it >= tailFloor } ||
-                    analysis.phraseBoundaries.any { it >= tailFloor } ||
-                    analysis.mixOutCandidates.isNotEmpty() ||
-                    analysis.tailKey.isNotBlank() ||
-                    analysis.mixOutTime > 0.0 ||
-                    analysis.outroStartTime > 0.0 ||
-                    analysis.contentEndTime > 0.0
-            )
+            analysis.energyCurve.any { point ->
+                point.time.isFinite() &&
+                    point.energy.isFinite() &&
+                    point.time >= tailFloor
+            }
     }
 
     /**
@@ -958,7 +948,9 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
                     Log.d(
                         TAG,
                         "TAIL-ready $trackId in ${SystemClock.elapsedRealtime() - started}ms " +
-                            "bpm=${analysis.bpm} conf=${analysis.beatConfidence}",
+                            "bpm=${analysis.bpm} conf=${analysis.beatConfidence} " +
+                            "planReady=${hasOutgoingTailEvidence(analysis)} " +
+                            "energyPoints=${analysis.energyCurve.size}",
                     )
                 } else {
                     deferReliableRetry(trackId)
