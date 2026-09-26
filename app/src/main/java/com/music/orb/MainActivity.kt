@@ -134,7 +134,6 @@ import com.music.orb.data.scrobbling.LastFM
 import com.music.orb.data.settings.AppSettings
 import com.music.orb.data.settings.HomeSuggestionStore
 import com.music.orb.data.settings.RecentPlaybackStore
-import com.music.orb.data.settings.AlbumExclusionStore
 import com.music.orb.data.settings.ArtistPreference
 import com.music.orb.data.settings.ArtistPreferenceStore
 import com.music.orb.data.settings.FirstAccountOnboardingStore
@@ -2552,6 +2551,7 @@ private fun BitChordApp(
                 showLastfmLogin ||
                 publicProfileUserId != null ||
                 showOrbProfile ||
+                showPlaybackHistory ||
                 showAccountIntegrations ||
                 showSources ||
                 showSettings ||
@@ -2578,6 +2578,7 @@ private fun BitChordApp(
                     showOrbProfile = false
                     showAccountIntegrations = true
                 }
+                showPlaybackHistory -> showPlaybackHistory = false
                 showAccountIntegrations -> showAccountIntegrations = false
                 showSources -> {
                     showSources = false
