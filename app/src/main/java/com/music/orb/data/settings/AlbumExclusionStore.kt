@@ -91,9 +91,10 @@ object AlbumExclusionStore {
         val prefs = preferences ?: return
         val root = JSONObject()
         values.entries
+            .toList()
             .takeLast(MAX_ALBUMS)
-            .forEach { (albumId, tracks) ->
-                root.put(albumId, JSONArray(tracks.toList()))
+            .forEach { entry ->
+                root.put(entry.key, JSONArray(entry.value.toList()))
             }
         prefs.edit().putString(KEY_PREFIX + key, root.toString()).apply()
     }
