@@ -730,7 +730,7 @@ object YtMusicRepository {
         if (kind == null) return true
         val count = Regex("""(?i)(\\d+)\\s+(?:songs?|tracks?|músicas?|canciones?)""")
             .find(metadata)?.groupValues?.getOrNull(1)?.toIntOrNull()
-        return count != 1
+        return count != null && count > 1
     }
 
     private fun distinctShelfItems(items: List<ShelfItem>): List<ShelfItem> {
