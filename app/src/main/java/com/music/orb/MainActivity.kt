@@ -215,6 +215,7 @@ import com.music.orb.ui.screens.HOME_TOP_ARTISTS_SHELF_TITLE
 import com.music.orb.ui.screens.HOME_FAVORITE_ALBUM_RELEASES_SHELF_TITLE
 import com.music.orb.ui.screens.LibraryScreen
 import com.music.orb.ui.screens.SearchScreen
+import com.music.orb.ui.screens.PlaybackHistorySheet
 import com.music.orb.ui.screens.FriendsScreen
 import com.music.orb.ui.screens.WelcomeLoginScreen
 import com.music.orb.ui.screens.OrbProfileScreen
@@ -1159,6 +1160,7 @@ private fun BitChordApp(
     var creatingPlaylist by remember { mutableStateOf(false) }
     var playlistActions by remember { mutableStateOf<UserPlaylist?>(null) }
     val autoplay by AppSettings.autoplay.collectAsStateWithLifecycle()
+    val playbackHistoryEntries = RecentPlaybackStore.snapshotEntries()
     val listenBrainzToken by AppSettings.listenBrainzToken.collectAsStateWithLifecycle()
     val betaUpdatesEnabled by AppSettings.betaUpdatesEnabled.collectAsStateWithLifecycle()
     val stableAutoUpdatesEnabled by AppSettings.stableAutoUpdatesEnabled.collectAsStateWithLifecycle()
@@ -1173,6 +1175,7 @@ private fun BitChordApp(
     var exploreSearchActive by rememberSaveable { mutableStateOf(false) }
     var librarySearchActive by rememberSaveable { mutableStateOf(false) }
     var libraryQuery by rememberSaveable { mutableStateOf("") }
+    var showPlaybackHistory by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(selectedTab) {
         if (selectedTab != TAB_LIBRARY) {
@@ -2596,7 +2599,18 @@ private fun BitChordApp(
             }
         }
 
-        val contentTarget = AppContentTarget(
+        if (showPlaybackHistory) {
+        PlaybackHistorySheet(
+            entries = playbackHistoryEntries,
+            onSongClick = { song ->
+                showPlaybackHistory = false
+                playDirect(song)
+            },
+            onDismiss = { showPlaybackHistory = false },
+        )
+    }
+
+    val contentTarget = AppContentTarget(
             kind = when {
                 publicProfileUserId != null -> AppContentKind.PUBLIC_PROFILE
                 showOrbProfile -> AppContentKind.ORB_PROFILE
@@ -3340,6 +3354,7 @@ private fun BitChordApp(
                     },
                     onSearchActivated = { exploreSearchActive = true },
                     focusTrigger = searchFocusTrigger,
+                    onHistoryClick = { showPlaybackHistory = true },
                     onAccountClick = { showAccountIntegrations = true },
                     refreshing = if (query.isBlank()) {
                         MainViewModel.Feed.DISCOVER in refreshing
