@@ -1371,8 +1371,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             _albumExclusionRevision.value += 1
             viewModelScope.launch {
                 YtMusicRepository.allSongs(browseId).onSuccess { all ->
-                    AlbumExclusionStore.block(albumExclusionAccountKey(), browseId, all)
-                    _albumExclusionRevision.value += 1
+                    if (isAlbumPlaybackBlocked(browseId)) {
+                        AlbumExclusionStore.block(albumExclusionAccountKey(), browseId, all)
+                        _albumExclusionRevision.value += 1
+                    }
                 }
             }
         } else {
