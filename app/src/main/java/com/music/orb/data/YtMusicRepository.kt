@@ -1467,6 +1467,22 @@ object YtMusicRepository {
 
     const val MAX_PAGES = 10
 
+    /** Fully pages account-owned library collections such as albums and playlists. */
+    private suspend fun libraryItemsPaged(browseId: String): List<ShelfItem> {
+        val out = LinkedHashMap<String, ShelfItem>()
+        var response = Innertube.browse(browseId)
+        var page = 0
+        while (page++ < LIBRARY_COLLECTION_MAX_PAGES) {
+            InnertubeParser.parseLibraryItems(response).forEach { item ->
+                val key = item.browseId ?: item.videoId ?: item.title
+                if (key.isNotBlank()) out.putIfAbsent(key, item)
+            }
+            val token = InnertubeParser.continuationToken(response) ?: break
+            response = runCatching { Innertube.browseContinuation(token) }.getOrNull() ?: break
+        }
+        return out.values.toList()
+    }
+
     // Library collections are not recommendation previews. Walk every
     // continuation so a large account does not silently lose older albums or
     // playlists just because YouTube rendered them on page two or later.
