@@ -16,7 +16,7 @@ import org.json.JSONObject
 object RecentPlaybackStore {
     private const val PREFS = "orb_recent_playback"
     private const val KEY_ITEMS = "items"
-    private const val MAX_ITEMS = 10
+    private const val MAX_ITEMS = 200
 
     @Volatile
     private var preferences: android.content.SharedPreferences? = null
