@@ -33,6 +33,7 @@ import com.music.orb.data.settings.SearchHistory
 import com.music.orb.data.settings.PlaylistListeningStore
 import com.music.orb.data.settings.ProfilePrivacyStore
 import com.music.orb.data.settings.RecentPlaybackStore
+import com.music.orb.data.settings.AlbumExclusionStore
 import com.music.orb.data.sources.SourceRegistry
 import com.music.orb.data.update.BetaUpdateScheduler
 import com.music.orb.data.update.UpdateAvailableStore
@@ -93,6 +94,7 @@ class BitChordApplication : Application(), SingletonImageLoader.Factory {
         PlaylistListeningStore.init(this)
         ProfilePrivacyStore.init(this)
         RecentPlaybackStore.init(this)
+        AlbumExclusionStore.init(this)
         HomeSuggestionStore.init(this)
         LastPlayed.init(this)
         // What's already saved to Downloads, so the song menu can say so
