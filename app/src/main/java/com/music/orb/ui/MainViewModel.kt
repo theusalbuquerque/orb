@@ -1453,7 +1453,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * Call when Home becomes visible. Returning to a cached page must not
      * trigger a network request; pull-to-refresh is the explicit update path.
      */
-    fun onHomeShown() = Unit
+    fun onHomeShown() {
+        loadReleasesHub()
+    }
 
     private fun loadAccount() {
         // The account shown by Orb is always the central Google identity. The
@@ -1839,7 +1841,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun loadReleasesHub(force: Boolean = false) {
-        if (!force && releasesHubRequested) return
+        if (!force && releasesHubRequested && !releasesHubStale) return
         releasesHubRequested = true
         if (_releasesHub.value !is UiState.Success) _releasesHub.value = UiState.Loading
         viewModelScope.launch { fetchReleasesHub() }
