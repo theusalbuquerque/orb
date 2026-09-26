@@ -4,4 +4,11 @@
     <string name="library_search_open">Buscar en la biblioteca</string>
     <string name="library_search_close">Cerrar búsqueda en la biblioteca</string>
     <string name="library_search_empty">No se encontraron álbumes ni playlists en tu biblioteca.</string>
+    <string name="playback_history_open">Abrir historial de reproducción</string>
+    <string name="playback_history_title">Historial de reproducción</string>
+    <string name="playback_history_empty">Aún no hay reproducciones.</string>
+    <string name="playback_history_today">Hoy</string>
+    <string name="playback_history_yesterday">Ayer</string>
+    <string name="album_do_not_play">No reproducir este álbum</string>
+    <string name="album_allow_playback">Permitir reproducir este álbum de nuevo</string>
 </resources>
