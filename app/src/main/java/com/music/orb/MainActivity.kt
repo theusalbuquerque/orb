@@ -134,6 +134,7 @@ import com.music.orb.data.scrobbling.LastFM
 import com.music.orb.data.settings.AppSettings
 import com.music.orb.data.settings.HomeSuggestionStore
 import com.music.orb.data.settings.RecentPlaybackStore
+import com.music.orb.data.settings.AlbumExclusionStore
 import com.music.orb.data.settings.ArtistPreference
 import com.music.orb.data.settings.ArtistPreferenceStore
 import com.music.orb.data.settings.FirstAccountOnboardingStore
@@ -1647,7 +1648,9 @@ private fun BitChordApp(
     // A dislike or blocked artist is a transport rule, not just a recommendation
     // hint. Keep search results visible, but remove excluded tracks from the
     // future queue immediately so AutoPlay/repeat cannot bring them back.
-    LaunchedEffect(controller, likeStatuses, artistPreferences) {
+    val albumExclusionRevision by viewModel.albumExclusionRevision.collectAsStateWithLifecycle()
+
+    LaunchedEffect(controller, likeStatuses, artistPreferences, albumExclusionRevision) {
         val live = controller ?: return@LaunchedEffect
         val currentIndex = live.currentMediaItemIndex
         for (i in live.mediaItemCount - 1 downTo 0) {
