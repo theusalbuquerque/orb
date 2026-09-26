@@ -212,6 +212,8 @@ fun DetailScreen(
     pullState: PullToRefreshState,
     onLoadMore: () -> Unit = {},
     onToggleLibrary: (() -> Unit)? = null,
+    albumPlaybackBlocked: Boolean = false,
+    onToggleAlbumPlaybackBlock: (() -> Unit)? = null,
     artistLiked: Boolean = false,
     artistBlocked: Boolean = false,
     onToggleArtistLike: (() -> Unit)? = null,
@@ -464,6 +466,8 @@ fun DetailScreen(
                         onDownload = onDownloadAll.takeUnless { page.browseId.startsWith("local:") },
                         onArtistClick = onArtistClick,
                         onToggleLibrary = onToggleLibrary,
+                        albumPlaybackBlocked = albumPlaybackBlocked,
+                        onToggleAlbumPlaybackBlock = onToggleAlbumPlaybackBlock,
                         listState = listState,
                     )
                 }
@@ -846,6 +850,8 @@ private fun ReleaseHeader(
     onDownload: ((List<Song>) -> Unit)?,
     onArtistClick: (String, String) -> Unit,
     onToggleLibrary: (() -> Unit)?,
+    albumPlaybackBlocked: Boolean,
+    onToggleAlbumPlaybackBlock: (() -> Unit)?,
     listState: LazyListState,
 ) {
     val (subtitleCredit, meta) =
@@ -1041,6 +1047,20 @@ private fun ReleaseHeader(
                                             }
                                         }
                                     },
+                                )
+                            }
+                            if (page.type == BrowseType.ALBUM && onToggleAlbumPlaybackBlock != null) {
+                                CircleIconButton(
+                                    icon = Icons.Rounded.Block,
+                                    contentDescription = stringResource(
+                                        if (albumPlaybackBlocked) {
+                                            R.string.album_allow_playback
+                                        } else {
+                                            R.string.album_do_not_play
+                                        },
+                                    ),
+                                    palette = palette,
+                                    onClick = onToggleAlbumPlaybackBlock,
                                 )
                             }
                         }
