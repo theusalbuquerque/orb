@@ -19,6 +19,7 @@ import com.music.orb.data.lyrics.LyricsSource
 import com.music.orb.data.settings.AppSettings
 import com.music.orb.data.settings.ArtistPreference
 import com.music.orb.data.settings.ArtistPreferenceStore
+import com.music.orb.data.settings.AlbumExclusionStore
 import com.music.orb.data.settings.LikeStatusStore
 import com.music.orb.data.innertube.Innertube
 import com.music.orb.data.innertube.PlaybackTracker
@@ -417,6 +418,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Persistent positive/blocked artist choices from the artist info panel. */
     private val _artistPreferences = MutableStateFlow<Map<String, ArtistPreference>>(emptyMap())
+    private val _albumExclusionRevision = MutableStateFlow(0)
+    val albumExclusionRevision: StateFlow<Int> = _albumExclusionRevision.asStateFlow()
     val artistPreferences: StateFlow<Map<String, ArtistPreference>> = _artistPreferences.asStateFlow()
 
     /** One serialized YouTube outbox worker per video id. */
@@ -495,7 +498,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * discoverable so the listener can inspect it or undo the preference.
      */
     fun shouldAvoidPlayback(song: Song): Boolean =
-        isDislikedRecording(song) || isBlockedArtistCredit(song.artist)
+        isDislikedRecording(song) ||
+            isBlockedArtistCredit(song.artist) ||
+            AlbumExclusionStore.isBlocked(albumExclusionAccountKey(), song)
 
     /**
      * Be stricter than the visual heart when guarding transport. Catalogue
@@ -1349,6 +1354,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun artistPreferenceAccountKey(): String = likeAccountKey() ?: "local-device"
+
+    private fun albumExclusionAccountKey(): String = likeAccountKey() ?: "local-device"
+
+    fun isAlbumPlaybackBlocked(browseId: String): Boolean =
+        browseId in AlbumExclusionStore.blockedAlbumIds(albumExclusionAccountKey())
+
+    fun setAlbumPlaybackBlocked(
+        browseId: String,
+        songs: List<Song>,
+        blocked: Boolean,
+    ) {
+        if (browseId.isBlank()) return
+        if (blocked) {
+            AlbumExclusionStore.block(albumExclusionAccountKey(), browseId, songs)
+            _albumExclusionRevision.value += 1
+            viewModelScope.launch {
+                YtMusicRepository.allSongs(browseId).onSuccess { all ->
+                    AlbumExclusionStore.block(albumExclusionAccountKey(), browseId, all)
+                    _albumExclusionRevision.value += 1
+                }
+            }
+        } else {
+            AlbumExclusionStore.unblock(albumExclusionAccountKey(), browseId)
+            _albumExclusionRevision.value += 1
+        }
+    }
 
     private fun restoreArtistPreferences() {
         _artistPreferences.value = ArtistPreferenceStore.load(artistPreferenceAccountKey())
