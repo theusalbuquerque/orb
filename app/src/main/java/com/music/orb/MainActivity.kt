@@ -669,6 +669,7 @@ private fun buildForYouState(
     topArtists: List<StatsLeader>,
     youtubeSections: List<HomeShelf>,
     relatedSuggestions: List<ShelfItem>,
+    favoriteReleases: UiState<List<HomeShelf>>,
 ): UiState<List<HomeShelf>> {
     // Suggestions is deliberately independent from Home's network state. A
     // persisted 20-card snapshot paints immediately at process start; the rest
@@ -725,23 +726,31 @@ private fun buildForYouState(
         it.contains("recap") || it.contains("retrospectiva") || it.contains("resumen")
     }
 
+    val favoriteReleaseShelf = (favoriteReleases as? UiState.Success)
+        ?.data
+        ?.firstOrNull { it.title == HOME_FAVORITE_ALBUM_RELEASES_SHELF_TITLE }
+        ?.takeIf { it.items.isNotEmpty() }
+
     val curated = buildList {
-        // Keep Suggestions as the first, dedicated section even while its
-        // one-shot discovery request is resolving. HomeScreen renders its own
-        // carousel loading state instead of letting Recently played take over.
+        // A favorite-artist release alert is an editorial notification and must
+        // sit above every normal For You shelf, including Suggestions.
+        favoriteReleaseShelf?.let(::add)
         add(HomeShelf(HOME_RECOMMENDATIONS_SHELF_TITLE, recommendations))
         addShelf(
             this,
             "Ouça novamente",
             matchingItems(shelves) { it.contains("listen again") },
         )
-        addShelf(this, HOME_TOP_ARTISTS_SHELF_TITLE, topArtistItems, limit = 10)
+        addShelf(
+            this,
+            "Tocadas recentemente",
+            recentItems,
+        )
         addShelf(
             this,
             "Da sua biblioteca",
             distinctHomeItems(youtubeLibrarySongs + librarySongs + homeLibrarySongs),
         )
-        addShelf(this, "Tocadas recentemente", recentItems)
         addShelf(
             this,
             "Recaps",
@@ -751,6 +760,7 @@ private fun buildForYouState(
                 },
             ),
         )
+        addShelf(this, HOME_TOP_ARTISTS_SHELF_TITLE, topArtistItems, limit = 10)
     }
 
     // For You is deliberately curated. Raw YouTube shelves must never leak
@@ -2914,6 +2924,7 @@ private fun BitChordApp(
                             homeTopArtists,
                             homeYouTubeSections,
                             relatedHomeSuggestions,
+                            releasesHubState,
                         )
                     },
                     listState = homeListStates[
