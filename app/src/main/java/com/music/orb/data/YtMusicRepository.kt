@@ -375,7 +375,7 @@ object YtMusicRepository {
 
             val catalogueNewAlbums = distinctShelfItems(
                 releaseShelves.flatMap { it.items },
-            ).filter { it.isLikelyFullAlbum() }
+            ).filter { it.isEligibleFavoriteArtistRelease() }
 
             // FEmusic_home is account-personalised; release shelves found here
             // therefore make a better "similar to your taste" source than the
@@ -384,7 +384,7 @@ object YtMusicRepository {
                 homeShelves
                     .filter { it.title.isReleaseShelfLabel() }
                     .flatMap { it.items },
-            ).filter { it.isLikelyFullAlbum() }
+            ).filter { it.isEligibleFavoriteArtistRelease() }
 
             val newAlbumPool = distinctShelfItems(personalisedNewAlbums + catalogueNewAlbums)
             val favoriteArtistNewAlbums = newAlbumPool.filter { item ->
@@ -719,6 +719,18 @@ object YtMusicRepository {
         val metadata = subtitle.lowercase(Locale.ROOT)
         val nonAlbumKind = Regex("(^|[•·|\\s])(single|ep)([•·|\\s]|$)")
         return !nonAlbumKind.containsMatchIn(metadata)
+    }
+
+    /** Full albums plus multi-track singles/EPs for favorite-artist release alerts. */
+    private fun ShelfItem.isEligibleFavoriteArtistRelease(): Boolean {
+        if (type != BrowseType.ALBUM || browseId.isNullOrBlank()) return false
+        val metadata = subtitle.lowercase(Locale.ROOT)
+        val kind = Regex("(^|[•·|\\s])(single|ep)([•·|\\s]|$)")
+            .find(metadata)?.groupValues?.getOrNull(2)
+        if (kind == null) return true
+        val count = Regex("""(?i)(\\d+)\\s+(?:songs?|tracks?|músicas?|canciones?)""")
+            .find(metadata)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        return count != 1
     }
 
     private fun distinctShelfItems(items: List<ShelfItem>): List<ShelfItem> {
@@ -1063,7 +1075,7 @@ object YtMusicRepository {
                 .map { (title, browseId) ->
                     async {
                         val items = runCatching {
-                            InnertubeParser.parseLibraryItems(Innertube.browse(browseId))
+                            libraryItemsPaged(browseId)
                         }.getOrDefault(emptyList())
                         HomeShelf(title, items)
                     }
@@ -1455,6 +1467,11 @@ object YtMusicRepository {
 
     const val MAX_PAGES = 10
 
+    // Library collections are not recommendation previews. Walk every
+    // continuation so a large account does not silently lose older albums or
+    // playlists just because YouTube rendered them on page two or later.
+    private const val LIBRARY_COLLECTION_MAX_PAGES = 100
+
     /**
      * Liked Music: the `LM` auto-playlist, addressed as a playlist browse id.
      * Public because it is also the page a track has to disappear from the
@@ -1525,7 +1542,17 @@ object YtMusicRepository {
      * rather than a feed to follow.
      */
     suspend fun userPlaylists(): Result<List<UserPlaylist>> = call("playlists") {
-        InnertubeParser.parseUserPlaylists(Innertube.browse(LIBRARY_PLAYLISTS))
+        val out = LinkedHashMap<String, UserPlaylist>()
+        var response = Innertube.browse(LIBRARY_PLAYLISTS)
+        var page = 0
+        while (page++ < LIBRARY_COLLECTION_MAX_PAGES) {
+            InnertubeParser.parseUserPlaylists(response).forEach { playlist ->
+                out.putIfAbsent(playlist.browseId, playlist)
+            }
+            val token = InnertubeParser.continuationToken(response) ?: break
+            response = runCatching { Innertube.browseContinuation(token) }.getOrNull() ?: break
+        }
+        out.values.toList()
     }
 
     /** Creates a playlist, optionally seeded with [videoIds]; returns its id. */
