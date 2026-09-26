@@ -2885,6 +2885,20 @@ private fun BitChordApp(
                         } else {
                             null
                         },
+                        albumPlaybackBlocked = page.type == BrowseType.ALBUM &&
+                            viewModel.isAlbumPlaybackBlocked(page.browseId),
+                        onToggleAlbumPlaybackBlock = if (page.type == BrowseType.ALBUM) {
+                            {
+                                OrbHaptics.perform(context, OrbHaptics.Kind.ACTION)
+                                viewModel.setAlbumPlaybackBlocked(
+                                    page.browseId,
+                                    (page.songs as? UiState.Success)?.data.orEmpty(),
+                                    blocked = !viewModel.isAlbumPlaybackBlocked(page.browseId),
+                                )
+                            }
+                        } else {
+                            null
+                        },
                         artistLiked = page.type == BrowseType.ARTIST &&
                             artistPreferences[ArtistPreferenceStore.artistKey(page.title)] == ArtistPreference.LIKE,
                         artistBlocked = page.type == BrowseType.ARTIST &&
