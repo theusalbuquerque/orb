@@ -141,6 +141,13 @@
     <string name="library_search_hint">Search albums or playlists</string>
     <string name="library_search_open">Search library</string>
     <string name="library_search_close">Close library search</string>
+    <string name="playback_history_open">Open playback history</string>
+    <string name="playback_history_title">Playback history</string>
+    <string name="playback_history_empty">No playback history yet.</string>
+    <string name="playback_history_today">Today</string>
+    <string name="playback_history_yesterday">Yesterday</string>
+    <string name="album_do_not_play">Do not play this album</string>
+    <string name="album_allow_playback">Allow this album to play again</string>
     <string name="library_search_empty">No albums or playlists found in your library.</string>
     <string name="btn_sign_in">Sign in</string>
 
