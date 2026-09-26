@@ -991,8 +991,13 @@ private fun ReleaseHeader(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = HEADER_GUTTER),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
+                                .padding(
+                                    horizontal = if (onToggleAlbumPlaybackBlock != null) 12.dp else HEADER_GUTTER,
+                                ),
+                            horizontalArrangement = Arrangement.spacedBy(
+                                if (onToggleAlbumPlaybackBlock != null) 8.dp else 10.dp,
+                                Alignment.CenterHorizontally,
+                            ),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             if (library != null) {
@@ -1015,7 +1020,11 @@ private fun ReleaseHeader(
                             PlayPill(
                                 palette = palette,
                                 onClick = onPlay,
-                                horizontalPadding = if (library != null && onDownload != null) 24.dp else 32.dp,
+                                horizontalPadding = when {
+                                    onToggleAlbumPlaybackBlock != null -> 18.dp
+                                    library != null && onDownload != null -> 24.dp
+                                    else -> 32.dp
+                                },
                             )
                             onDownload?.let { download ->
                                 val downloadIcon = when {
