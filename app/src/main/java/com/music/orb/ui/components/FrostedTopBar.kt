@@ -48,6 +48,7 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Notifications
+import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.HorizontalDivider
@@ -744,6 +745,7 @@ fun ExploreFrostedHeader(
     onSearchSubmit: () -> Unit,
     onSearchActivated: () -> Unit,
     focusTrigger: Int = 0,
+    onHistoryClick: () -> Unit = {},
     onAccountClick: () -> Unit,
     modifier: Modifier = Modifier,
     refreshing: Boolean = false,
@@ -805,6 +807,20 @@ fun ExploreFrostedHeader(
                     .align(Alignment.Center)
                     .padding(horizontal = 76.dp),
             )
+
+            IconButton(
+                onClick = onHistoryClick,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(end = 54.dp, top = 9.dp)
+                    .size(44.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.History,
+                    contentDescription = stringResource(R.string.playback_history_open),
+                    tint = MaterialTheme.colorScheme.onSurface,
+                )
+            }
         }
 
         ExpressiveSearchField(
