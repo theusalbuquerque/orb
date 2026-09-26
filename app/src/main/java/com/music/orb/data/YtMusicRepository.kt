@@ -1565,6 +1565,10 @@ object YtMusicRepository {
     }
 
     /** Checks the whole playlist, following continuations only until the track is found. */
+    /** Fully pages a release/playlist so exclusions can cover every track. */
+    suspend fun allSongs(browseId: String): Result<List<Song>> =
+        call("all-songs:$browseId") { songsPaged(browseId) }
+
     suspend fun playlistContains(browseId: String, videoId: String): Result<Boolean> =
         call("playlist:contains:$browseId:$videoId") {
             var response = Innertube.browse(browseId)
