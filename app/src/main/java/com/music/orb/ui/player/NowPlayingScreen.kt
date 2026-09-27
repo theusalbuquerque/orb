@@ -263,8 +263,12 @@ private fun NowPlayingWindowBehavior(
 
         if (hideStatusBar) {
             insetsController?.hide(WindowInsetsCompat.Type.statusBars())
+            // The first edge swipe should reveal the status bar and leave it
+            // visible. The following swipe can then be handled by the
+            // ModalBottomSheet to lower Now Playing. Transient bars can cause
+            // the same gesture to compete with the sheet dismissal.
             insetsController?.systemBarsBehavior =
-                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_BARS_BY_SWIPE
         } else {
             insetsController?.show(WindowInsetsCompat.Type.statusBars())
         }
