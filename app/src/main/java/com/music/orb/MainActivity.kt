@@ -732,20 +732,25 @@ private fun buildForYouState(
         ?.takeIf { it.items.isNotEmpty() }
 
     val curated = buildList {
-        // A favorite-artist release alert is an editorial notification and must
-        // sit above every normal For You shelf, including Suggestions.
+        // Keep the Home order stable and intentional:
+        // Suggestions -> Recently played -> Listen again -> Top artists ->
+        // Library -> Recaps.
+        // The favourite-artist release alert is still inserted above Suggestions
+        // when available because it is an explicit editorial alert, not a normal
+        // For You shelf.
         favoriteReleaseShelf?.let(::add)
         add(HomeShelf(HOME_RECOMMENDATIONS_SHELF_TITLE, recommendations))
-        addShelf(
-            this,
-            "Ouça novamente",
-            matchingItems(shelves) { it.contains("listen again") },
-        )
         addShelf(
             this,
             "Tocadas recentemente",
             recentItems,
         )
+        addShelf(
+            this,
+            "Ouça novamente",
+            matchingItems(shelves) { it.contains("listen again") },
+        )
+        addShelf(this, HOME_TOP_ARTISTS_SHELF_TITLE, topArtistItems, limit = 10)
         addShelf(
             this,
             "Da sua biblioteca",
@@ -760,7 +765,6 @@ private fun buildForYouState(
                 },
             ),
         )
-        addShelf(this, HOME_TOP_ARTISTS_SHELF_TITLE, topArtistItems, limit = 10)
     }
 
     // For You is deliberately curated. Raw YouTube shelves must never leak
