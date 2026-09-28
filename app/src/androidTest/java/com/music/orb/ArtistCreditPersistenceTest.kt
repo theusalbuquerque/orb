@@ -37,7 +37,6 @@ class ArtistCreditPersistenceTest {
             override fun edit(): SharedPreferences.Editor {
                 val delegate = isolated.edit()
                 return object : SharedPreferences.Editor by delegate {
-                    // Preserve wrapping when the production writer chains puts.
                     override fun putString(key: String?, value: String?): SharedPreferences.Editor {
                         delegate.putString(key, value)
                         return this
@@ -56,7 +55,6 @@ class ArtistCreditPersistenceTest {
             field.set(ArtistCreditResolver, counting)
             ArtistCreditResolver.registerVerifiedArtist(first)
             assertTrue("Writer did not start", entered.await(5, TimeUnit.SECONDS))
-            // A deliberately stalled disk writer must not hold the parser's caller.
             executor.submit {
                 repeat(1000) { ArtistCreditResolver.registerVerifiedArtist(first) }
                 ArtistCreditResolver.registerVerifiedArtist(second)
