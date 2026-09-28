@@ -9,12 +9,12 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.History
@@ -31,15 +31,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import com.music.orb.R
 import com.music.orb.data.model.Song
 import com.music.orb.data.model.artworkAt
 import com.music.orb.data.settings.RecentPlaybackEntry
+import com.music.orb.ui.components.ProgressiveActionSheetItem
 import java.text.DateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -103,27 +107,40 @@ fun PlaybackHistorySheet(
                     ),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
+                    var globalIndex = 0
                     groups.forEach { group ->
+                        val dayHeaderIndex = globalIndex++
                         item(key = "history-day-" + group.key) {
-                            Text(
-                                text = group.label,
-                                style = MaterialTheme.typography.titleMedium,
-                                color = MaterialTheme.colorScheme.onSurface,
-                                modifier = Modifier.padding(
-                                    start = 6.dp,
-                                    top = 14.dp,
-                                    bottom = 7.dp,
-                                ),
-                            )
+                            ProgressiveActionSheetItem(
+                                index = dayHeaderIndex,
+                                itemKey = "history-day-" + group.key,
+                            ) {
+                                Text(
+                                    text = group.label,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.padding(
+                                        start = 6.dp,
+                                        top = 14.dp,
+                                        bottom = 7.dp,
+                                    ),
+                                )
+                            }
                         }
-                        items(
+                        itemsIndexed(
                             items = group.entries,
-                            key = { it.sessionKey() },
-                        ) { entry ->
-                            PlaybackHistoryRow(
-                                entry = entry,
-                                onClick = { onSongClick(entry.song) },
-                            )
+                            key = { _, entry -> entry.sessionKey() },
+                        ) { _, entry ->
+                            val rowIndex = globalIndex++
+                            ProgressiveActionSheetItem(
+                                index = rowIndex,
+                                itemKey = entry.sessionKey(),
+                            ) {
+                                PlaybackHistoryRow(
+                                    entry = entry,
+                                    onClick = { onSongClick(entry.song) },
+                                )
+                            }
                         }
                     }
                 }
@@ -162,7 +179,7 @@ private fun PlaybackHistoryRow(
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1,
-                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                overflow = TextOverflow.Ellipsis,
             )
             Spacer(Modifier.height(2.dp))
             Text(
@@ -170,7 +187,7 @@ private fun PlaybackHistoryRow(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
-                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                overflow = TextOverflow.Ellipsis,
             )
         }
         Spacer(Modifier.size(10.dp))
@@ -195,13 +212,13 @@ private fun groupHistoryByDay(
 ): List<HistoryDayGroup> {
     if (entries.isEmpty()) return emptyList()
 
-    val zone = java.util.TimeZone.getDefault()
-    val today = java.util.Calendar.getInstance(zone).toCalendarDay()
+    val zone = TimeZone.getDefault()
+    val today = Calendar.getInstance(zone).toCalendarDay()
 
     return entries
         .sortedByDescending { it.playedAtMs }
         .groupBy { entry ->
-            java.util.Calendar.getInstance(zone).apply {
+            Calendar.getInstance(zone).apply {
                 timeInMillis = entry.playedAtMs
             }.toCalendarDay()
         }
@@ -215,9 +232,9 @@ private fun groupHistoryByDay(
                     val formatter = DateFormat.getDateInstance(DateFormat.LONG, Locale.getDefault())
                     formatter.timeZone = zone
                     formatter.format(
-                        java.util.Calendar.getInstance(zone).apply {
+                        Calendar.getInstance(zone).apply {
                             set(date.year, date.month, date.day, 12, 0, 0)
-                            set(java.util.Calendar.MILLISECOND, 0)
+                            set(Calendar.MILLISECOND, 0)
                         }.time,
                     )
                 }
@@ -241,20 +258,20 @@ private data class CalendarDay(
     fun key(): String = year.toString() + "-" + month + "-" + day
 
     fun minusDays(days: Int): CalendarDay {
-        val calendar = java.util.Calendar.getInstance().apply {
+        val calendar = Calendar.getInstance().apply {
             set(year, month, day, 12, 0, 0)
-            set(java.util.Calendar.MILLISECOND, 0)
-            add(java.util.Calendar.DAY_OF_MONTH, -days)
+            set(Calendar.MILLISECOND, 0)
+            add(Calendar.DAY_OF_MONTH, -days)
         }
         return calendar.toCalendarDay()
     }
 }
 
-private fun java.util.Calendar.toCalendarDay(): CalendarDay =
+private fun Calendar.toCalendarDay(): CalendarDay =
     CalendarDay(
-        get(java.util.Calendar.YEAR),
-        get(java.util.Calendar.MONTH),
-        get(java.util.Calendar.DAY_OF_MONTH),
+        get(Calendar.YEAR),
+        get(Calendar.MONTH),
+        get(Calendar.DAY_OF_MONTH),
     )
 
 private fun rememberHistoryTimeFormatter(): DateFormat =
