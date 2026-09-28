@@ -619,8 +619,8 @@ private fun albumArtistFromMetadata(metadata: String): String {
     return pieces.firstOrNull { piece ->
         val normalized = piece.lowercase()
         normalized !in setOf("album", "álbum", "single", "ep") &&
-                !piece.matches(Regex("\d{4}")) &&
-                !piece.matches(Regex("\d+\\s+(songs?|tracks?|músicas?|canciones?)", RegexOption.IGNORE_CASE))
+                !piece.matches(Regex("\\d{4}")) &&
+                !piece.matches(Regex("\\d+\\s+(songs?|tracks?|músicas?|canciones?)", RegexOption.IGNORE_CASE))
     } ?: metadata
 }
 
