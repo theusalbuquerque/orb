@@ -266,18 +266,56 @@ def premium_entitled_for_account_hash(account_hash: str) -> bool:
     return False
 
 
+def _configured_price(plan: Literal["monthly", "yearly"]) -> float | None:
+    """Return the positive Premium price currently loaded in the process.
+
+    The provider endpoint must expose the same values used by the checkout
+    functions. Prices are read from the runtime environment on every request,
+    so a redeployed/restarted Render service immediately reflects the current
+    ORB_PREMIUM_*_PRICE variables. No price is hardcoded in the API.
+    """
+    key = (
+        "ORB_PREMIUM_MONTHLY_PRICE"
+        if plan == "monthly"
+        else "ORB_PREMIUM_YEARLY_PRICE"
+    )
+    raw = os.getenv(key, "").strip()
+
+    try:
+        value = round(float(raw), 2)
+    except (TypeError, ValueError):
+        return None
+
+    return value if value > 0 else None
+
+
 @router.get("/providers")
 async def providers():
+    monthly_price = _configured_price("monthly")
+    yearly_price = _configured_price("yearly")
+
     return {
-        "mercadoPago": {"configured": bool(MP_ACCESS_TOKEN)},
+        "mercadoPago": {
+            "configured": bool(MP_ACCESS_TOKEN),
+        },
         "asaas": {
             "configured": bool(ASAAS_API_KEY),
             "pixAutomatic": False,
-            "note": "Pix Automático requires a separate Asaas authorization flow.",
+            "note": (
+                "Pix Automático requires a separate Asaas "
+                "authorization flow."
+            ),
         },
         "plans": {
-            "monthlyConfigured": bool(os.getenv("ORB_PREMIUM_MONTHLY_PRICE", "").strip()),
-            "yearlyConfigured": bool(os.getenv("ORB_PREMIUM_YEARLY_PRICE", "").strip()),
+            "monthlyConfigured": monthly_price is not None,
+            "yearlyConfigured": yearly_price is not None,
+            "monthlyPrice": monthly_price,
+            "yearlyPrice": yearly_price,
+            "currency": "BRL",
+            "source": "environment",
+        },
+        "runtime": {
+            "gitCommit": os.getenv("RENDER_GIT_COMMIT", "").strip() or None,
         },
     }
 
