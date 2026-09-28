@@ -67,6 +67,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
 import kotlin.math.abs
+import kotlin.math.sin
+import kotlin.math.PI
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.ArrowForward
@@ -102,7 +104,7 @@ import com.music.orb.ui.components.thumbnailBorder
 import com.music.orb.ui.flavor.OrbFlavorUi
 import com.music.orb.ui.player.NowPlayingLaunchOriginRegistry
 
-private val HOME_SHELF_BOTTOM_SPACING = 38.dp
+private val HOME_SHELF_BOTTOM_SPACING = 15.dp
 private val RELEASE_BADGE_SLOT_HEIGHT = 24.dp
 internal val PAGE_AURA_HEIGHT = 430.dp
 internal const val HOME_RECOMMENDATIONS_SHELF_TITLE = "__orb_recommendations__"
@@ -364,7 +366,6 @@ internal fun HomeHeaderAura(
     }
 }
 
-
 private fun Modifier.auraLinearLayer(colors: List<Color>): Modifier = drawWithCache {
     val brush = Brush.linearGradient(
         colors = colors,
@@ -414,9 +415,6 @@ private fun homeVerticalEdgeModifier(
 ): Modifier {
     val density = LocalDensity.current
     val minDistancePx = with(density) { 96.dp.toPx() }
-    // The Home shelves physically scroll under the frosted header. Trigger the
-    // scale/fade at that visible lower edge instead of the padded LazyColumn
-    // origin, so For You / Albums / Trending / Playlists behave consistently.
     val headerOcclusionPx = with(density) { 144.dp.toPx() }
     val edgeState by remember(listState, itemKey, minDistancePx, headerOcclusionPx) {
         derivedStateOf {
@@ -425,15 +423,9 @@ private fun homeVerticalEdgeModifier(
                 ?: return@derivedStateOf Pair(1f, 0f)
             val start = info.offset.toFloat()
             val end = start + info.size.toFloat()
-            // Convert the fixed header's screen-relative lower edge to the
-            // LazyColumn's padded content coordinates. Treating 144dp as an
-            // absolute item offset double-counted Home's large top padding.
             val top = layout.viewportStartOffset.toFloat() + headerOcclusionPx
             val bottom = layout.viewportEndOffset.toFloat()
             val distance = maxOf(minDistancePx, (info.size * 0.55f).coerceAtMost(minDistancePx * 1.8f))
-            // Do not shrink a Home section until its leading edge has actually
-            // crossed under the frosted header. The previous end-based formula
-            // could begin the effect while the whole section was still visible.
             val topProgress = if (start >= top) {
                 1f
             } else {
@@ -477,59 +469,55 @@ private fun androidx.compose.foundation.lazy.LazyListScope.itemsIndexedShelves(
         val itemKey = shelf.title + index
         item(key = itemKey) {
             Box(modifier = homeVerticalEdgeModifier(listState, itemKey)) {
-            if (shelf.title == HOME_FAVORITE_ALBUM_RELEASES_SHELF_TITLE) {
-                FavoriteAlbumReleaseShelf(
-                    shelf = shelf,
-                    onItemClick = onItemClick,
-                    onItemLongPress = onItemLongPress,
-                    expressive = expressive,
-                )
-            } else if (shelf.title == HOME_TOP_ARTISTS_SHELF_TITLE) {
-                ArtistProfileShelf(
-                    shelf = shelf,
-                    onItemClick = onItemClick,
-                    onItemLongPress = onItemLongPress,
-                    expressive = expressive,
-                )
-            } else if (shelf.title.lowercase().startsWith("top 10 ")) {
-                RankedShelf(
-                    shelf = shelf,
-                    onItemClick = onItemClick,
-                    onItemLongPress = onItemLongPress,
-                    onRankedSongClick = onRankedSongClick,
-                    expressive = expressive,
-                )
-            } else if (
-                heroFirstShelf &&
-                shelf.title == HOME_RECOMMENDATIONS_SHELF_TITLE
-            ) {
-                RotatingRecommendationShelf(
-                    shelf = shelf,
-                    onItemClick = onRecommendationClick ?: onItemClick,
-                    onItemLongPress = onItemLongPress,
-                    expressive = expressive,
-                )
-            } else if (index == 0 && heroFirstShelf) {
-                // If Suggestions is still resolving, Recently played must stay a
-                // normal shelf. Promoting it to the legacy hero layout made the
-                // Home look as if the rotating recommendation carousel had been
-                // replaced by Recently played.
-                Shelf(
-                    shelf = shelf,
-                    onItemClick = onItemClick,
-                    onItemLongPress = onItemLongPress,
-                    fullTrackBadges = fullTrackBadgesInShelves,
-                    expressive = expressive,
-                )
-            } else {
-                Shelf(
-                    shelf = shelf,
-                    onItemClick = onItemClick,
-                    onItemLongPress = onItemLongPress,
-                    fullTrackBadges = fullTrackBadgesInShelves,
-                    expressive = expressive,
-                )
-            }
+                if (shelf.title == HOME_FAVORITE_ALBUM_RELEASES_SHELF_TITLE) {
+                    FavoriteAlbumReleaseShelf(
+                        shelf = shelf,
+                        onItemClick = onItemClick,
+                        onItemLongPress = onItemLongPress,
+                        expressive = expressive,
+                    )
+                } else if (shelf.title == HOME_TOP_ARTISTS_SHELF_TITLE) {
+                    ArtistProfileShelf(
+                        shelf = shelf,
+                        onItemClick = onItemClick,
+                        onItemLongPress = onItemLongPress,
+                        expressive = expressive,
+                    )
+                } else if (shelf.title.lowercase().startsWith("top 10 ")) {
+                    RankedShelf(
+                        shelf = shelf,
+                        onItemClick = onItemClick,
+                        onItemLongPress = onItemLongPress,
+                        onRankedSongClick = onRankedSongClick,
+                        expressive = expressive,
+                    )
+                } else if (
+                    heroFirstShelf &&
+                    shelf.title == HOME_RECOMMENDATIONS_SHELF_TITLE
+                ) {
+                    RotatingRecommendationShelf(
+                        shelf = shelf,
+                        onItemClick = onRecommendationClick ?: onItemClick,
+                        onItemLongPress = onItemLongPress,
+                        expressive = expressive,
+                    )
+                } else if (index == 0 && heroFirstShelf) {
+                    Shelf(
+                        shelf = shelf,
+                        onItemClick = onItemClick,
+                        onItemLongPress = onItemLongPress,
+                        fullTrackBadges = fullTrackBadgesInShelves,
+                        expressive = expressive,
+                    )
+                } else {
+                    Shelf(
+                        shelf = shelf,
+                        onItemClick = onItemClick,
+                        onItemLongPress = onItemLongPress,
+                        fullTrackBadges = fullTrackBadgesInShelves,
+                        expressive = expressive,
+                    )
+                }
             }
         }
     }
@@ -549,8 +537,8 @@ private fun FavoriteAlbumReleaseShelf(
         contentPadding = PaddingValues(
             start = PAGE_GUTTER,
             end = PAGE_GUTTER,
-            top = if (expressive) 16.dp else 12.dp,
-            bottom = if (expressive) 26.dp else 22.dp,
+            top = 0.dp,
+            bottom = 15.dp,
         ),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -631,8 +619,8 @@ private fun albumArtistFromMetadata(metadata: String): String {
     return pieces.firstOrNull { piece ->
         val normalized = piece.lowercase()
         normalized !in setOf("album", "álbum", "single", "ep") &&
-            !piece.matches(Regex("\\d{4}")) &&
-            !piece.matches(Regex("\\d+\\s+(songs?|tracks?|músicas?|canciones?)", RegexOption.IGNORE_CASE))
+                !piece.matches(Regex("\\d{4}")) &&
+                !piece.matches(Regex("\\d+\\s+(songs?|tracks?|músicas?|canciones?)", RegexOption.IGNORE_CASE))
     } ?: metadata
 }
 
@@ -646,7 +634,7 @@ private fun ArtistProfileShelf(
 ) {
     Column(
         modifier = Modifier.padding(
-            bottom = if (expressive) 40.dp else HOME_SHELF_BOTTOM_SPACING,
+            bottom = 15.dp,
         ),
     ) {
         SectionHeader(shelf.title, shelf.subtitle, expressive = expressive)
@@ -690,9 +678,6 @@ private fun ArtistProfileShelf(
                         color = MaterialTheme.colorScheme.onBackground,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
-                        // Reserve a stable two-line footprint. LazyRow otherwise
-                        // changes height when a longer artist name scrolls into
-                        // view, which makes the shelf below jump vertically.
                         modifier = Modifier.height(40.dp),
                     )
                 }
@@ -725,7 +710,7 @@ private fun RankedShelf(
     }
     Column(
         modifier = Modifier.padding(
-            bottom = if (expressive) 36.dp else HOME_SHELF_BOTTOM_SPACING,
+            bottom = 15.dp,
         ),
     ) {
         SectionHeader(shelf.title, shelf.subtitle, expressive = expressive)
@@ -829,8 +814,10 @@ internal fun SectionHeader(
 ) {
     Column(
         Modifier.padding(
-            horizontal = PAGE_GUTTER,
-            vertical = if (expressive) 12.dp else 10.dp,
+            start = PAGE_GUTTER,
+            end = PAGE_GUTTER,
+            top = 0.dp,
+            bottom = if (expressive) 10.dp else 8.dp,
         ),
     ) {
         Text(
@@ -860,7 +847,6 @@ internal fun SectionHeader(
     }
 }
 
-
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun RotatingRecommendationShelf(
@@ -869,13 +855,10 @@ private fun RotatingRecommendationShelf(
     onItemLongPress: ((ShelfItem) -> Unit)?,
     expressive: Boolean,
 ) {
-    // Suggestions is a permanent, dedicated hero section. While its one-shot
-    // session request is resolving, keep the carousel footprint visible instead
-    // of allowing Recently played to become the first visual shelf.
     if (shelf.items.isEmpty()) {
         Column(
             modifier = Modifier.padding(
-                bottom = if (expressive) 44.dp else HOME_SHELF_BOTTOM_SPACING,
+                bottom = 15.dp,
             ),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
@@ -937,9 +920,6 @@ private fun RotatingRecommendationShelf(
     }
 
     val itemCount = shelf.items.size
-    // Keep a large virtual loop so the first visible recommendation is already
-    // surrounded by cards on both sides. The user can therefore rotate the
-    // shelf left or right immediately instead of starting at a hard list edge.
     val virtualCycles = 20_000
     val virtualItemCount = itemCount * virtualCycles
     val initialVirtualIndex = (virtualCycles / 2) * itemCount
@@ -965,7 +945,7 @@ private fun RotatingRecommendationShelf(
 
     Column(
         modifier = Modifier.padding(
-            bottom = if (expressive) 44.dp else HOME_SHELF_BOTTOM_SPACING,
+            bottom = 15.dp,
         ),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
@@ -976,10 +956,6 @@ private fun RotatingRecommendationShelf(
                 .fillMaxWidth()
                 .height(if (expressive) 238.dp else 226.dp),
         ) {
-            // The recommendation cover is deliberately larger than the 150dp
-            // cards used by the shelves below it.  Keeping a very narrow
-            // logical slot makes the neighbouring covers live *behind* the
-            // selected one instead of reading as another ordinary carousel.
             val slotWidth = if (expressive) 48.dp else 52.dp
             val artworkSize = if (expressive) {
                 (maxWidth * 0.54f).coerceIn(186.dp, 210.dp)
@@ -1016,39 +992,40 @@ private fun RotatingRecommendationShelf(
                             } else {
                                 val itemCenter = info.offset + info.size / 2f
                                 (itemCenter - viewportCenter) /
-                                    info.size.coerceAtLeast(1).toFloat()
+                                        info.size.coerceAtLeast(1).toFloat()
                             }
                         }
                     }
                     val distance = abs(relativePosition).coerceAtMost(3f)
                     val signed = relativePosition.coerceIn(-3f, 3f)
                     val density = LocalDensity.current
-                    // Reference motion behaves like a physical card deck: the
-                    // front card peels away with a small rotation while the next
-                    // one grows out from behind it. This is intentionally
-                    // asymmetric instead of the old mirrored 3D fan.
-                    val scale = when {
-                        signed < 0f -> (1f - distance * 0.065f).coerceIn(0.78f, 1f)
-                        distance <= 1f -> 0.90f + (1f - distance) * 0.10f
-                        else -> (0.90f - (distance - 1f) * 0.055f).coerceIn(0.74f, 0.90f)
+
+                    // Curva com overshoot senoidal elástico ("bouncy") à medida que o card atinge o centro
+                    val bounceFactor = if (distance <= 1f) {
+                        val progress = 1f - distance
+                        progress + 0.16f * sin(progress * PI.toFloat())
+                    } else {
+                        0f
                     }
-                    val alpha = when {
-                        signed < 0f -> (1f - distance * 0.16f).coerceIn(0.62f, 1f)
-                        else -> (1f - distance * 0.10f).coerceIn(0.70f, 1f)
+                    val scale = if (distance <= 1f) {
+                        0.90f + bounceFactor * 0.10f
+                    } else {
+                        (0.90f - (distance - 1f) * 0.055f).coerceIn(0.74f, 0.90f)
                     }
-                    val rotationZ = when {
-                        signed < 0f -> (signed * 7.5f).coerceIn(-10f, 0f)
-                        else -> (signed * 3.2f).coerceIn(0f, 7f)
-                    }
+
+                    val alpha = (1f - distance * 0.12f).coerceIn(0.65f, 1f)
+                    val rotationZ = (signed * 4.0f).coerceIn(-8f, 8f)
                     val rotationY = (-signed * 1.8f).coerceIn(-4f, 4f)
                     val translationX = with(density) {
-                        when {
-                            signed < 0f -> signed * 36.dp.toPx()
-                            else -> signed * 18.dp.toPx()
-                        }
+                        signed * 26.dp.toPx()
                     }
                     val translationY = with(density) {
-                        (distance * 4.dp.toPx()).coerceAtMost(12.dp.toPx())
+                        val liftBounce = if (distance <= 1f) {
+                            -3.dp.toPx() * sin((1f - distance) * PI.toFloat())
+                        } else {
+                            0f
+                        }
+                        (distance * 4.dp.toPx()).coerceAtMost(12.dp.toPx()) + liftBounce
                     }
                     val elevation = with(density) {
                         if (distance < 0.45f) 20.dp.toPx() else 5.dp.toPx()
@@ -1068,8 +1045,6 @@ private fun RotatingRecommendationShelf(
                             contentDescription = item.title,
                             contentScale = ContentScale.Crop,
                             modifier = Modifier
-                                // requiredSize intentionally ignores the narrow
-                                // slot's max width, keeping every cover truly 1:1.
                                 .requiredSize(artworkSize)
                                 .onGloballyPositioned { coordinates ->
                                     val topLeft = coordinates.positionInRoot()
@@ -1147,28 +1122,28 @@ private fun HeroShelf(
 ) {
     Column(
         Modifier.padding(
-            bottom = if (expressive) 46.dp else HOME_SHELF_BOTTOM_SPACING,
+            bottom = 15.dp,
         ),
     ) {
         SectionHeader(shelf.title, shelf.subtitle, expressive = expressive)
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             val featureWidth = (maxWidth - PAGE_GUTTER * 2f) * 0.92f
             LazyRow(
-            state = rememberLazyListState(),
-            contentPadding = PaddingValues(horizontal = PAGE_GUTTER),
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            items(shelf.items) { item ->
-                HeroCard(
-                    item = item,
-                    onClick = onItemClick,
-                    onLongPress = onItemLongPress?.let { callback -> { callback(item) } },
+                state = rememberLazyListState(),
+                contentPadding = PaddingValues(horizontal = PAGE_GUTTER),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                items(shelf.items) { item ->
+                    HeroCard(
+                        item = item,
+                        onClick = onItemClick,
+                        onLongPress = onItemLongPress?.let { callback -> { callback(item) } },
                         expressive = expressive,
                         modifier = Modifier
                             .width(featureWidth)
                             .then(if (expressive) Modifier.height(230.dp) else Modifier),
-                )
-            }
+                    )
+                }
             }
         }
     }
@@ -1250,9 +1225,6 @@ private fun HeroCard(
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize(),
         )
-        // One continuous scrim over the artwork. It starts above the caption
-        // area so title, artist and badges all sit on the same darkening field
-        // instead of the badges looking like the only protected element.
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -1284,9 +1256,6 @@ private fun HeroCard(
                     bottom = if (expressive) 18.dp else 14.dp,
                 ),
         ) {
-            // Hero cards are the intentional layout exception: Explicit stays
-            // beside the title, while Lossless/Hi-Res occupies the lower-right
-            // corner of the caption area instead of joining the title row.
             ExplicitTitle(
                 text = item.title,
                 isExplicit = badgeExplicit,
@@ -1303,7 +1272,6 @@ private fun HeroCard(
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
                 badgeSpacing = 5.dp,
-                // The Hero Lossless mark below uses a 13dp ribbon / 10sp text.
                 badgeSize = 13.dp,
                 badgeFontSize = 10.sp,
                 modifier = Modifier.fillMaxWidth(),
@@ -1332,17 +1300,10 @@ private fun HeroCard(
                     )
                 }
             }
-            }
         }
     }
+}
 
-/**
- * [leadingCard] rides at the head of the row, ahead of the content — the
- * Library tab's "New playlist" tile, which belongs among the playlists rather
- * than in a bar somewhere above them. [onItemLongPress] is likewise the
- * Library's: a card is only worth holding where there is something to do to
- * the thing behind it.
- */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun Shelf(
@@ -1356,7 +1317,7 @@ internal fun Shelf(
 ) {
     Column(
         Modifier.padding(
-            bottom = if (expressive) 46.dp else HOME_SHELF_BOTTOM_SPACING,
+            bottom = 15.dp,
         ),
     ) {
         SectionHeader(shelf.title, shelf.subtitle, expressive = expressive)
@@ -1379,11 +1340,6 @@ internal fun Shelf(
     }
 }
 
-/**
- * A card that isn't a thing yet — the dashed "New playlist" tile at the head
- * of the Library's playlist row, sized to sit in line with the covers beside
- * it rather than as a button bolted above them.
- */
 @Composable
 internal fun NewShelfCard(
     icon: ImageVector,
@@ -1427,8 +1383,6 @@ internal fun NewShelfCard(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-        // Playlist cards reserve this row for Explicit/Lossless. Keep the
-        // leading "New playlist" tile exactly the same height.
         Spacer(Modifier.height(RELEASE_BADGE_SLOT_HEIGHT))
     }
 }
@@ -1554,9 +1508,6 @@ private fun ShelfCard(
             }
         }
         Spacer(Modifier.height(10.dp))
-        // Compact shelf cards keep track badges out of the title line.
-        // Explicit and Lossless/Hi-Res live together in the dedicated row
-        // below the artist/metadata, so titles stay stable and uncluttered.
         ExplicitTitle(
             text = if (localizeLabels) localizedYouTubeLibraryItemTitle(item.title) else item.title,
             isExplicit = false,
@@ -1566,9 +1517,6 @@ private fun ShelfCard(
             overflow = TextOverflow.Ellipsis,
         )
         Text(
-            // Metadata such as Album / Songs / Tracks is YouTube UI copy, not
-            // user-authored music text, so it is safe (and expected) to localize
-            // on Home/Explore as well as Library.
             text = localizedYouTubeMetadata(item.subtitle),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1576,8 +1524,6 @@ private fun ShelfCard(
             overflow = TextOverflow.Ellipsis,
         )
         if (isCollection || showTrackBadgeRow) {
-            // Fixed footprint: async Explicit/Lossless results can fill this row
-            // without changing the LazyRow height and making sections jump.
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
