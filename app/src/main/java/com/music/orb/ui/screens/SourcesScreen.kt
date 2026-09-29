@@ -391,7 +391,11 @@ private fun SourceRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
-            Text(localizedSourceName(config), style = MaterialTheme.typography.titleSmall)
+            Text(
+                text = localizedSourceName(config),
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
             Text(
                 localizedSourceDetail(config.kind),
                 style = MaterialTheme.typography.bodySmall,
