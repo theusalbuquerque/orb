@@ -21,7 +21,7 @@ internal object LyricsDiskCache {
     private const val TTL_MS = 30L * 24 * 60 * 60 * 1000
 
     fun init(context: Context) {
-        directory = File(context.applicationContext.cacheDir, "lyrics_v1")
+        directory = File(context.applicationContext.cacheDir, "lyrics_v2")
     }
 
     fun key(videoId: String, title: String, artist: String, durationMs: Long,
