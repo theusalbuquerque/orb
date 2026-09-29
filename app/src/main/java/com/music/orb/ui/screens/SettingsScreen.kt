@@ -14,6 +14,7 @@ import java.time.LocalTime
 import java.time.ZoneId
 import kotlinx.coroutines.delay
 import android.widget.Toast
+import com.music.orb.data.billing.BillingApi
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
@@ -285,11 +286,17 @@ fun SettingsScreen(
 
     val showPremiumCard = isOwnerAccount || premiumReleaseReached
 
+    LaunchedEffect(showPremiumCard) {
+        if (!showPremiumCard) return@LaunchedEffect
+        premiumMonthlyPrice = withContext(Dispatchers.IO) { BillingApi.fetchMonthlyPrice() }
+    }
+
     var showJoinBetaDialog by remember { mutableStateOf(false) }
     var showLeaveBetaDialog by remember { mutableStateOf(false) }
     var showAutomixNotice by rememberSaveable { mutableStateOf(false) }
     var showDonationSheet by rememberSaveable { mutableStateOf(false) }
     var showPremiumSheet by rememberSaveable { mutableStateOf(false) }
+    var premiumMonthlyPrice by remember { mutableStateOf<Double?>(null) }
     var checkingForUpdates by remember { mutableStateOf(false) }
 
 
@@ -848,6 +855,7 @@ fun SettingsScreen(
             PremiumSheetContent(
                 ownerPreview = isOwnerAccount,
                 premiumEntitled = premiumEntitled,
+                monthlyPrice = premiumMonthlyPrice,
                 onDismiss = { showPremiumSheet = false },
             )
         }
@@ -989,6 +997,7 @@ private fun PremiumOrbCard(
 private fun PremiumSheetContent(
     ownerPreview: Boolean,
     premiumEntitled: Boolean,
+    monthlyPrice: Double?,
     onDismiss: () -> Unit,
 ) {
     Column(
@@ -1003,7 +1012,9 @@ private fun PremiumSheetContent(
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            text = stringResource(R.string.premium_monthly_price),
+            text = monthlyPrice?.let { price ->
+                java.text.NumberFormat.getCurrencyInstance(java.util.Locale("pt", "BR")).format(price) + " / mês"
+            } ?: stringResource(R.string.premium_monthly_price),
             style = MaterialTheme.typography.headlineSmall,
             color = MaterialTheme.colorScheme.onSurface,
         )
