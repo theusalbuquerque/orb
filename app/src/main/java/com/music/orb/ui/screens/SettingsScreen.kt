@@ -9,6 +9,10 @@ import android.content.pm.PackageManager
 import android.media.audiofx.AudioEffect
 import android.os.Build
 import java.time.Instant
+import java.time.LocalDate
+import java.time.LocalTime
+import java.time.ZoneId
+import kotlinx.coroutines.delay
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -261,7 +265,24 @@ fun SettingsScreen(
     val cacheLimitBytes by AppSettings.audioCacheLimitBytes.collectAsStateWithLifecycle()
     val betaUpdatesEnabled by AppSettings.betaUpdatesEnabled.collectAsStateWithLifecycle()
     val isOwnerAccount by AppSettings.isOwnerAccount.collectAsStateWithLifecycle()
-    val showPremiumCard = isOwnerAccount || Instant.now().isAfter(PREMIUM_CARD_RELEASE_INSTANT)
+    var premiumReleaseReached by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        val releaseInstant = LocalDate.of(2026, 11, 1)
+            .atTime(LocalTime.of(8, 0))
+            .atZone(ZoneId.systemDefault())
+            .toInstant()
+        while (true) {
+            val remainingMillis = releaseInstant.toEpochMilli() - System.currentTimeMillis()
+            if (remainingMillis <= 0L) {
+                premiumReleaseReached = true
+                break
+            }
+            delay(remainingMillis.coerceAtMost(60_000L))
+        }
+    }
+
+    val showPremiumCard = isOwnerAccount || premiumReleaseReached
 
     var showJoinBetaDialog by remember { mutableStateOf(false) }
     var showLeaveBetaDialog by remember { mutableStateOf(false) }
@@ -908,8 +929,6 @@ fun SettingsScreen(
     }
 }
 
-
-private val PREMIUM_CARD_RELEASE_INSTANT: Instant = Instant.parse("2026-11-01T11:00:00Z")
 
 @Composable
 private fun PremiumOrbCard(
