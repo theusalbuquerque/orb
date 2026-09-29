@@ -35,7 +35,27 @@ object BiniLyrics {
         val body = lyricsGet(url.toString()) ?: return@withContext null
         val response = runCatching { lyricsJson.decodeFromString<Response>(body) }.getOrNull()
             ?: return@withContext null
-        response.results?.firstOrNull()
+        response.results?.maxByOrNull { hit -> matchScore(hit, title, artist, durationMs, album) }
+    }
+
+    internal fun matchScore(hit: Hit, title: String, artist: String, durationMs: Long, album: String?): Int {
+        fun norm(value: String?): String =
+            value.orEmpty().lowercase().replace(Regex("[^\\p{L}\\p{N}]+"), " ").trim()
+        fun similarity(a: String?, b: String?): Int {
+            val left = norm(a); val right = norm(b)
+            if (left.isBlank() || right.isBlank()) return 0
+            if (left == right) return 35
+            if (left.contains(right) || right.contains(left)) return 22
+            return 0
+        }
+        val durationScore = hit.duration?.let { seconds ->
+            val delta = kotlin.math.abs(seconds * 1000L - durationMs)
+            when { delta <= 1_500L -> 30; delta <= 3_000L -> 20; delta <= 5_000L -> 10; delta <= 10_000L -> 3; else -> 0 }
+        } ?: 0
+        return similarity(hit.trackName, title) +
+            similarity(hit.artistName, artist) +
+            if (!album.isNullOrBlank()) similarity(hit.albumName, album) else 0 +
+            durationScore
     }
 
     internal suspend fun lyricsFor(hit: Hit): Match? = withContext(Dispatchers.IO) {
