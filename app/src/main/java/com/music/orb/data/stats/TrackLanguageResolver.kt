@@ -66,29 +66,7 @@ object TrackLanguageResolver {
         cached(videoId)?.let { return it }
         detectFromMetadata(title, album)?.let { return it }
         val duration = durationMs?.takeIf { it > 0L } ?: return null
-        // Prefer the exact YouTube Music Lyrics tab. Captions/transcripts can
-        // be localized or auto-translated by YouTube and therefore are a poor
-        // primary language signal (this was the source of Spanish tracks being
-        // persisted as Russian when a translated caption won the race).
-        val youtubeMusic = runCatching {
-            LyricsRepository.lyrics(
-                videoId = videoId,
-                title = title,
-                artist = artist,
-                durationMs = duration,
-                album = album,
-                sources = setOf(LyricsSource.YOUTUBE_MUSIC),
-                prioritizeSyllableSync = false,
-            )
-        }.getOrNull()
-        youtubeMusic?.let { result ->
-            detectFromLyrics(result.lines)?.let { code ->
-                remember(videoId, code)
-                return code
-            }
-        }
-
-        // Exact-video captions are only a fallback. The detector below now
+        // Exact-video captions are the strongest remaining exact-track signal.\n        // Exact-video captions are only a fallback. The detector below now
         // requires a script to dominate the lyric sample before assigning a
         // non-Latin language, so a stray Cyrillic glyph cannot turn Spanish
         // lyrics into Russian.
