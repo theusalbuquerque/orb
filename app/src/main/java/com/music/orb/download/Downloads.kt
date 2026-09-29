@@ -5,6 +5,9 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.net.Uri
 import com.music.orb.data.DebugLog as Log
+import com.music.orb.data.lyrics.LyricsOfflineStore
+import com.music.orb.data.lyrics.LyricsRepository
+import com.music.orb.data.settings.AppSettings
 import androidx.core.content.ContextCompat
 import com.music.orb.data.YtMusicRepository
 import com.music.orb.data.innertube.StreamResolver
@@ -393,6 +396,15 @@ object Downloads {
         result
     }
 
+    private fun String?.toDurationMs(): Long {
+        val parts = this?.trim()?.split(":") ?: return 0L
+        if (parts.size !in 2..3) return 0L
+        val values = parts.map { it.toLongOrNull() ?: return 0L }
+        val seconds = if (parts.size == 2) values[0] * 60L + values[1]
+        else values[0] * 3600L + values[1] * 60L + values[2]
+        return seconds * 1000L
+    }
+
     private fun String.toUri(): Uri = Uri.parse(this)
 
     // ---- Driven by DownloadService -----------------------------------------
@@ -493,6 +505,27 @@ object Downloads {
                 error("The downloaded audio container is invalid — try again")
             }
             MediaTagger.embed(context, savedUri, track, route.extension)
+
+            // Premium downloads also persist the exact lyrics winner selected
+            // by the same global resolver used by the online player.
+            if (AppSettings.premiumEntitled.value) {
+                runCatching {
+                    val durationMs = track.durationText.toDurationMs()
+                    if (durationMs > 0L) {
+                        LyricsRepository.lyrics(
+                            videoId = track.videoId,
+                            title = track.title,
+                            artist = track.artist,
+                            durationMs = durationMs,
+                            album = track.albumName,
+                        )?.let { lyrics ->
+                            LyricsOfflineStore.put(context, track.videoId, lyrics)
+                        }
+                    }
+                }.onFailure {
+                    Log.w(TAG, "could not save offline lyrics for ${track.videoId}: ${it.message}")
+                }
+            }
             if (!DownloadStore.isPlayableAudio(context, savedUri, force = true)) {
                 DownloadStore.delete(context, savedUri)
                 error("The downloaded file could not be verified — try again")
