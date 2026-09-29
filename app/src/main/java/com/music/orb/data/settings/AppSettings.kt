@@ -366,16 +366,19 @@ object AppSettings {
         }
 
     /**
-     * Whether Wi-Fi is allowed to upgrade above AAC into Lossless / Hi-Res Lossless.
+     * Whether the active connection is allowed to upgrade above AAC into
+     * Lossless / Hi-Res Lossless.
      *
-     * This never changes the first-note codec: playback still resolves AAC first
-     * and only upgrades through Lossless sources after audio is already available. Mobile
-     * data deliberately has no Maximum tier.
+     * Free accounts keep the existing Wi-Fi-only rule. Premium accounts may
+     * also use Lossless / Hi-Res Lossless on mobile data. The first-note path
+     * remains latency-first (AAC/Opus first); this flag only authorizes the
+     * subsequent quality upgrade.
      */
     val effectiveMaximumAudioQuality: Boolean
-        get() = wifiConnection.value == true &&
-            audioQualityWifiMaximum.value &&
-            losslessAudio.value
+        get() = losslessAudio.value && (
+            (wifiConnection.value == true && audioQualityWifiMaximum.value) ||
+                (wifiConnection.value == false && premiumEntitled.value)
+            )
 
     fun init(context: Context) {
         prefs = context.getSharedPreferences("bitchord_settings", Context.MODE_PRIVATE)
