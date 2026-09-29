@@ -265,6 +265,7 @@ fun SettingsScreen(
     val cacheLimitBytes by AppSettings.audioCacheLimitBytes.collectAsStateWithLifecycle()
     val betaUpdatesEnabled by AppSettings.betaUpdatesEnabled.collectAsStateWithLifecycle()
     val isOwnerAccount by AppSettings.isOwnerAccount.collectAsStateWithLifecycle()
+    val premiumEntitled by AppSettings.premiumEntitled.collectAsStateWithLifecycle()
     var premiumReleaseReached by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
@@ -846,6 +847,7 @@ fun SettingsScreen(
         ModalBottomSheet(onDismissRequest = { showPremiumSheet = false }) {
             PremiumSheetContent(
                 ownerPreview = isOwnerAccount,
+                premiumEntitled = premiumEntitled,
                 onDismiss = { showPremiumSheet = false },
             )
         }
@@ -986,6 +988,7 @@ private fun PremiumOrbCard(
 @Composable
 private fun PremiumSheetContent(
     ownerPreview: Boolean,
+    premiumEntitled: Boolean,
     onDismiss: () -> Unit,
 ) {
     Column(
@@ -999,6 +1002,12 @@ private fun PremiumSheetContent(
             color = MaterialTheme.colorScheme.onSurface,
         )
         Spacer(Modifier.height(8.dp))
+        Text(
+            text = stringResource(R.string.premium_monthly_price),
+            style = MaterialTheme.typography.headlineSmall,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        Spacer(Modifier.height(4.dp))
         Text(
             text = stringResource(R.string.premium_sheet_subtitle),
             style = MaterialTheme.typography.titleMedium,
@@ -1041,11 +1050,26 @@ private fun PremiumSheetContent(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(16.dp))
+        androidx.compose.material3.Button(
+            onClick = onDismiss,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(
+                stringResource(
+                    if (premiumEntitled) {
+                        R.string.premium_cancel_subscription_button
+                    } else {
+                        R.string.premium_subscribe_monthly_button
+                    },
+                ),
+            )
+        }
+        Spacer(Modifier.height(8.dp))
         TextButton(
             onClick = onDismiss,
             modifier = Modifier.align(Alignment.End),
         ) {
-            Text(stringResource(android.R.string.ok))
+            Text(stringResource(android.R.string.cancel))
         }
         Spacer(Modifier.height(8.dp))
     }
