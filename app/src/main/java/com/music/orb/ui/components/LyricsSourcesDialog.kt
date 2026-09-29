@@ -125,9 +125,7 @@ fun LyricsSourcesDialog(
                     .verticalScroll(rememberScrollState()),
             ) {
                 Column {
-                    LyricsSource.entries
-                        .filterNot { it == LyricsSource.YOUTUBE_MUSIC }
-                        .forEach { source ->
+                    LyricsSource.entries.forEach { source ->
                         AlertRule()
                         val checked = source in selected
                         SourceRow(
@@ -261,7 +259,6 @@ private fun sourceDetail(source: LyricsSource): String = when (source) {
     LyricsSource.PAXSENIX_MUSIXMATCH -> stringResource(R.string.lyrics_source_paxsenix_musixmatch_detail)
     LyricsSource.UNISON -> stringResource(R.string.lyrics_source_unison_detail)
     LyricsSource.YOUTUBE_TRANSCRIPT -> stringResource(R.string.lyrics_source_youtube_captions_detail)
-    LyricsSource.YOUTUBE_MUSIC -> stringResource(R.string.lyrics_source_youtube_music_detail)
     LyricsSource.MEGALOBIZ -> stringResource(R.string.lyrics_source_megalobiz_detail)
     LyricsSource.KUGOU -> stringResource(R.string.lyrics_source_kugou_detail)
     LyricsSource.MUSIXMATCH -> stringResource(R.string.lyrics_source_musixmatch_detail)
