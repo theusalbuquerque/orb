@@ -288,11 +288,6 @@ fun SettingsScreen(
 
     val showPremiumCard = isOwnerAccount || premiumReleaseReached
 
-    LaunchedEffect(showPremiumCard) {
-        if (!showPremiumCard) return@LaunchedEffect
-        premiumMonthlyPrice = withContext(Dispatchers.IO) { BillingApi.fetchMonthlyPrice() }
-    }
-
     var showJoinBetaDialog by remember { mutableStateOf(false) }
     var showLeaveBetaDialog by remember { mutableStateOf(false) }
     var showAutomixNotice by rememberSaveable { mutableStateOf(false) }
@@ -300,6 +295,11 @@ fun SettingsScreen(
     var showPremiumSheet by rememberSaveable { mutableStateOf(false) }
     var premiumMonthlyPrice by remember { mutableStateOf<Double?>(null) }
     var checkingForUpdates by remember { mutableStateOf(false) }
+
+    LaunchedEffect(showPremiumCard) {
+        if (!showPremiumCard) return@LaunchedEffect
+        premiumMonthlyPrice = withContext(Dispatchers.IO) { BillingApi.fetchMonthlyPrice() }
+    }
 
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
