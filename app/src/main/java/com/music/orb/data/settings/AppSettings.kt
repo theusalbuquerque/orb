@@ -130,6 +130,8 @@ object AppSettings {
     val automixVersion = MutableStateFlow(AutomixVersion.V2_0)
     val automix25Available = MutableStateFlow(false)
     val premiumEntitled = MutableStateFlow(false)
+    /** True only for the Orb developer/owner account, independent of billing entitlement. */
+    val isOwnerAccount = MutableStateFlow(false)
     internal val automix25AccountHash = MutableStateFlow("")
     private var requestedAutomixVersion = AutomixVersion.V2_0
 
@@ -704,8 +706,9 @@ object AppSettings {
 
         // Private owner account: expose the complete Premium UI/features for
         // development and QA even when no billing entitlement exists yet.
-        val isOwnerAccount = automix25AccountHash.value == AUTOMIX_25_BETA_OWNER_HASH
-        premiumEntitled.value = isOwnerAccount || premiumEntitled.value
+        val ownerAccount = automix25AccountHash.value == AUTOMIX_25_BETA_OWNER_HASH
+        isOwnerAccount.value = ownerAccount
+        premiumEntitled.value = ownerAccount || premiumEntitled.value
         refreshAutomix25Entitlement()
     }
 
