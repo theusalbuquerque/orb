@@ -701,6 +701,11 @@ object AppSettings {
             ?.takeIf { it.isNotEmpty() }
             ?.let(::sha256Hex)
             .orEmpty()
+
+        // Private owner account: expose the complete Premium UI/features for
+        // development and QA even when no billing entitlement exists yet.
+        val isOwnerAccount = automix25AccountHash.value == AUTOMIX_25_BETA_OWNER_HASH
+        premiumEntitled.value = isOwnerAccount || premiumEntitled.value
         refreshAutomix25Entitlement()
     }
 
