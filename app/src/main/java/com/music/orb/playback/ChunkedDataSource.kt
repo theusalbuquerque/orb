@@ -68,8 +68,16 @@ class ChunkedDataSource(
         baseSpec = dataSpec
         position = dataSpec.position
 
+        // Chunked range reads are an optimization for YouTube's googlevideo
+        // carriers. Lossless sources (TIDAL/addons/modules) may expose a clen
+        // query parameter too, but their signed URLs can reject the synthetic
+        // byte ranges with HTTP 403. Preserve their original request instead of
+        // turning a valid Lossless URL into a range request the source did not
+        // authorize.
+        val isGoogleVideo = dataSpec.uri.host
+            ?.endsWith("googlevideo.com", ignoreCase = true) == true
         val total = dataSpec.uri.getQueryParameter("clen")?.toLongOrNull()
-        if (dataSpec.length != C.LENGTH_UNSET.toLong() || total == null) {
+        if (!isGoogleVideo || dataSpec.length != C.LENGTH_UNSET.toLong() || total == null) {
             passthrough = true
             chunkOpen = true
             // Reported, not just thrown. Nothing but googlevideo carries `clen`,
