@@ -2147,8 +2147,13 @@ fun NowPlayingScreen(
                     val cellularQuality by AppSettings.audioQualityCellular.collectAsStateWithLifecycle()
                     val wifiMaximum by AppSettings.audioQualityWifiMaximum.collectAsStateWithLifecycle()
                     val cellularMaximum by AppSettings.audioQualityCellularMaximum.collectAsStateWithLifecycle()
+                    val premiumEntitled by AppSettings.premiumEntitled.collectAsStateWithLifecycle()
+                    val losslessAudio by AppSettings.losslessAudio.collectAsStateWithLifecycle()
                     val activeQuality = if (onWifi == true) wifiQuality else cellularQuality
-                    val activeMaximum = if (onWifi == true) wifiMaximum else cellularMaximum
+                    val activeMaximum = losslessAudio && (
+                        (onWifi == true && wifiMaximum) ||
+                            (onWifi == false && premiumEntitled)
+                        )
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
