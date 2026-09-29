@@ -1,8 +1,8 @@
 package com.music.orb.data.lyrics
 
 /**
- * Databases Orb may query for lyrics. Declaration order is the default
- * priority used by [LyricsRepository].
+ * Databases Orb may query for lyrics. Providers are ranked by recording identity
+ * and lyric agreement inside [LyricsRepository], not by declaration order.
  */
 enum class LyricsSource(
     val label: String,
@@ -58,11 +58,6 @@ enum class LyricsSource(
     YOUTUBE_TRANSCRIPT(
         label = "YouTube captions",
         detail = "Timed captions matched to the exact playing video",
-        wordSynced = false,
-    ),
-    YOUTUBE_MUSIC(
-        label = "YouTube Music",
-        detail = "Plain lyrics from the playing video's Lyrics tab",
         wordSynced = false,
     ),
     MEGALOBIZ(
