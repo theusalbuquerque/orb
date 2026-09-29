@@ -139,10 +139,10 @@
     <string name="premium_card_subscribed_subtitle">Plano Mensal Ativo · Todos os recursos exclusivos liberados</string>
     <string name="premium_sheet_title">Orb Premium</string>
     <string name="premium_sheet_subtitle">Plano Mensal</string>
-    <string name="premium_feature_automix">Automix 2.5 com IA e transições harmônicas perfeitas</string>
-    <string name="premium_feature_lossless">Reprodução Lossless e Hi-Res Lossless no Wi-Fi e dados móveis</string>
-    <string name="premium_feature_offline_lyrics">Ver letras das músicas mesmo quando estiver offline</string>
-    <string name="premium_feature_more">Entre outros recursos exclusivos em constante evolução</string>
+    <string name="premium_feature_automix">Automix 2.5 com transições inteligentes</string>
+    <string name="premium_feature_lossless">Lossless e Hi-Res Lossless no Wi-Fi e dados móveis</string>
+    <string name="premium_feature_offline_lyrics">Letras disponíveis mesmo offline</string>
+    <string name="premium_feature_more">Mais recursos exclusivos em constante evolução</string>
     <string name="premium_monthly_price">R$ 14,90 / mês</string>
     <string name="premium_subscribe_monthly_button">Assinar Plano Mensal</string>
     <string name="premium_cancel_subscription_button">Cancelar Assinatura</string>
