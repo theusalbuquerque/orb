@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.audiofx.AudioEffect
 import android.os.Build
+import java.time.Instant
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -259,11 +260,14 @@ fun SettingsScreen(
     val homeAuraEnabled by AppSettings.homeAuraEnabled.collectAsStateWithLifecycle()
     val cacheLimitBytes by AppSettings.audioCacheLimitBytes.collectAsStateWithLifecycle()
     val betaUpdatesEnabled by AppSettings.betaUpdatesEnabled.collectAsStateWithLifecycle()
+    val isOwnerAccount by AppSettings.isOwnerAccount.collectAsStateWithLifecycle()
+    val showPremiumCard = isOwnerAccount || Instant.now().isAfter(PREMIUM_CARD_RELEASE_INSTANT)
 
     var showJoinBetaDialog by remember { mutableStateOf(false) }
     var showLeaveBetaDialog by remember { mutableStateOf(false) }
     var showAutomixNotice by rememberSaveable { mutableStateOf(false) }
     var showDonationSheet by rememberSaveable { mutableStateOf(false) }
+    var showPremiumSheet by rememberSaveable { mutableStateOf(false) }
     var checkingForUpdates by remember { mutableStateOf(false) }
 
 
@@ -356,6 +360,9 @@ fun SettingsScreen(
             .verticalScroll(effectiveScrollState)
             .padding(contentPadding),
     ) {
+        if (showPremiumCard) {
+            PremiumOrbCard(onClick = { showPremiumSheet = true })
+        }
         SupportOrbCard(
             onClick = { showDonationSheet = true },
         )
@@ -814,6 +821,15 @@ fun SettingsScreen(
     }
 
 
+    if (showPremiumSheet) {
+        ModalBottomSheet(onDismissRequest = { showPremiumSheet = false }) {
+            PremiumSheetContent(
+                ownerPreview = isOwnerAccount,
+                onDismiss = { showPremiumSheet = false },
+            )
+        }
+    }
+
     if (showDonationSheet) {
         ModalBottomSheet(
             onDismissRequest = { showDonationSheet = false },
@@ -892,6 +908,129 @@ fun SettingsScreen(
     }
 }
 
+
+private val PREMIUM_CARD_RELEASE_INSTANT: Instant = Instant.parse("2026-11-01T11:00:00Z")
+
+@Composable
+private fun PremiumOrbCard(
+    onClick: () -> Unit,
+) {
+    val shape = if (OrbFlavorUi.expressive) RoundedCornerShape(28.dp) else GroupShape
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(settingsVerticalEdgeModifier())
+            .padding(start = GROUP_INSET, top = 18.dp, end = GROUP_INSET)
+            .clip(shape)
+            .background(MaterialTheme.colorScheme.tertiaryContainer)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 18.dp, vertical = 18.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(48.dp)
+                .clip(RoundedCornerShape(16.dp))
+                .background(MaterialTheme.colorScheme.tertiary),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.AutoAwesome,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onTertiary,
+                modifier = Modifier.size(26.dp),
+            )
+        }
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = stringResource(R.string.premium_card_title),
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onTertiaryContainer,
+            )
+            Spacer(Modifier.height(3.dp))
+            Text(
+                text = stringResource(R.string.premium_card_subtitle),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.78f),
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        Icon(
+            imageVector = Icons.Rounded.ChevronRight,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onTertiaryContainer,
+        )
+    }
+}
+
+@Composable
+private fun PremiumSheetContent(
+    ownerPreview: Boolean,
+    onDismiss: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 24.dp, vertical = 20.dp),
+    ) {
+        Text(
+            text = stringResource(R.string.premium_sheet_title),
+            style = MaterialTheme.typography.headlineSmall,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = stringResource(R.string.premium_sheet_subtitle),
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(18.dp))
+        listOf(
+            R.string.premium_feature_automix,
+            R.string.premium_feature_lossless,
+            R.string.premium_feature_offline_lyrics,
+            R.string.premium_feature_more,
+        ).forEach { resource ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Check,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    text = stringResource(resource),
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        Text(
+            text = if (ownerPreview) {
+                "Prévia antecipada do desenvolvedor."
+            } else {
+                "Os planos Premium estarão disponíveis a partir de 1º de novembro de 2026."
+            },
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(16.dp))
+        TextButton(
+            onClick = onDismiss,
+            modifier = Modifier.align(Alignment.End),
+        ) {
+            Text(stringResource(android.R.string.ok))
+        }
+        Spacer(Modifier.height(8.dp))
+    }
+}
 
 @Composable
 private fun SupportOrbCard(
