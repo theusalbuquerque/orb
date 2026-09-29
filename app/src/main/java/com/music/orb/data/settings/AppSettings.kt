@@ -262,7 +262,7 @@ object AppSettings {
 
     /** The databases [syncedLyrics] may ask. Empty is the same as off. */
     private fun availableLyricsSources(): Set<LyricsSource> =
-        LyricsSource.entries.filterNot { it == LyricsSource.YOUTUBE_MUSIC }.toSet()
+        LyricsSource.entries.toSet()
 
     val lyricsSources = MutableStateFlow(availableLyricsSources())
 
@@ -819,7 +819,7 @@ object AppSettings {
     }
 
     fun setLyricsSources(value: Set<LyricsSource>) {
-        val sanitized = value.filterNot { it == LyricsSource.YOUTUBE_MUSIC }.toSet()
+        val sanitized = value.toSet()
         lyricsSources.value = sanitized
         prefs.edit().putString(KEY_LYRICS_SOURCES, sanitized.joinToString(",") { it.name }).apply()
     }
@@ -859,7 +859,7 @@ object AppSettings {
         }
         val parsed = stored.split(",")
             .mapNotNull { name -> LyricsSource.entries.firstOrNull { it.name == name } }
-            .filterNot { it == LyricsSource.YOUTUBE_MUSIC }
+            
             .toSet()
         if (prefs.getBoolean(KEY_LYRICS_PROVIDER_EXPANSION_MIGRATED, false)) return parsed
 
@@ -872,7 +872,7 @@ object AppSettings {
             LyricsSource.LRCLIB,
         )
         val migrated = parsed + LyricsSource.entries.filterNot {
-            it in legacy || it == LyricsSource.YOUTUBE_MUSIC
+            it in legacy
         }
         prefs.edit()
             .putString(KEY_LYRICS_SOURCES, migrated.joinToString(",") { it.name })
