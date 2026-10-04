@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import math
 import os
 import sqlite3
 import uuid
@@ -11,7 +12,7 @@ from typing import Any, Literal
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 router = APIRouter(prefix="/api/billing", tags=["billing"])
 
@@ -24,6 +25,11 @@ MP_ACCESS_TOKEN = os.getenv("MERCADO_PAGO_ACCESS_TOKEN", "").strip()
 MP_WEBHOOK_SECRET = os.getenv("MERCADO_PAGO_WEBHOOK_SECRET", "").strip()
 ASAAS_API_KEY = os.getenv("ASAAS_API_KEY", "").strip()
 ASAAS_WEBHOOK_TOKEN = os.getenv("ASAAS_WEBHOOK_TOKEN", "").strip()
+
+# The exception is server-controlled and requires a confirmed Auth identity.
+DEVELOPER_EMAIL_HASH = "2c8c3e1d1bcef1415230705c38bafb7403905850a7f37c5206bd5cfc055c6aeb"
+SUPABASE_URL = os.getenv("ORB_SUPABASE_URL", os.getenv("SUPABASE_URL", "https://twhmhdqmbvogezofvfqg.supabase.co")).rstrip("/")
+SUPABASE_KEY = os.getenv("ORB_SUPABASE_PUBLISHABLE_KEY", os.getenv("SUPABASE_PUBLISHABLE_KEY", os.getenv("SUPABASE_ANON_KEY", ""))).strip()
 
 DB_PATH = os.getenv("ORB_BILLING_DB_PATH", "orb_billing.sqlite3").strip()
 
@@ -50,7 +56,7 @@ def _price(plan: str) -> float:
         value = round(float(raw), 2)
     except (TypeError, ValueError):
         value = 0.0
-    if value <= 0:
+    if not math.isfinite(value) or value <= 0:
         raise HTTPException(status_code=503, detail=f"{key} is not configured")
     return value
 
@@ -169,7 +175,7 @@ def _update_by_checkout_ref(
     values.append(checkout_ref)
     with _db() as conn:
         conn.execute(
-            f"UPDATE billing_subscriptions SET {', '.join(sets)} WHERE checkout_ref=?",
+            f"UPDATE billing_subscriptions SET {', '.join(sets)} WHERE checkout_ref=? AND status!='canceled'",
             values,
         )
         conn.commit()
@@ -186,7 +192,7 @@ def _update_by_provider_id(
             """
             UPDATE billing_subscriptions
             SET status=?, updated_at=?
-            WHERE provider=? AND provider_subscription_id=?
+            WHERE provider=? AND provider_subscription_id=? AND status!='canceled'
             """,
             (status, _now(), provider, provider_subscription_id),
         )
@@ -199,7 +205,7 @@ def _update_by_checkout_id(provider: str, checkout_id: str, *, status: str) -> N
             """
             UPDATE billing_subscriptions
             SET status=?, updated_at=?
-            WHERE provider=? AND checkout_id=?
+            WHERE provider=? AND checkout_id=? AND status!='canceled'
             """,
             (status, _now(), provider, checkout_id),
         )
@@ -286,7 +292,146 @@ def _configured_price(plan: Literal["monthly", "yearly"]) -> float | None:
     except (TypeError, ValueError):
         return None
 
-    return value if value > 0 else None
+    return value if math.isfinite(value) and value > 0 else None
+
+
+class SubscriptionCheckoutRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    plan: Literal["monthly", "yearly"] = "monthly"
+
+
+class SubscriptionConfirmRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    checkout_ref: str = Field(min_length=32, max_length=64)
+
+
+async def _verified_identity(authorization: str | None) -> dict[str, Any]:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Sign in to Orb first")
+    if not SUPABASE_KEY:
+        raise HTTPException(status_code=503, detail="Billing Auth is not configured")
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            response = await client.get(
+                f"{SUPABASE_URL}/auth/v1/user",
+                headers={"Authorization": authorization, "apikey": SUPABASE_KEY},
+            )
+    except httpx.HTTPError as error:
+        raise HTTPException(status_code=503, detail="Billing Auth is unavailable") from error
+    if response.status_code in (401, 403):
+        raise HTTPException(status_code=401, detail="Orb session expired")
+    if response.status_code != 200:
+        raise HTTPException(status_code=503, detail="Billing Auth is unavailable")
+    user = response.json()
+    email = str(user.get("email") or "").strip().lower()
+    if not user.get("id") or not email or not user.get("email_confirmed_at"):
+        raise HTTPException(status_code=403, detail="A confirmed Orb account is required")
+    # Never authorize from request email, account hashes or user_metadata.
+    return {"id": str(user["id"]), "email": email,
+            "developer": hmac.compare_digest(hashlib.sha256(email.encode()).hexdigest(), DEVELOPER_EMAIL_HASH)}
+
+
+def _account_rows(identity: dict[str, Any]) -> list[sqlite3.Row]:
+    with _db() as conn:
+        return conn.execute(
+            "SELECT * FROM billing_subscriptions WHERE customer_ref=? ORDER BY created_at DESC, rowid DESC",
+            (identity["id"],),
+        ).fetchall()
+
+
+def _subscription_state(identity: dict[str, Any]) -> dict[str, Any]:
+    rows = _account_rows(identity)
+    active = next((row for row in rows if row["status"] == "active"), None)
+    # Keep the early-access starting state only until the first explicit action.
+    preview = identity["developer"] and not rows
+    current = active or (rows[0] if rows else None)
+    return {"userId": identity["id"], "premium": active is not None or preview,
+            "status": "active" if preview else (current["status"] if current else "inactive"),
+            "developer": identity["developer"], "amount": 0.0 if identity["developer"] else _configured_price("monthly"),
+            "currency": "BRL", "checkoutRef": current["checkout_ref"] if current else None}
+
+
+def beta_preview_allowed(account_hash: str) -> bool:
+    """An owner cancellation must also disable the old Automix beta bypass."""
+    if not hmac.compare_digest(account_hash.strip().lower(), DEVELOPER_EMAIL_HASH):
+        return True
+    with _db() as conn:
+        rows = conn.execute("SELECT email FROM billing_subscriptions WHERE provider='developer'").fetchall()
+    return not any(hmac.compare_digest(hashlib.sha256(str(row["email"]).strip().lower().encode()).hexdigest(), DEVELOPER_EMAIL_HASH) for row in rows)
+
+
+@router.get("/subscription")
+async def subscription(authorization: str | None = Header(default=None)):
+    return _subscription_state(await _verified_identity(authorization))
+
+
+@router.post("/subscription/checkout")
+async def subscription_checkout(body: SubscriptionCheckoutRequest, authorization: str | None = Header(default=None)):
+    identity = await _verified_identity(authorization)
+    if _subscription_state(identity)["premium"]:
+        raise HTTPException(status_code=409, detail="Cancel the active subscription before subscribing again")
+    # Reuse pending checkouts to avoid duplicate subscriptions on retry.
+    pending = next((r for r in _account_rows(identity) if r["status"] == "pending" and r["plan"] == body.plan), None)
+    if pending:
+        return {"userId": identity["id"], "checkoutRef": pending["checkout_ref"],
+                "amount": pending["amount"], "currency": "BRL", "status": "pending",
+                "requiresConfirmation": pending["provider"] == "developer", "checkoutUrl": pending["checkout_url"]}
+    if identity["developer"]:
+        checkout_ref = str(uuid.uuid4())
+        _save_checkout(checkout_ref=checkout_ref, customer_ref=identity["id"], provider="developer",
+                       provider_subscription_id=None, checkout_id=None, email=identity["email"],
+                       plan=body.plan, amount=0.0, status="pending", checkout_url=None)
+        return {"userId": identity["id"], "checkoutRef": checkout_ref, "amount": 0.0,
+                "currency": "BRL", "status": "pending", "requiresConfirmation": True, "checkoutUrl": None}
+    # All other users keep the environment price and real provider checkout.
+    result = await create_mercado_pago_checkout(CheckoutRequest(
+        customer_ref=identity["id"], email=identity["email"], plan=body.plan))
+    saved = next(row for row in _account_rows(identity) if row["checkout_ref"] == result["checkoutRef"])
+    return {**result, "userId": identity["id"], "amount": saved["amount"],
+            "currency": "BRL", "requiresConfirmation": False}
+
+
+@router.post("/subscription/confirm")
+async def subscription_confirm(body: SubscriptionConfirmRequest, authorization: str | None = Header(default=None)):
+    identity = await _verified_identity(authorization)
+    if not identity["developer"]:
+        raise HTTPException(status_code=403, detail="Payment confirmation requires the provider webhook")
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM billing_subscriptions WHERE checkout_ref=? AND customer_ref=?",
+                           (body.checkout_ref, identity["id"])).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Checkout not found")
+        if row["provider"] != "developer" or row["amount"] != 0.0 or row["status"] not in ("pending", "active"):
+            raise HTTPException(status_code=409, detail="Checkout cannot be confirmed")
+        conn.execute("UPDATE billing_subscriptions SET status='active', updated_at=? WHERE checkout_ref=? AND status='pending'",
+                     (_now(), body.checkout_ref))
+        conn.commit()
+    return _subscription_state(identity)
+
+
+@router.post("/subscription/cancel")
+async def subscription_cancel(authorization: str | None = Header(default=None)):
+    identity = await _verified_identity(authorization)
+    rows = _account_rows(identity)
+    for row in rows:
+        if row["status"] not in ("active", "pending", "paused", "past_due"):
+            continue
+        if row["provider"] != "developer":
+            provider_id = row["provider_subscription_id"]
+            if row["provider"] != "mercadopago" or not provider_id or not MP_ACCESS_TOKEN:
+                raise HTTPException(status_code=409, detail="This subscription requires provider cancellation")
+            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+                response = await client.put(f"{MP_API}/preapproval/{provider_id}",
+                    headers={"Authorization": f"Bearer {MP_ACCESS_TOKEN}"}, json={"status": "canceled"})
+            if response.status_code >= 400 or _normalize_mp_status(response.json().get("status")) != "canceled":
+                raise HTTPException(status_code=502, detail="Provider cancellation failed")
+        _update_by_checkout_ref(row["checkout_ref"], status="canceled")
+    if identity["developer"]:
+        # A marker also turns off initial early access when no subscription existed.
+        _save_checkout(checkout_ref=str(uuid.uuid4()), customer_ref=identity["id"], provider="developer",
+                       provider_subscription_id=None, checkout_id=None, email=identity["email"],
+                       plan="monthly", amount=0.0, status="canceled", checkout_url=None)
+    return _subscription_state(identity)
 
 
 @router.get("/providers")
