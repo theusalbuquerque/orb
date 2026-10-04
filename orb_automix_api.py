@@ -23,7 +23,7 @@ import numpy as np
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from billing_api import premium_entitled_for_account_hash
+from billing_api import beta_preview_allowed, premium_entitled_for_account_hash
 
 router = APIRouter(prefix="/api/automix", tags=["automix"])
 
@@ -5025,7 +5025,7 @@ async def plan(request: PlanRequest) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail="unsupported Automix protocol version")
     account_hash = request.accountHash.strip().lower()
     entitled = (
-        account_hash in AUTOMIX25_BETA_HASHES
+        (account_hash in AUTOMIX25_BETA_HASHES and beta_preview_allowed(account_hash))
         or premium_entitled_for_account_hash(account_hash)
     )
     if not request.preview or not entitled:
