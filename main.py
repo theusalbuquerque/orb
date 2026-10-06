@@ -1,4 +1,6 @@
 import os
+import re
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote
 
@@ -34,6 +36,8 @@ QOBUZ_APP_ID = os.getenv("QOBUZ_APP_ID", "243542385").strip()
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://orb-4mrh.onrender.com").rstrip("/")
 
 QOBUZ_API = "https://www.qobuz.com/api.json/0.2"
+YT_MUSIC_API = "https://music.youtube.com/youtubei/v1"
+YT_MUSIC_ORIGIN = "https://music.youtube.com"
 REQUEST_TIMEOUT = httpx.Timeout(20.0, connect=10.0)
 
 # Qobuz format ids commonly used by the public web API.
@@ -295,68 +299,287 @@ def normalize_featured_album(album: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def qobuz_catalog_headers() -> dict[str, str]:
+    """Headers for public/editorial catalogue calls.
+
+    album/getFeatured is an editorial catalogue route. Unlike stream/user-data
+    endpoints it does not need the user's Qobuz auth token; some deployments
+    reject the extra user token on this route with HTTP 400.
+    """
+    return {
+        "X-App-Id": QOBUZ_APP_ID,
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/141.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json",
+    }
+
+
+def _runs_text(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    runs = value.get("runs")
+    if not isinstance(runs, list):
+        return ""
+    return "".join(
+        str(run.get("text") or "")
+        for run in runs
+        if isinstance(run, dict)
+    ).strip()
+
+
+def _walk_named_objects(value: Any, name: str):
+    if isinstance(value, dict):
+        found = value.get(name)
+        if isinstance(found, dict):
+            yield found
+        for child in value.values():
+            yield from _walk_named_objects(child, name)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_named_objects(child, name)
+
+
+def _best_yt_thumbnail(renderer: dict[str, Any]) -> str | None:
+    thumb_renderer = (
+        ((renderer.get("thumbnailRenderer") or {}).get("musicThumbnailRenderer"))
+        if isinstance(renderer.get("thumbnailRenderer"), dict)
+        else None
+    )
+    if not isinstance(thumb_renderer, dict):
+        thumb_renderer = next(_walk_named_objects(renderer, "musicThumbnailRenderer"), None)
+    if not isinstance(thumb_renderer, dict):
+        return None
+    thumbnail = thumb_renderer.get("thumbnail") or {}
+    thumbnails = thumbnail.get("thumbnails") if isinstance(thumbnail, dict) else None
+    if not isinstance(thumbnails, list) or not thumbnails:
+        return None
+    usable = [item for item in thumbnails if isinstance(item, dict) and item.get("url")]
+    if not usable:
+        return None
+    best = max(
+        usable,
+        key=lambda item: int(item.get("width") or 0) * int(item.get("height") or 0),
+    )
+    return str(best.get("url") or "") or None
+
+
+def _yt_artist_label(subtitle: str, title: str) -> str:
+    media_labels = {"album", "álbum", "single", "sencillo", "ep", "music", "música"}
+    pieces = [part.strip() for part in re.split(r"[•·]", subtitle) if part.strip()]
+    for part in pieces:
+        normalized = part.lower()
+        if normalized in media_labels:
+            continue
+        if re.fullmatch(r"\d{4}", normalized):
+            continue
+        return part
+    return subtitle.strip() or title
+
+
+def _normalize_yt_release(renderer: dict[str, Any]) -> dict[str, Any] | None:
+    title = _runs_text(renderer.get("title") or {})
+    if not title:
+        return None
+
+    endpoint = renderer.get("navigationEndpoint") or {}
+    browse_endpoint = endpoint.get("browseEndpoint") if isinstance(endpoint, dict) else None
+    if not isinstance(browse_endpoint, dict):
+        return None
+
+    browse_id = str(browse_endpoint.get("browseId") or "")
+    configs = browse_endpoint.get("browseEndpointContextSupportedConfigs") or {}
+    music_config = (
+        configs.get("browseEndpointContextMusicConfig")
+        if isinstance(configs, dict)
+        else {}
+    ) or {}
+    page_type = str(music_config.get("pageType") or "") if isinstance(music_config, dict) else ""
+
+    # Same rule as Orb Android's WelcomeLoginScreen: albums only.
+    if "ALBUM" not in page_type and not browse_id.startswith("MPRE"):
+        return None
+
+    artwork = _best_yt_thumbnail(renderer)
+    if not artwork:
+        return None
+
+    subtitle = _runs_text(renderer.get("subtitle") or {})
+    return {
+        "id": browse_id or artwork,
+        "title": title,
+        "artist": _yt_artist_label(subtitle, title),
+        "album": title,
+        "albumCover": artwork,
+        "releaseDate": None,
+        "type": "album",
+        "browseId": browse_id or None,
+    }
+
+
+async def _youtube_music_welcome_releases(
+    client: httpx.AsyncClient,
+    limit: int,
+) -> tuple[list[dict[str, Any]], str | None]:
+    version = f"1.{datetime.now(timezone.utc).strftime('%Y%m%d')}.01.00"
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Origin": YT_MUSIC_ORIGIN,
+        "Referer": f"{YT_MUSIC_ORIGIN}/",
+        "X-Origin": YT_MUSIC_ORIGIN,
+        "X-YouTube-Client-Name": "67",
+        "X-YouTube-Client-Version": version,
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/141.0.0.0 Safari/537.36"
+        ),
+    }
+    payload = {
+        "context": {
+            "client": {
+                "clientName": "WEB_REMIX",
+                "clientVersion": version,
+                "hl": "en",
+                "gl": "US",
+            },
+            "user": {"lockedSafetyMode": False},
+            "request": {"useSsl": True},
+        },
+        "browseId": "FEmusic_new_releases",
+        "contentCheckOk": True,
+        "racyCheckOk": True,
+    }
+
+    try:
+        response = await client.post(
+            f"{YT_MUSIC_API}/browse",
+            params={"prettyPrint": "false"},
+            headers=headers,
+            json=payload,
+        )
+    except httpx.HTTPError as exc:
+        return [], f"YouTube Music transport: {exc}"
+
+    if response.status_code >= 400:
+        return [], f"YouTube Music HTTP {response.status_code}: {response.text[:240]}"
+
+    try:
+        data = response.json()
+    except ValueError:
+        return [], "YouTube Music returned invalid JSON"
+
+    releases: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for renderer in _walk_named_objects(data, "musicTwoRowItemRenderer"):
+        item = _normalize_yt_release(renderer)
+        if not item:
+            continue
+        key = str(item.get("browseId") or item.get("albumCover") or "")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        releases.append(item)
+        if len(releases) >= limit:
+            break
+
+    return releases, None if releases else "YouTube Music returned no album cards"
+
+
+async def _qobuz_welcome_releases(
+    client: httpx.AsyncClient,
+    limit: int,
+) -> tuple[list[dict[str, Any]], str | None, str | None]:
+    last_error = "No featured albums returned"
+    headers = qobuz_catalog_headers()
+
+    for featured_type in ("new-releases-full", "recent-releases", "new-releases"):
+        try:
+            response = await client.get(
+                f"{QOBUZ_API}/album/getFeatured",
+                params={
+                    "type": featured_type,
+                    "limit": limit,
+                    "offset": 0,
+                    "app_id": QOBUZ_APP_ID,
+                },
+                headers=headers,
+            )
+        except httpx.HTTPError as exc:
+            last_error = str(exc)
+            continue
+
+        if response.status_code >= 400:
+            last_error = (
+                f"HTTP {response.status_code} for type={featured_type}: "
+                f"{response.text[:240]}"
+            )
+            continue
+
+        try:
+            data = response.json()
+        except ValueError:
+            last_error = f"Invalid JSON for type={featured_type}"
+            continue
+
+        raw = data.get("albums") or {}
+        items = raw.get("items") if isinstance(raw, dict) else raw
+        if not isinstance(items, list):
+            items = data.get("items") if isinstance(data.get("items"), list) else []
+
+        releases = [
+            normalize_featured_album(item)
+            for item in items
+            if isinstance(item, dict) and item.get("id")
+        ]
+        releases = [item for item in releases if item.get("albumCover")]
+        if releases:
+            return releases[:limit], None, featured_type
+
+    return [], last_error, None
+
+
 @app.get("/api/welcome/releases")
 async def welcome_releases(
     limit: int = Query(30, ge=1, le=50),
 ):
     """Album artwork pool for Orb's signed-out welcome screen.
 
-    The Android client uses YouTube Music's public FEmusic_new_releases shelf.
-    The browser cannot call that Innertube endpoint directly because of browser
-    cross-origin restrictions, so the Web/PWA receives an equivalent album-only
-    new-release feed from the existing server-side Qobuz catalogue connection.
+    Primary source deliberately matches Android: YouTube Music's public
+    FEmusic_new_releases browse surface. Qobuz is retained only as a resilient
+    catalogue fallback and is queried without a user-auth token because
+    album/getFeatured is an editorial/public catalogue route.
     """
-    headers = qobuz_headers()
-    last_error = "No featured albums returned"
-
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT, follow_redirects=True) as client:
-        for featured_type in ("new-releases-full", "recent-releases", "new-releases"):
-            try:
-                response = await client.get(
-                    f"{QOBUZ_API}/album/getFeatured",
-                    params={
-                        "type": featured_type,
-                        "limit": limit,
-                        "offset": 0,
-                        "app_id": QOBUZ_APP_ID,
-                        "user_auth_token": QOBUZ_TOKEN,
-                    },
-                    headers=headers,
-                )
-            except httpx.HTTPError as exc:
-                last_error = str(exc)
-                continue
+        yt_releases, yt_error = await _youtube_music_welcome_releases(client, limit)
+        if yt_releases:
+            return {
+                "releases": yt_releases,
+                "total": len(yt_releases),
+                "source": "youtube-music:FEmusic_new_releases",
+            }
 
-            if response.status_code >= 400:
-                last_error = f"HTTP {response.status_code} for type={featured_type}"
-                continue
+        qobuz_releases, qobuz_error, featured_type = await _qobuz_welcome_releases(client, limit)
+        if qobuz_releases:
+            return {
+                "releases": qobuz_releases,
+                "total": len(qobuz_releases),
+                "source": "qobuz-featured-fallback",
+                "featuredType": featured_type,
+                "primarySourceError": yt_error,
+            }
 
-            try:
-                data = response.json()
-            except ValueError:
-                last_error = f"Invalid JSON for type={featured_type}"
-                continue
-
-            raw = data.get("albums") or {}
-            items = raw.get("items") if isinstance(raw, dict) else raw
-            if not isinstance(items, list):
-                items = data.get("items") if isinstance(data.get("items"), list) else []
-
-            releases = [
-                normalize_featured_album(item)
-                for item in items
-                if isinstance(item, dict) and item.get("id")
-            ]
-            releases = [item for item in releases if item.get("albumCover")]
-            if releases:
-                return {
-                    "releases": releases[:limit],
-                    "total": min(len(releases), limit),
-                    "source": "qobuz-featured",
-                    "featuredType": featured_type,
-                }
-
-    raise HTTPException(status_code=502, detail=f"Featured releases failed: {last_error}")
+    raise HTTPException(
+        status_code=502,
+        detail={
+            "message": "Welcome releases unavailable",
+            "youtubeMusic": yt_error,
+            "qobuz": qobuz_error,
+        },
+    )
 
 
 @app.get("/api/stream")
