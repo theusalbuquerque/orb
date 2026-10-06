@@ -4,11 +4,28 @@ from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from orb_automix_api import router as automix_router
 from billing_api import router as billing_router
 
 app = FastAPI(title="Orb Play Qobuz Module", version="2.0.0")
+
+# Browser/PWA clients need explicit CORS because the Android client is not
+# subject to the browser same-origin policy. Configure production origins as
+# a comma-separated env var, e.g. https://app.example.com.
+ORB_WEB_ORIGINS = [
+    value.strip()
+    for value in os.getenv("ORB_WEB_ORIGINS", "http://localhost:5173,http://localhost:8080").split(",")
+    if value.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ORB_WEB_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 app.include_router(automix_router)
 app.include_router(billing_router)
 
@@ -253,6 +270,93 @@ async def search_tracks(
         "tracks": tracks,
         "total": len(tracks),
     }
+
+
+def normalize_featured_album(album: dict[str, Any]) -> dict[str, Any]:
+    artist = album.get("artist") or album.get("performer") or {}
+    image = album.get("image") or {}
+    return {
+        "id": str(album.get("id") or ""),
+        "title": album.get("title") or "",
+        "artist": artist.get("name") or album.get("artist_name") or "",
+        "album": album.get("title") or "",
+        "albumCover": (
+            image.get("extralarge")
+            or image.get("large")
+            or image.get("small")
+            or image.get("thumbnail")
+        ),
+        "releaseDate": (
+            album.get("release_date_original")
+            or album.get("release_date_stream")
+            or album.get("release_date_download")
+        ),
+        "type": "album",
+    }
+
+
+@app.get("/api/welcome/releases")
+async def welcome_releases(
+    limit: int = Query(30, ge=1, le=50),
+):
+    """Album artwork pool for Orb's signed-out welcome screen.
+
+    The Android client uses YouTube Music's public FEmusic_new_releases shelf.
+    The browser cannot call that Innertube endpoint directly because of browser
+    cross-origin restrictions, so the Web/PWA receives an equivalent album-only
+    new-release feed from the existing server-side Qobuz catalogue connection.
+    """
+    headers = qobuz_headers()
+    last_error = "No featured albums returned"
+
+    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT, follow_redirects=True) as client:
+        for featured_type in ("new-releases-full", "recent-releases", "new-releases"):
+            try:
+                response = await client.get(
+                    f"{QOBUZ_API}/album/getFeatured",
+                    params={
+                        "type": featured_type,
+                        "limit": limit,
+                        "offset": 0,
+                        "app_id": QOBUZ_APP_ID,
+                        "user_auth_token": QOBUZ_TOKEN,
+                    },
+                    headers=headers,
+                )
+            except httpx.HTTPError as exc:
+                last_error = str(exc)
+                continue
+
+            if response.status_code >= 400:
+                last_error = f"HTTP {response.status_code} for type={featured_type}"
+                continue
+
+            try:
+                data = response.json()
+            except ValueError:
+                last_error = f"Invalid JSON for type={featured_type}"
+                continue
+
+            raw = data.get("albums") or {}
+            items = raw.get("items") if isinstance(raw, dict) else raw
+            if not isinstance(items, list):
+                items = data.get("items") if isinstance(data.get("items"), list) else []
+
+            releases = [
+                normalize_featured_album(item)
+                for item in items
+                if isinstance(item, dict) and item.get("id")
+            ]
+            releases = [item for item in releases if item.get("albumCover")]
+            if releases:
+                return {
+                    "releases": releases[:limit],
+                    "total": min(len(releases), limit),
+                    "source": "qobuz-featured",
+                    "featuredType": featured_type,
+                }
+
+    raise HTTPException(status_code=502, detail=f"Featured releases failed: {last_error}")
 
 
 @app.get("/api/stream")
