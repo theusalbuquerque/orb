@@ -25,7 +25,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ORB_WEB_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "OPTIONS"],
     allow_headers=["*"],
 )
 app.include_router(automix_router)
