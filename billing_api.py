@@ -239,6 +239,85 @@ def _premium(status: str) -> bool:
     return status == "active"
 
 
+def billing_entitlement_for_email(email: str | None) -> dict[str, Any]:
+    """Return the current billing-derived Premium entitlement for an account."""
+    wanted = (email or "").strip().lower()
+    if not wanted:
+        return {"premium": False, "plan": None, "status": "none", "updatedAt": None}
+    try:
+        with _db() as conn:
+            active = conn.execute(
+                """
+                SELECT plan, status, updated_at
+                FROM billing_subscriptions
+                WHERE lower(email)=? AND status='active'
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (wanted,),
+            ).fetchone()
+            row = active or conn.execute(
+                """
+                SELECT plan, status, updated_at
+                FROM billing_subscriptions
+                WHERE lower(email)=?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (wanted,),
+            ).fetchone()
+    except sqlite3.Error:
+        row = None
+
+    if row is None:
+        return {"premium": False, "plan": None, "status": "none", "updatedAt": None}
+
+    data = dict(row)
+    return {
+        "premium": _premium(str(data.get("status") or "")),
+        "plan": data.get("plan"),
+        "status": data.get("status"),
+        "updatedAt": data.get("updated_at"),
+    }
+
+
+def _server_premium_override_for_account_hash(account_hash: str) -> bool | None:
+    supabase_url = os.getenv(
+        "SUPABASE_URL",
+        os.getenv("ORB_SUPABASE_URL", "https://twhmhdqmbvogezofvfqg.supabase.co"),
+    ).rstrip("/")
+    supabase_key = os.getenv(
+        "SUPABASE_PUBLISHABLE_KEY",
+        os.getenv(
+            "ORB_SUPABASE_PUBLISHABLE_KEY",
+            os.getenv("SUPABASE_ANON_KEY", ""),
+        ),
+    ).strip()
+    if not supabase_url or not supabase_key:
+        return None
+
+    try:
+        response = httpx.post(
+            f"{supabase_url}/rest/v1/rpc/orb_premium_override_for_hash",
+            headers={
+                "apikey": supabase_key,
+                "Authorization": f"Bearer {supabase_key}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            json={"p_account_hash": account_hash},
+            timeout=8.0,
+        )
+        if response.status_code >= 400:
+            return None
+        value = response.json()
+        if value is None:
+            return None
+        return bool(value)
+    except Exception:
+        return None
+
+
 def premium_entitled_for_account_hash(account_hash: str) -> bool:
     """Server-side Premium entitlement lookup without exposing account email.
 
@@ -250,6 +329,11 @@ def premium_entitled_for_account_hash(account_hash: str) -> bool:
     wanted = account_hash.strip().lower()
     if len(wanted) != 64:
         return False
+
+    manual_override = _server_premium_override_for_account_hash(wanted)
+    if manual_override is not None:
+        return manual_override
+
     try:
         with _db() as conn:
             rows = conn.execute(
