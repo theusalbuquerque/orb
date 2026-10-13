@@ -566,6 +566,8 @@ def _orb_mp_failure(response: httpx.Response) -> HTTPException:
     # Never write raw provider responses, credentials, card data or email to logs.
     candidates = []
     causes = data.get("cause")
+    if isinstance(causes, dict):
+        causes = [causes]
     if isinstance(causes, list):
         for cause in causes[:5]:
             if isinstance(cause, dict):
@@ -585,9 +587,54 @@ def _orb_mp_failure(response: httpx.Response) -> HTTPException:
         code = "MP_REQUEST_REJECTED"
     else:
         code = "MP_UNAVAILABLE"
+    def _safe_error_text(value: Any) -> str:
+        """Keep provider field names readable; redact private data and identifiers."""
+        if not isinstance(value, str):
+            return ""
+        text = value[:600]
+        text = re.sub(r"https?://[^\\s,;]+", "[url]", text, flags=re.I)
+        text = re.sub(r"[A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,}", "[email]", text)
+        text = re.sub(r"(?i)\\b(?:bearer\\s+|APP_USR[-_]|TEST[-_])\\S+", "[credential]", text)
+        text = re.sub(r"(?i)\\b(?:authorization|access[_-]?token|client[_-]?secret|password|api[_-]?key)\\s*[:=]\\s*\\S+", "[secret]", text)
+        text = re.sub(r"\\b\\d(?:[ -]?\\d){11,18}\\b", "[number]", text)
+        text = re.sub(r"\\b\\d{4,}\\b", "[number]", text)
+        text = re.sub(r"\\b[A-Za-z0-9_+\\-/=]{24,}\\b", "[identifier]", text)
+        text = re.sub(r"[\\r\\n\\t]+", " ", text)
+        text = re.sub(r"[^\\w .,:;()\\[\\]/?=+\\-]", " ", text)
+        return " ".join(text.split())[:220]
+
+    # A 400 response can carry the useful reason only in 'message' or
+    # in cause[].description, with no machine-readable provider code.
+    cause_details = data.get("cause")
+    if isinstance(cause_details, dict):
+        cause_details = [cause_details]
+    if not isinstance(cause_details, list):
+        cause_details = []
+    cause_details = [item for item in cause_details[:5] if isinstance(item, dict)]
+    top_reason = (
+        _safe_error_text(data.get("message"))
+        or _safe_error_text(data.get("description"))
+        or _safe_error_text(data.get("error_description"))
+        or _safe_error_text(data.get("error"))
+        or "none"
+    )
+    cause_reason = next(
+        (
+            text
+            for item in cause_details
+            for text in (
+                _safe_error_text(item.get("description")),
+                _safe_error_text(item.get("message")),
+                _safe_error_text(item.get("error")),
+            )
+            if text
+        ),
+        _safe_error_text(data.get("cause")) or "none",
+    )
     logging.getLogger("orb.billing").warning(
-        "Mercado Pago preapproval failed: http_status=%d code=%s provider_code=%s",
-        http_status, code, provider_code,
+        "Mercado Pago preapproval failed: http_status=%d code=%s "
+        "provider_code=%s provider_message=%s provider_cause=%s",
+        http_status, code, provider_code, top_reason, cause_reason,
     )
     return HTTPException(status_code=502 if code != "MP_RATE_LIMITED" else 503, detail={
         "code": code,
