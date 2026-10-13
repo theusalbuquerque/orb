@@ -549,6 +549,53 @@ async def providers():
     }
 
 
+def _orb_mp_failure(response: httpx.Response) -> HTTPException:
+    """Return a safe, structured, client-readable failure without provider PII."""
+    import logging
+    import re
+
+    http_status = int(response.status_code)
+    try:
+        data = response.json()
+    except (ValueError, TypeError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+
+    # Mercado Pago may return strings, arrays or numeric cause codes.
+    # Never write raw provider responses, credentials, card data or email to logs.
+    candidates = []
+    causes = data.get("cause")
+    if isinstance(causes, list):
+        for cause in causes[:5]:
+            if isinstance(cause, dict):
+                candidates.extend((cause.get("code"), cause.get("error")))
+    # Prefer specific cause codes over a generic top-level 'bad_request'.
+    candidates.extend((data.get("code"), data.get("error")))
+    provider_code = next(
+        (str(value) for value in candidates
+         if value is not None and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", str(value))),
+        "unknown",
+    )
+    if http_status in (401, 403):
+        code = "MP_CREDENTIALS_REJECTED"
+    elif http_status == 429:
+        code = "MP_RATE_LIMITED"
+    elif 400 <= http_status < 500:
+        code = "MP_REQUEST_REJECTED"
+    else:
+        code = "MP_UNAVAILABLE"
+    logging.getLogger("orb.billing").warning(
+        "Mercado Pago preapproval failed: http_status=%d code=%s provider_code=%s",
+        http_status, code, provider_code,
+    )
+    return HTTPException(status_code=502 if code != "MP_RATE_LIMITED" else 503, detail={
+        "code": code,
+        "providerStatus": http_status,
+        "providerCode": provider_code,
+    })
+
+
 @router.post("/checkout/mercadopago")
 async def create_mercado_pago_checkout(body: CheckoutRequest):
     if not MP_ACCESS_TOKEN:
@@ -571,27 +618,43 @@ async def create_mercado_pago_checkout(body: CheckoutRequest):
         "status": "pending",
     }
 
-    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-        response = await client.post(
-            f"{MP_API}/preapproval",
-            headers={
-                "Authorization": f"Bearer {MP_ACCESS_TOKEN}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            response = await client.post(
+                f"{MP_API}/preapproval",
+                headers={
+                    "Authorization": f"Bearer {MP_ACCESS_TOKEN}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+    except (httpx.RequestError, TimeoutError) as exc:
+        import logging
+        logging.getLogger("orb.billing").warning(
+            "Mercado Pago preapproval transport failure: exception_type=%s",
+            type(exc).__name__,
         )
+        raise HTTPException(status_code=503, detail={"code": "MP_UNAVAILABLE"}) from exc
 
     if response.status_code >= 400:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Mercado Pago checkout failed: {response.text[:800]}",
-        )
+        raise _orb_mp_failure(response)
 
-    data = response.json()
+    try:
+        data = response.json()
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=502, detail={"code": "MP_INVALID_RESPONSE"}) from exc
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=502, detail={"code": "MP_INVALID_RESPONSE"})
     provider_id = str(data.get("id") or "")
     checkout_url = data.get("init_point")
-    if not provider_id or not checkout_url:
-        raise HTTPException(status_code=502, detail="Mercado Pago returned an invalid checkout")
+    if (not provider_id or not isinstance(checkout_url, str)
+            or not checkout_url.startswith("https://")):
+        import logging
+        logging.getLogger("orb.billing").warning(
+            "Mercado Pago preapproval incomplete response: has_id=%s has_checkout_url=%s",
+            bool(provider_id), isinstance(checkout_url, str) and checkout_url.startswith("https://"),
+        )
+        raise HTTPException(status_code=502, detail={"code": "MP_CHECKOUT_LINK_MISSING"})
 
     _save_checkout(
         checkout_ref=checkout_ref,
