@@ -592,15 +592,15 @@ def _orb_mp_failure(response: httpx.Response) -> HTTPException:
         if not isinstance(value, str):
             return ""
         text = value[:600]
-        text = re.sub(r"https?://[^\\s,;]+", "[url]", text, flags=re.I)
-        text = re.sub(r"[A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,}", "[email]", text)
-        text = re.sub(r"(?i)\\b(?:bearer\\s+|APP_USR[-_]|TEST[-_])\\S+", "[credential]", text)
-        text = re.sub(r"(?i)\\b(?:authorization|access[_-]?token|client[_-]?secret|password|api[_-]?key)\\s*[:=]\\s*\\S+", "[secret]", text)
-        text = re.sub(r"\\b\\d(?:[ -]?\\d){11,18}\\b", "[number]", text)
-        text = re.sub(r"\\b\\d{4,}\\b", "[number]", text)
-        text = re.sub(r"\\b[A-Za-z0-9_+\\-/=]{24,}\\b", "[identifier]", text)
-        text = re.sub(r"[\\r\\n\\t]+", " ", text)
-        text = re.sub(r"[^\\w .,:;()\\[\\]/?=+\\-]", " ", text)
+        text = re.sub(r"https?://[^\s,;]+", "[url]", text, flags=re.I)
+        text = re.sub(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", "[email]", text)
+        text = re.sub(r"(?i)\b(?:bearer\s+|APP_USR[-_]|TEST[-_])\S+", "[credential]", text)
+        text = re.sub(r"(?i)\b(?:authorization|access[_-]?token|client[_-]?secret|password|api[_-]?key)\s*[:=]\s*\S+", "[secret]", text)
+        text = re.sub(r"\b\d(?:[ -]?\d){11,18}\b", "[number]", text)
+        text = re.sub(r"\b\d{4,}\b", "[number]", text)
+        text = re.sub(r"\b[A-Za-z0-9_+\-/=]{24,}\b", "[identifier]", text)
+        text = re.sub(r"[\r\n\t]+", " ", text)
+        text = re.sub(r"[^\w .,:;()\[\]/?=+\-]", " ", text)
         return " ".join(text.split())[:220]
 
     # A 400 response can carry the useful reason only in 'message' or
