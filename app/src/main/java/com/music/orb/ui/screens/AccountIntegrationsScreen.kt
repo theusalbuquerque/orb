@@ -74,6 +74,7 @@ fun AccountIntegrationsScreen(
     onSignIn: () -> Unit,
     onOpenOrbProfile: () -> Unit = {},
     onManageYouTube: () -> Unit,
+    onOpenYouTubeCompatibility: () -> Unit = {},
     onOpenLastfmLogin: () -> Unit = {},
     onSignOut: () -> Unit,
     contentPadding: PaddingValues,
@@ -159,8 +160,16 @@ fun AccountIntegrationsScreen(
                         else -> null
                     },
                     iconHasOwnBackground = true,
-                    onClick = onManageYouTube,
+                    onClick = if (youtubeNeedsSetup) onOpenYouTubeCompatibility else onManageYouTube,
                 )
+                if (youtubeNeedsSetup) {
+                    TextButton(
+                        onClick = onOpenYouTubeCompatibility,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(stringResource(R.string.youtube_music_compatibility_title))
+                    }
+                }
                 RowDivider()
                 SettingsRow(
                     icon = Icons.Rounded.LibraryMusic,

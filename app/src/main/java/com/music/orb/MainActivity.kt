@@ -3692,8 +3692,13 @@ private fun OrbApp(
                         showAccountIntegrations = false
                         showOrbProfile = true
                     },
+                    onOpenYouTubeCompatibility = {
+                        showLogin = true
+                    },
                     onManageYouTube = {
-                        if (!youtubeIdentitySwitching) {
+                        if (youtubeCompatibilityRequired) {
+                            showLogin = true
+                        } else if (!youtubeIdentitySwitching) {
                             youtubeIdentitySwitching = true
                             scope.launch {
                                 val identities = OrbGoogleAuth.availableYoutubeIdentities()
