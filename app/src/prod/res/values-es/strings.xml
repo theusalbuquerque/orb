@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="now_playing_instrumental">Instrumental</string>
+
+    <string-array name="now_playing_intro_lines">
+        <item>Entra el ritmo</item>
+        <item>La canción empieza</item>
+        <item>La intro se está cocinando</item>
+        <item>Calentando</item>
+        <item>Aquí vamos</item>
+        <item>Creando el ambiente</item>
+        <item>Ya entró la batería</item>
+        <item>Primero el bajo, luego la letra</item>
+        <item>Súbele</item>
+        <item>Probando la vibra</item>
+    </string-array>
+
+    <string-array name="now_playing_lyrics_loading_lines">
+        <item>Buscando letra</item>
+        <item>Siguiendo las palabras</item>
+        <item>Buscando la letra a fondo</item>
+        <item>Letra en camino</item>
+        <item>A la caza de la letra</item>
+    </string-array>
+
+    <string name="now_playing_lyrics_not_available">Letra no disponible</string>
+    <string name="now_playing_upgrading_quality">Mejorando Calidad de Audio</string>
+    <string name="youtube_music_compatibility_title">Compatibilidad de YouTube Music</string>
+    <string name="youtube_music_compatibility_message">Tu cuenta de Google ya está conectada a Orb, pero un endpoint privado de YouTube Music rechazó el token OAuth. Inicia sesión aquí solo para adjuntar una sesión de compatibilidad. Esto no crea una segunda cuenta en Orb.</string>
+</resources>

@@ -14,6 +14,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -44,7 +49,23 @@ fun ExpressiveSwitch(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     colors: Any? = null,
+    hapticOnChange: Boolean = true,
 ) {
+    // Trigger once per actual change, whether the thumb or the parent row was
+    // tapped. Ignore first composition and rebuilds while scrolling so simply
+    // opening Settings does not vibrate. The global haptic preference is
+    // enforced by OrbHaptics itself.
+    val context = LocalContext.current
+    var previouslyObservedChecked by remember { mutableStateOf(checked) }
+    LaunchedEffect(checked, enabled, hapticOnChange) {
+        if (checked != previouslyObservedChecked) {
+            previouslyObservedChecked = checked
+            if (enabled && hapticOnChange) {
+                OrbHaptics.perform(context, OrbHaptics.Kind.TOGGLE)
+            }
+        }
+    }
+
     val position by animateFloatAsState(
         targetValue = if (checked) 1f else 0f,
         animationSpec = spring(

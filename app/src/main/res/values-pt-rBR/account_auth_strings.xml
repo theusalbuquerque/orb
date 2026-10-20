@@ -22,4 +22,5 @@
     <string name="account_username_save_error">Não foi possível salvar esse nome de usuário. Tente outro.</string>
     <string name="account_username_cancel">Cancelar</string>
     <string name="account_username_create">Criar</string>
+    <string name="account_youtube_library_partial">Canal do YouTube conectado. Sua biblioteca privada do YouTube Music ainda não está disponível.</string>
 </resources>

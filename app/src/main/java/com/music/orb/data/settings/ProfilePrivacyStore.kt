@@ -5,9 +5,8 @@ import android.content.SharedPreferences
 import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
- * Visibility choices for the social profile. The wire values intentionally
- * match the values stored by Supabase so profile privacy follows the account
- * across devices.
+ * Visibility choices for social-profile surfaces. Wire values intentionally
+ * match Supabase so privacy follows the account across devices.
  */
 enum class ProfileAudience(val wireValue: String) {
     EVERYONE("everyone"),
@@ -19,12 +18,9 @@ enum class ProfileAudience(val wireValue: String) {
             "everyone", "public", "anyone" -> EVERYONE
             "followers", "mutuals", "friends", "following" -> FOLLOWERS
             "nobody", "private", "none" -> NOBODY
-            // Product default for profile sections is public. Missing legacy
-            // values therefore remain visible until the owner narrows them.
             else -> EVERYONE
         }
 
-        /** The three audiences supported by the per-section profile controls. */
         val profileSectionChoices: List<ProfileAudience> = listOf(EVERYONE, FOLLOWERS, NOBODY)
     }
 }
@@ -33,10 +29,13 @@ enum class ProfileAudience(val wireValue: String) {
 object ProfilePrivacyStore {
     private lateinit var prefs: SharedPreferences
 
-    /** Stats/Friends live listening: true means FOLLOWERS, false means NOBODY. */
+    /** Who can see listening / now-playing activity. Legacy default stays followers-only. */
+    val listeningAudience = MutableStateFlow(ProfileAudience.FOLLOWERS)
+
+    /** Compatibility mirror for older two-state call sites. */
     val shareNowPlaying = MutableStateFlow(true)
 
-    /** Independent profile-page audiences. All default to EVERYONE. */
+    /** Independent profile-page audiences. */
     val followingAudience = MutableStateFlow(ProfileAudience.EVERYONE)
     val followersAudience = MutableStateFlow(ProfileAudience.EVERYONE)
     val playCountAudience = MutableStateFlow(ProfileAudience.EVERYONE)
@@ -44,8 +43,14 @@ object ProfilePrivacyStore {
     val favoriteAlbumsAudience = MutableStateFlow(ProfileAudience.EVERYONE)
     val favoriteSongsAudience = MutableStateFlow(ProfileAudience.EVERYONE)
 
-    // Boolean compatibility mirrors for older call sites. A FOLLOWERS section
-    // is still enabled, so only NOBODY maps to false.
+    /** Recent ratings were previously opt-in public; preserve private as the migration default. */
+    val recentRatingsAudience = MutableStateFlow(ProfileAudience.NOBODY)
+
+    /** Compatibility mirror for the old public/private album-rating toggle. */
+    val shareAlbumRatings = MutableStateFlow(false)
+
+    // Boolean compatibility mirrors for older call sites. FOLLOWERS is enabled,
+    // so only NOBODY maps to false.
     val shareFollowing = MutableStateFlow(true)
     val shareFollowers = MutableStateFlow(true)
     val sharePlayCount = MutableStateFlow(true)
@@ -60,7 +65,14 @@ object ProfilePrivacyStore {
 
     fun init(context: Context) {
         prefs = context.getSharedPreferences("orb_profile_privacy", Context.MODE_PRIVATE)
-        shareNowPlaying.value = prefs.getBoolean(KEY_SHARE_NOW_PLAYING, true)
+
+        listeningAudience.value = prefs.getString(KEY_LISTENING_AUDIENCE, null)
+            ?.let(::normalizeProfileSectionAudience)
+            ?: if (prefs.getBoolean(KEY_SHARE_NOW_PLAYING, true)) {
+                ProfileAudience.FOLLOWERS
+            } else {
+                ProfileAudience.NOBODY
+            }
 
         followingAudience.value = readAudience(KEY_FOLLOWING_AUDIENCE, KEY_SHARE_FOLLOWING)
         followersAudience.value = readAudience(KEY_FOLLOWERS_AUDIENCE, KEY_SHARE_FOLLOWERS)
@@ -68,6 +80,14 @@ object ProfilePrivacyStore {
         favoriteArtistsAudience.value = readAudience(KEY_FAVORITE_ARTISTS_AUDIENCE, KEY_SHARE_FAVORITE_ARTISTS)
         favoriteAlbumsAudience.value = readAudience(KEY_FAVORITE_ALBUMS_AUDIENCE, KEY_SHARE_FAVORITE_ALBUMS)
         favoriteSongsAudience.value = readAudience(KEY_FAVORITE_SONGS_AUDIENCE, KEY_SHARE_FAVORITE_SONGS)
+        recentRatingsAudience.value = prefs.getString(KEY_RECENT_RATINGS_AUDIENCE, null)
+            ?.let(::normalizeProfileSectionAudience)
+            ?: if (prefs.getBoolean(KEY_SHARE_ALBUM_RATINGS, false)) {
+                ProfileAudience.EVERYONE
+            } else {
+                ProfileAudience.NOBODY
+            }
+
         refreshCompatibilityMirrors()
     }
 
@@ -90,10 +110,11 @@ object ProfilePrivacyStore {
         favoriteArtistsVisibility: String? = null,
         favoriteAlbumsVisibility: String? = null,
         favoriteSongsVisibility: String? = null,
+        recentRatingsVisibility: String? = null,
     ) {
-        val share = ProfileAudience.fromWire(nowPlayingVisibility) != ProfileAudience.NOBODY
-        shareNowPlaying.value = share
-
+        listeningAudience.value = normalizeProfileSectionAudience(
+            nowPlayingVisibility ?: listeningVisibility ?: ProfileAudience.FOLLOWERS.wireValue,
+        )
         followingAudience.value = normalizeProfileSectionAudience(followingVisibility)
         followersAudience.value = normalizeProfileSectionAudience(followersVisibility)
         playCountAudience.value = normalizeProfileSectionAudience(playCountVisibility)
@@ -106,13 +127,33 @@ object ProfilePrivacyStore {
         favoriteSongsAudience.value = normalizeProfileSectionAudience(
             favoriteSongsVisibility ?: favoriteContentVisibility,
         )
+        if (recentRatingsVisibility != null) {
+            recentRatingsAudience.value = normalizeProfileSectionAudience(recentRatingsVisibility)
+        }
         refreshCompatibilityMirrors()
-        persistAudiences(share)
+        persistAudiences()
     }
 
+    fun setListeningAudience(value: ProfileAudience) {
+        listeningAudience.value = normalizeProfileSectionAudience(value.wireValue)
+        refreshCompatibilityMirrors()
+        persistAudiences()
+    }
+
+    /** Backward-compatible toggle: ON retains the historical followers-only behavior. */
     fun setShareNowPlaying(value: Boolean) {
-        shareNowPlaying.value = value
-        prefs.edit().putBoolean(KEY_SHARE_NOW_PLAYING, value).apply()
+        setListeningAudience(if (value) ProfileAudience.FOLLOWERS else ProfileAudience.NOBODY)
+    }
+
+    fun setRecentRatingsAudience(value: ProfileAudience) {
+        recentRatingsAudience.value = normalizeProfileSectionAudience(value.wireValue)
+        refreshCompatibilityMirrors()
+        persistAudiences()
+    }
+
+    /** Backward-compatible public/private setter. */
+    fun setShareAlbumRatings(value: Boolean) {
+        setRecentRatingsAudience(if (value) ProfileAudience.EVERYONE else ProfileAudience.NOBODY)
     }
 
     fun setProfileVisibilityAudiences(
@@ -122,6 +163,7 @@ object ProfilePrivacyStore {
         favoriteArtists: ProfileAudience = favoriteArtistsAudience.value,
         favoriteAlbums: ProfileAudience = favoriteAlbumsAudience.value,
         favoriteSongs: ProfileAudience = favoriteSongsAudience.value,
+        recentRatings: ProfileAudience = recentRatingsAudience.value,
     ) {
         followingAudience.value = normalizeProfileSectionAudience(following.wireValue)
         followersAudience.value = normalizeProfileSectionAudience(followers.wireValue)
@@ -129,8 +171,9 @@ object ProfilePrivacyStore {
         favoriteArtistsAudience.value = normalizeProfileSectionAudience(favoriteArtists.wireValue)
         favoriteAlbumsAudience.value = normalizeProfileSectionAudience(favoriteAlbums.wireValue)
         favoriteSongsAudience.value = normalizeProfileSectionAudience(favoriteSongs.wireValue)
+        recentRatingsAudience.value = normalizeProfileSectionAudience(recentRatings.wireValue)
         refreshCompatibilityMirrors()
-        persistAudiences(shareNowPlaying.value)
+        persistAudiences()
     }
 
     /** Backward-compatible boolean setter: ON means EVERYONE, OFF means NOBODY. */
@@ -166,6 +209,8 @@ object ProfilePrivacyStore {
     fun setAlbumAudience(value: ProfileAudience) = setProfileVisibilityAudiences(favoriteAlbums = value)
 
     private fun refreshCompatibilityMirrors() {
+        shareNowPlaying.value = listeningAudience.value != ProfileAudience.NOBODY
+        shareAlbumRatings.value = recentRatingsAudience.value != ProfileAudience.NOBODY
         shareFollowing.value = followingAudience.value != ProfileAudience.NOBODY
         shareFollowers.value = followersAudience.value != ProfileAudience.NOBODY
         sharePlayCount.value = playCountAudience.value != ProfileAudience.NOBODY
@@ -181,21 +226,23 @@ object ProfilePrivacyStore {
         favoriteContentAudience.value = if (favorites.distinct().size == 1) {
             favorites.first()
         } else {
-            // An older client cannot represent independent audiences. Keep its
-            // unified view private rather than accidentally widening a section.
             ProfileAudience.NOBODY
         }
     }
 
-    private fun persistAudiences(share: Boolean) {
+    private fun persistAudiences() {
+        if (!::prefs.isInitialized) return
         prefs.edit()
-            .putBoolean(KEY_SHARE_NOW_PLAYING, share)
+            .putString(KEY_LISTENING_AUDIENCE, listeningAudience.value.wireValue)
+            .putBoolean(KEY_SHARE_NOW_PLAYING, shareNowPlaying.value)
             .putString(KEY_FOLLOWING_AUDIENCE, followingAudience.value.wireValue)
             .putString(KEY_FOLLOWERS_AUDIENCE, followersAudience.value.wireValue)
             .putString(KEY_PLAY_COUNT_AUDIENCE, playCountAudience.value.wireValue)
             .putString(KEY_FAVORITE_ARTISTS_AUDIENCE, favoriteArtistsAudience.value.wireValue)
             .putString(KEY_FAVORITE_ALBUMS_AUDIENCE, favoriteAlbumsAudience.value.wireValue)
             .putString(KEY_FAVORITE_SONGS_AUDIENCE, favoriteSongsAudience.value.wireValue)
+            .putString(KEY_RECENT_RATINGS_AUDIENCE, recentRatingsAudience.value.wireValue)
+            .putBoolean(KEY_SHARE_ALBUM_RATINGS, shareAlbumRatings.value)
             .putBoolean(KEY_SHARE_FOLLOWING, shareFollowing.value)
             .putBoolean(KEY_SHARE_FOLLOWERS, shareFollowers.value)
             .putBoolean(KEY_SHARE_PLAY_COUNT, sharePlayCount.value)
@@ -206,15 +253,14 @@ object ProfilePrivacyStore {
             .apply()
     }
 
-    private fun normalizeProfileSectionAudience(value: String?): ProfileAudience = when (
-        ProfileAudience.fromWire(value)
-    ) {
+    private fun normalizeProfileSectionAudience(value: String?): ProfileAudience = when (ProfileAudience.fromWire(value)) {
         ProfileAudience.EVERYONE -> ProfileAudience.EVERYONE
         ProfileAudience.FOLLOWERS -> ProfileAudience.FOLLOWERS
         ProfileAudience.NOBODY -> ProfileAudience.NOBODY
     }
 
     private const val KEY_SHARE_NOW_PLAYING = "share_now_playing"
+    private const val KEY_LISTENING_AUDIENCE = "profile_listening_audience_v3"
     private const val KEY_SHARE_FOLLOWING = "share_profile_following"
     private const val KEY_SHARE_FOLLOWERS = "share_profile_followers"
     private const val KEY_SHARE_PLAY_COUNT = "share_profile_play_count"
@@ -228,6 +274,8 @@ object ProfilePrivacyStore {
     private const val KEY_FAVORITE_ARTISTS_AUDIENCE = "profile_favorite_artists_audience_v2"
     private const val KEY_FAVORITE_ALBUMS_AUDIENCE = "profile_favorite_albums_audience_v2"
     private const val KEY_FAVORITE_SONGS_AUDIENCE = "profile_favorite_songs_audience_v2"
+    private const val KEY_RECENT_RATINGS_AUDIENCE = "profile_recent_ratings_audience_v3"
+    private const val KEY_SHARE_ALBUM_RATINGS = "profile_share_album_ratings_v1"
 
     private const val KEY_FAVORITE_CONTENT_AUDIENCE = "favorite_content_audience"
 }

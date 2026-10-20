@@ -97,7 +97,7 @@
     <string name="stats_artist_ranking_down">↓ %1$d</string>
     <string name="stats_artist_ranking_no_data">Aún no hay artistas en este período.</string>
     <string name="stats_artist_ranking_hint">Toca tu artista más escuchado para ver el ranking completo.</string>
-    <string name="friends_recent_listening_empty_message">Las escuchas recientes de las personas que sigues permanecerán aquí hasta cuatro horas.</string>
+    <string name="friends_recent_listening_empty_message">Las escuchas recientes de las personas que sigues permanecerán aquí hasta seis horas.</string>
     <string name="friends_was_listening_just_now">estaba escuchando hace un momento:</string>
     <string name="friends_was_listening_minute_ago">estaba escuchando hace 1 minuto:</string>
     <string name="friends_was_listening_minutes_ago">estaba escuchando hace %1$d minutos:</string>
@@ -139,7 +139,7 @@
 
     <string name="stats_share_preparing">Preparando tu Story…</string>
     <string name="stats_share_preview_title">Tu Story de Stats</string>
-    <string name="stats_share_save">Guardar en la galería</string>
+    <string name="stats_share_save">Guardar</string>
     <string name="stats_share_share">Compartir</string>
     <string name="stats_share_saved">Stats guardados en tu galería.</string>
     <string name="stats_share_save_failed">No se pudo guardar la imagen de Stats.</string>

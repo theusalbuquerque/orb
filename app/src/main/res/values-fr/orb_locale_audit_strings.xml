@@ -1,0 +1,21 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<resources>
+  <string name="orb_l10n_listenbrainz_title">Jeton ListenBrainz</string>
+  <string name="orb_l10n_listenbrainz_hint">Collez votre jeton ListenBrainz pour activer le scrobbling.</string>
+  <string name="orb_l10n_api_token">Jeton API</string>
+  <string name="orb_l10n_discord_title">Jeton Discord</string>
+  <string name="orb_l10n_discord_hint">Collez votre jeton de compte Discord. Il reste chiffré sur cet appareil et est envoyé uniquement à Discord.</string>
+  <string name="orb_l10n_token">Jeton</string>
+  <string name="orb_l10n_save">Enregistrer</string>
+  <string name="orb_l10n_cancel">Annuler</string>
+  <string name="orb_l10n_checking">Vérification…</string>
+  <string name="orb_l10n_selected">Sélectionné</string>
+  <string name="orb_l10n_playlist_generic">Playlist</string>
+  <string name="orb_l10n_playlist_open">Ouvrir la playlist</string>
+  <string name="orb_l10n_playlist_rename_action">Renommer</string>
+  <string name="orb_l10n_playlist_delete">Supprimer la playlist</string>
+  <string name="orb_l10n_playlist_delete_confirm" formatted="true">Supprimer « %1$s » — touchez pour confirmer</string>
+  <string name="orb_l10n_playlist_rename_title">Renommer la playlist</string>
+  <string name="orb_l10n_playlist_save_name">Enregistrer le nom</string>
+  <string name="orb_l10n_got_it">Compris</string>
+<string name="settings_lossless_audio">Audio sans perte</string><string name="settings_lossless_audio_subtitle">Privilégier FLAC et Hi-Res provenant de sources compatibles</string></resources>

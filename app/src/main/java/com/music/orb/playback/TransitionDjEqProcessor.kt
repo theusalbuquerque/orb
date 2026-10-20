@@ -142,7 +142,7 @@ class TransitionDjEqProcessor : BaseAudioProcessor() {
     private fun dbToLinear(db: Float): Float = 10.0.pow(db.toDouble() / 20.0).toFloat()
 
     companion object {
-        private const val TAG = "BitChordDjEq"
+        private const val TAG = "OrbDjEq"
         private const val LOW_CROSSOVER_HZ = 220f
         private const val HIGH_CROSSOVER_HZ = 3_800f
         private const val MIN_DB = -30f

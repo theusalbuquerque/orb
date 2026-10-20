@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="artist_profile_identity_error">Não foi possível confirmar o perfil deste artista. Tente pesquisar novamente.</string>
+</resources>

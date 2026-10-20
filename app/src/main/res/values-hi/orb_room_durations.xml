@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="rooms_duration_title">रूम की अवधि</string>
+    <string name="rooms_duration_24h">24 घंटे</string>
+    <string name="rooms_duration_3d">3 दिन</string>
+    <string name="rooms_duration_5d">5 दिन</string>
+    <string name="rooms_duration_7d">7 दिन</string>
+    <string name="rooms_duration_15d">15 दिन</string>
+    <string name="rooms_duration_indefinite">अनिश्चित</string>
+    <string name="rooms_duration_no_expiry">समाप्ति नहीं · Orb Premium</string>
+    <string name="rooms_duration_expired">रूम की अवधि समाप्त</string>
+    <string name="rooms_duration_remaining_days">शेष समय: %1$d दिन %2$d घंटे</string>
+    <string name="rooms_duration_remaining_hours">शेष समय: %1$d घंटे %2$d मिनट</string>
+    <string name="rooms_error_premium_only">अनिश्चित अवधि के लिए Orb Premium आवश्यक है।</string>
+</resources>

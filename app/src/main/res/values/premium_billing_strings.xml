@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="premium_billing_retry">Try again</string>
+    <string name="premium_billing_sign_in">Sign in to your Orb account again to manage your subscription.</string>
+    <string name="premium_billing_error">Could not complete this request. Please try again.</string>
+    <string name="premium_payment_title">Subscribe to Orb Premium</string>
+    <string name="premium_payment_total">Payment total</string>
+    <string name="premium_payment_zero_notice">Confirm to activate your subscription. You will not be charged.</string>
+    <string name="premium_payment_provider_notice">Continue to the secure payment page to complete your subscription.</string>
+    <string name="premium_payment_confirm">Confirm subscription</string>
+    <string name="premium_payment_continue">Continue to payment</string>
+    <string name="premium_payment_back">Back</string>
+    <string name="premium_payment_check">Check payment</string>
+    <string name="premium_payment_pending">Your payment has not been confirmed yet. Try checking again shortly.</string>
+    <string name="premium_payment_success">Orb Premium activated.</string>
+    <string name="premium_cancel_success">Renewal canceled. Orb Premium remains available until the end of your paid period.</string>
+    <string name="premium_demo_badge">Developer courtesy · real card verification, R$ 0.00</string>
+    <string name="premium_demo_cancel_message">Cancel your complimentary Orb subscription? The validation record will be canceled on the Orb server; there are no scheduled charges. Developer access remains active.</string>
+    <string name="premium_demo_cancel_success">Complimentary subscription canceled on the server. Developer access remains active.</string>
+    <string name="premium_demo_payment_title">Verify card · Orb Premium</string>
+    <string name="premium_demo_payment_notice">Real Mercado Pago zero-dollar card authorization (ZDA). The payment page securely validates your card without charging it. No recurring financial subscription is created.</string>
+    <string name="premium_demo_subscribe_success">Card validated; complimentary subscription activated.</string>
+    <string name="premium_demo_canceled">Complimentary subscription inactive · R$ 0.00</string>
+    <string name="premium_billing_credentials_rejected">Mercado Pago rejected Orb\'s payment credentials. Contact Orb support.</string>
+    <string name="premium_billing_request_rejected">Mercado Pago rejected the subscription request. Please contact Orb support and provide the error code.</string>
+    <string name="premium_billing_rate_limited">Too many payment requests. Please wait a few minutes before trying again.</string>
+    <string name="premium_billing_link_missing">Mercado Pago did not provide a valid subscription payment link. Contact Orb support.</string>
+    <string name="premium_billing_invalid_response">Mercado Pago returned an unexpected response. Try again later.</string>
+    <string name="premium_billing_service_unavailable">Payment service is temporarily unavailable. Check your connection or try again later.</string>
+    <string name="premium_billing_already_active">Your subscription may already be active. Please check your Premium status.</string>
+</resources>

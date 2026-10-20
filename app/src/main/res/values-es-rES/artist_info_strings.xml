@@ -6,5 +6,5 @@
     <string name="artist_like">Me gusta este artista</string>
     <string name="artist_liked">Artista marcado como favorito</string>
     <string name="artist_block">No reproducir este artista</string>
-    <string name="artist_blocked">Artista bloqueado</string>
+    <string name="artist_blocked">Reproducir este artista de nuevo</string>
 </resources>

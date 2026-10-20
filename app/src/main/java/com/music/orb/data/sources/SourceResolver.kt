@@ -1,6 +1,7 @@
 package com.music.orb.data.sources
 
 import android.net.Uri
+import com.music.orb.download.Downloads
 import com.music.orb.data.TrackLog
 import com.music.orb.data.innertube.StreamResolver
 import com.music.orb.data.model.Song
@@ -22,7 +23,7 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * Cross-source stream policy used by playback.
  *
- * Playback decisions intentionally follow BitChord v1.5: the active network
+ * Playback decisions intentionally follow Orb v1.5: the active network
  * ceiling is answered once, HIGH asks every source for its best rendition,
  * sources ranked above YouTube race rather than queue behind one another, and
  * an in-flight stream is replaced only by a lossless copy or a materially
@@ -32,7 +33,7 @@ import java.util.concurrent.ConcurrentHashMap
  * Orb UI. They never influence source ordering, stream selection or upgrades.
  */
 object SourceResolver {
-    private const val TAG = "BitChord"
+    private const val TAG = "Orb"
     private const val MATCH_CANDIDATES = 15
     private const val STREAM_ATTEMPTS = 3
     private const val SAME_RECORDING_SEC = 3
@@ -44,17 +45,20 @@ object SourceResolver {
     // through that final rung.
     private const val AAC_UPGRADE_MIN_GAIN_KBPS = 48
     private const val YOUTUBE_BEST_AAC_KBPS = 256
-    private const val COLLECTION_BADGE_PROBE_TRACKS = 3
+    private const val DOWNLOAD_LOSSY_TOLERANCE_KBPS = 48
     private const val COLLECTION_LOSSLESS_PROBE_TRACKS = 3
-    // Collection-level quality only appears after more than three tracks
-    // have independently confirmed the tier during real playback/probing.
-    private const val COLLECTION_BADGE_MIN_CONFIRMED_TRACKS = 4
+    // Three DISTINCT tracks anywhere in the collection, not the first three.
+    private const val COLLECTION_BADGE_MIN_CONFIRMED_TRACKS = 3
     private const val FIRST_NOTE_PINNED_SOURCE_MS = 900L
     private const val FIRST_NOTE_YOUTUBE_QUERY_LIMIT = 2
     private const val FIRST_NOTE_YOUTUBE_CANDIDATES = 6
+    private val DOWNLOADABLE_CODECS = setOf(
+        "flac", "x-flac", "wav", "x-wav", "wave",
+        "alac", "aac", "mp4a", "m4a", "mp4",
+    )
 
     // ---------------------------------------------------------------------
-    // BitChord v1.5 playback policy
+    // Orb v1.5 playback policy
     // ---------------------------------------------------------------------
 
     fun requestForNow(): StreamRequest {
@@ -223,6 +227,90 @@ object SourceResolver {
         return result.second
     }
 
+    /**
+     * Last-resort source lookup when the selected YouTube id is deterministically
+     * unplayable (for example a YouTube Music Premium-only carrier).
+     *
+     * Normal source priority is intentionally ignored here: once YouTube cannot
+     * serve the recording at all, a lower-ranked enabled catalogue is a recovery
+     * path rather than a preference override. Identity is still enforced by
+     * [TrackMatcher] through [bestAcross].
+     */
+    suspend fun emergencyForUnavailableYouTube(target: TrackMatcher.Target): SourceStream? {
+        if (target.title.isBlank()) return null
+        val active = SourceRegistry.active()
+            .filterNot { it.kind == SourceKind.YOUTUBE }
+        if (active.isEmpty()) return null
+        val result = bestAcross(
+            sources = active,
+            target = target,
+            request = requestForNow(),
+            waitForAll = false,
+            strictLength = target.durationSec != null,
+        ) ?: return null
+        TrackLog.w(
+            TAG,
+            "YouTube unavailable: '${target.title}' recovered from ${result.first.displayName} at " +
+                result.second.format.summary,
+        )
+        return result.second
+    }
+
+    /**
+     * Playback recovery after a Lossless rendition could not deliver audio.
+     * Do not ask the same Lossless source again or silently lower its quality
+     * badge. Only a real AAC >=256 kbps candidate can occupy this Hi-Q tier.
+     * If none exists, the caller descends to the separate Opus first-note path.
+     */
+    suspend fun fallbackHiQuality(
+        target: TrackMatcher.Target,
+        videoId: String,
+        budgetMs: Long = 5_000L,
+    ): SourceStream? = coroutineScope {
+        val sources = SourceRegistry.active().filterNot { it.kind == SourceKind.YOUTUBE }
+        val sourceCandidate = async {
+            if (target.title.isBlank()) null
+            else withTimeoutOrNull(budgetMs) {
+                bestAcross(
+                    sources = sources,
+                    target = target,
+                    request = StreamRequest.Aac(320),
+                    strictLength = target.durationSec != null,
+                    waitForAll = false,
+                ) { _, stream ->
+                    stream.format.isLossless == false &&
+                        stream.format.codec?.lowercase(Locale.ROOT) in setOf("aac", "mp4a", "m4a", "mp4") &&
+                        (stream.format.kbps ?: 0) >= 256 &&
+                        stream.hasPlayableHttpUrl()
+                }?.second
+            }
+        }
+        val youtubeCandidate = async {
+            withTimeoutOrNull(budgetMs) {
+                runCatching { StreamResolver.resolveHiQualityUpgrade(videoId) }.getOrNull()
+                    ?.takeIf { it.hasPlayableHttpUrl() }
+            }
+        }
+        val pending = mutableListOf(sourceCandidate, youtubeCandidate)
+        try {
+            while (pending.isNotEmpty()) {
+                val (job, stream) = select<Pair<Deferred<SourceStream?>, SourceStream?>> {
+                    pending.forEach { candidate -> candidate.onAwait { candidate to it } }
+                }
+                pending.remove(job)
+                if (stream != null && stream.format.isLossless == false &&
+                    (stream.format.kbps ?: 0) >= 256
+                ) {
+                    TrackLog.w(TAG, "Lossless failed: '${target.title}' recovered with Hi-Q AAC ${stream.format.kbps}kbps")
+                    return@coroutineScope stream
+                }
+            }
+            null
+        } finally {
+            pending.forEach { it.cancel() }
+        }
+    }
+
     /** Speculative v1.5 warm-up: only sources explicitly marked cheap to probe. */
     suspend fun prefetchSubstitute(target: TrackMatcher.Target): SourceStream? {
         if (target.title.isBlank()) return null
@@ -337,29 +425,164 @@ object SourceResolver {
         }
     }
 
-    /** Download compatibility: choose only a cross-source copy worth keeping over YouTube. */
-    suspend fun forDownload(target: TrackMatcher.Target): SourceStream? = coroutineScope {
-        if (target.title.isBlank()) return@coroutineScope null
+    /**
+     * Download compatibility: choose only a cross-source copy worth keeping over YouTube.
+     *
+     * [qualityTarget] is intentionally independent from [requestForNow]. Premium downloads use
+     * it to preserve the quality of the rendition that was already playing even if the network
+     * setting changes between playback and the download worker reaching this track. A Hi-Res
+     * target therefore remains a Lossless request on mobile data, while ordinary callers keep
+     * the established network-derived behaviour.
+     */
+    suspend fun forDownload(
+        target: TrackMatcher.Target,
+        qualityTarget: DownloadQualityTarget? = null,
+    ): SourceStream? = coroutineScope {
+        if (target.title.isBlank() || target.artist.isBlank()) {
+            TrackLog.w(TAG, "offline source lookup has incomplete metadata: " +
+                "titlePresent=${target.title.isNotBlank()}, artistPresent=${target.artist.isNotBlank()}")
+            return@coroutineScope null
+        }
         val active = SourceRegistry.active()
         val youtube = active.firstOrNull { it.kind == SourceKind.YOUTUBE }
-        val sources = youtube?.let { rankedAbove(it.configId, active) } ?: active
-        if (sources.isEmpty()) return@coroutineScope null
+        val upstream = youtube?.let { rankedAbove(it.configId, active) } ?: active
+        // A tap on Maximum explicitly requests the built-in HiFi lookup even
+        // when its streaming source is disabled/not present in a synced source list.
+        // Do not silently turn a missing source registration into "Lossless unavailable".
+        val independentLossless = qualityTarget?.isLossless == true
+        val sources = if (independentLossless) {
+            val enabled = upstream.filter { it.kind.canServeLossless }
+            if (enabled.none { it.kind == SourceKind.TIDAL }) {
+                listOf(TidalSource(SourceConfig(kind = SourceKind.TIDAL))) + enabled
+            } else enabled
+        } else upstream
+        if (sources.isEmpty()) {
+            TrackLog.w(TAG, "offline source lookup skipped: no enabled sources")
+            return@coroutineScope null
+        }
+        if (independentLossless) TrackLog.d(TAG,
+            "offline FLAC search for '${target.title}' with ${sources.joinToString { it.kind.name }}")
 
-        val request = requestForNow()
+        val request = when {
+            qualityTarget?.isLossless == true -> StreamRequest.Lossless
+            qualityTarget != null -> StreamRequest.Aac(
+                (qualityTarget.kbps ?: 320).coerceIn(64, 320),
+            )
+            else -> requestForNow()
+        }
         val result = bestAcross(
             sources = sources,
             target = target,
             request = request,
-            waitForAll = true,
+            // Return as soon as a verified FLAC has been found. Waiting for
+            // every source's remaining queries previously exhausted the 45s
+            // deadline even when the first source had a valid DASH manifest.
+            // Downloads are not first-note playback. Check every available
+            // source before deciding between ordinary FLAC and Hi-Res FLAC.
+            // Downloads.bestSourceDownload applies a bounded 90s deadline.
+            waitForAll = qualityTarget?.isLossless == true,
             strictLength = target.durationSec != null,
-        ) ?: return@coroutineScope null
+            downloadMode = true,
+            downloadQualityTarget = qualityTarget,
+            prefer = qualityTarget?.let { wanted ->
+                { candidate: SourceStream, current: SourceStream ->
+                    preferForDownload(candidate.format, current.format, wanted)
+                }
+            } ?: { candidate: SourceStream, current: SourceStream ->
+                isBetter(candidate.format, current.format)
+            },
+        ) { _, stream ->
+            // An explicit Lossless/Hi-Res target must never be satisfied by a module's
+            // internal lossy fallback. The download layer will decide whether to descend
+            // to AAC only after every real lossless source has been exhausted.
+            when {
+                qualityTarget?.isLossless == true ->
+                    stream.format.isLossless == true && stream.isStandaloneDownloadCandidate()
+                qualityTarget != null ->
+                    stream.format.isLossless != true &&
+                        stream.isStandaloneDownloadCandidate() &&
+                        stream.format.isCloseEnoughForDownload(qualityTarget)
+                else -> true
+            }
+        } ?: return@coroutineScope null
 
         val stream = result.second
         when {
+            qualityTarget?.isLossless == true && stream.format.isLossless == true -> stream
+            qualityTarget != null && stream.format.isLossless != true -> stream
             stream.format.isLossless == true -> stream
             (stream.format.kbps ?: 0) > YOUTUBE_BEST_AAC_KBPS -> stream
             else -> null
         }
+    }
+
+    /**
+     * Prefer the rendition closest to the quality that was actually playing, rather than always
+     * picking the numerically largest lossless file. That keeps a 16/44.1 Lossless download from
+     * unexpectedly becoming a much larger 24/192 file, while a Hi-Res target still prefers a
+     * Hi-Res answer and only descends to ordinary Lossless when no Hi-Res candidate exists.
+     */
+    internal fun preferForDownload(
+        candidate: StreamFormat,
+        current: StreamFormat,
+        target: DownloadQualityTarget,
+    ): Boolean {
+        val candidatePenalty = downloadQualityPenalty(candidate, target)
+        val currentPenalty = downloadQualityPenalty(current, target)
+        return when {
+            candidatePenalty != currentPenalty -> candidatePenalty < currentPenalty
+            else -> isBetter(candidate, current)
+        }
+    }
+
+    private fun downloadQualityPenalty(format: StreamFormat, target: DownloadQualityTarget): Long {
+        if (target.isLossless) {
+            if (format.isLossless != true) return Long.MAX_VALUE / 4
+
+            val targetTier = target.losslessTier.takeIf { it.isLossless } ?: LosslessTier.LOSSLESS
+            val formatTier = format.losslessTier
+            var penalty = when {
+                targetTier == LosslessTier.HI_RES_LOSSLESS && formatTier != LosslessTier.HI_RES_LOSSLESS -> 10_000_000L
+                targetTier == LosslessTier.LOSSLESS && formatTier == LosslessTier.HI_RES_LOSSLESS -> 2_000_000L
+                else -> 0L
+            }
+
+            target.bitDepth?.let { wanted ->
+                val actual = format.bitDepth
+                penalty += if (actual == null) 250_000L else kotlin.math.abs(actual - wanted).toLong() * 25_000L
+            }
+            target.sampleRateHz?.let { wanted ->
+                val actual = format.sampleRateHz
+                penalty += if (actual == null) 250_000L else kotlin.math.abs(actual - wanted).toLong()
+            }
+            return penalty
+        }
+
+        if (format.isLossless == true) return 5_000_000L
+        val wanted = target.kbps ?: return -(format.kbps ?: 0).toLong()
+        val actual = format.kbps ?: return 1_000_000L
+        return kotlin.math.abs(actual - wanted).toLong() * 1_000L
+    }
+
+    private fun StreamFormat.isCloseEnoughForDownload(target: DownloadQualityTarget): Boolean {
+        val wanted = target.kbps ?: return true
+        val actual = kbps ?: return false
+        return kotlin.math.abs(actual - wanted) <= DOWNLOAD_LOSSY_TOLERANCE_KBPS
+    }
+
+    /** Premium explicit targets must resolve to a self-contained format the download store can keep. */
+    private fun SourceStream.isStandaloneDownloadCandidate(): Boolean {
+        // The downloader supports a verified FLAC DASH MPD and persists its
+        // original lossless fMP4 fragments. All other adaptive manifests remain
+        // ineligible, including HLS and AAC DASH transports.
+        if (isDash) return losslessVerified && format.isLossless == true &&
+            format.codec.equals("flac", ignoreCase = true)
+        // A manifest is not a raw file even when its path does not end in .mpd.
+        // The DASH hint above is authoritative for FLAC from trackManifests.
+        val path = runCatching { Uri.parse(url).path.orEmpty().lowercase() }.getOrDefault("")
+        if (path.endsWith(".mpd") || path.endsWith(".m3u8")) return false
+        val codec = format.codec?.lowercase()?.trim() ?: return false
+        return codec in DOWNLOADABLE_CODECS
     }
 
     fun worthSwapping(candidate: StreamFormat, playing: StreamFormat?): Boolean {
@@ -458,6 +681,11 @@ object SourceResolver {
         request: StreamRequest,
         waitForAll: Boolean = false,
         strictLength: Boolean = false,
+        downloadMode: Boolean = false,
+        downloadQualityTarget: DownloadQualityTarget? = null,
+        prefer: (candidate: SourceStream, current: SourceStream) -> Boolean = { candidate, current ->
+            isBetter(candidate.format, current.format)
+        },
         accept: (MusicSource, SourceStream) -> Boolean = { _, _ -> true },
     ): Pair<MusicSource, SourceStream>? = coroutineScope {
         // Orb Navidrome exposes original files only. Keep HTTP addons off the
@@ -472,7 +700,15 @@ object SourceResolver {
         if (eligibleSources.isEmpty()) return@coroutineScope null
         val jobs = eligibleSources.map { source ->
             source to async {
-                matchAndStream(source, target, request, waitForAll, strictLength)
+                matchAndStream(
+                    source = source,
+                    target = target,
+                    request = request,
+                    waitForAll = waitForAll,
+                    strictLength = strictLength,
+                    downloadMode = downloadMode,
+                    downloadQualityTarget = downloadQualityTarget,
+                )
             }
         }.toMutableList()
 
@@ -486,7 +722,7 @@ object SourceResolver {
                 }
                 jobs.removeAll { it.first.configId == source.configId }
                 if (stream == null || !accept(source, stream)) continue
-                best = chooseBetter(best, source to stream)
+                best = chooseBetter(best, source to stream, prefer)
 
                 // Fold answers that completed in the same scheduling turn so a
                 // higher-quality already-finished stream is not lost to list order.
@@ -495,7 +731,7 @@ object SourceResolver {
                     jobs.removeAll { it.first.configId == other.configId }
                     val candidate = deferred.await()
                     if (candidate != null && accept(other, candidate)) {
-                        best = chooseBetter(best, other to candidate)
+                        best = chooseBetter(best, other to candidate, prefer)
                     }
                 }
                 // Live/first-note races may return as soon as a usable
@@ -514,9 +750,10 @@ object SourceResolver {
     private fun chooseBetter(
         current: Pair<MusicSource, SourceStream>?,
         candidate: Pair<MusicSource, SourceStream>,
+        prefer: (candidate: SourceStream, current: SourceStream) -> Boolean,
     ): Pair<MusicSource, SourceStream> {
         if (current == null) return candidate
-        return if (isBetter(candidate.second.format, current.second.format)) candidate else current
+        return if (prefer(candidate.second, current.second)) candidate else current
     }
 
     private fun isBetter(candidate: StreamFormat, current: StreamFormat): Boolean {
@@ -541,25 +778,94 @@ object SourceResolver {
         request: StreamRequest,
         waitForAll: Boolean = false,
         strictLength: Boolean = false,
+        downloadMode: Boolean = false,
+        downloadQualityTarget: DownloadQualityTarget? = null,
     ): SourceStream? {
-        for (query in TrackMatcher.queries(target)) {
+        val lookupQueries = TrackMatcher.queries(target)
+        if (downloadMode && lookupQueries.isEmpty()) TrackLog.w(TAG,
+            "offline source has no viable catalogue search terms for '${target.title}'")
+        for (query in lookupQueries) {
+            if (downloadMode) TrackLog.d(TAG, "offline catalogue query ${source.kind}: '$query'")
             val candidates = attempt(source) {
-                source.search(query, limit = MATCH_CANDIDATES, waitForAll = waitForAll)
+                if (downloadMode) {
+                    source.searchForDownload(query, limit = MATCH_CANDIDATES, waitForAll = waitForAll)
+                } else {
+                    source.search(query, limit = MATCH_CANDIDATES, waitForAll = waitForAll)
+                }
             } ?: continue
-            var matches = TrackMatcher.ranked(candidates, target)
+            // First match title, credits, edition and runtime. For an
+            // external source, let the strict substitution gate below decide
+            // release *families* (original vs deluxe/remaster). Scoring the
+            // exact album string first would reject valid Hi-Res reissues.
+            val rankingTarget = if (source.kind != SourceKind.YOUTUBE) {
+                target.copy(albumName = null, releaseYear = null)
+            } else target
+            var matches = TrackMatcher.ranked(candidates, rankingTarget)
+            // A catalogue result can omit the album on a first, never-played
+            // lookup. When searching FLAC for an offline file, enrich only
+            // identity-compatible TIDAL candidates before the release veto.
+            // This never changes the visible song or opens its playback URL.
+            if (downloadMode && downloadQualityTarget?.isLossless == true &&
+                source is TidalSource && !target.albumName.isNullOrBlank()
+            ) {
+                matches = matches.map { matched ->
+                    if (!matched.albumName.isNullOrBlank()) matched
+                    else withTimeoutOrNull(2_500L) {
+                        try {
+                            source.enrichCandidateMetadata(matched)
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Exception) {
+                            matched
+                        }
+                    } ?: matched
+                }
+            }
+            val scoredCount = matches.size
             // A YouTube catalogue track is the authoritative recording. An
             // external source is allowed to replace it only when the candidate
             // can be verified as the same release, not merely a same-title,
             // same-duration result. This is the guard that prevents a cover or
             // tribute recording from playing underneath the official metadata.
-            if (target.sourceVideoId != null && source.kind != SourceKind.YOUTUBE) {
-                matches = matches.filter { TrackMatcher.verifiedForSubstitution(it, target) }
+            if (source.kind != SourceKind.YOUTUBE && target.title.isNotBlank() &&
+                target.artist.isNotBlank()
+            ) {
+                // The selected song is authoritative, even when its renderer
+                // omitted the YouTube ID. Covers/medleys/alternate releases
+                // are never acceptable substitutes for the visible metadata.
+                val rejected = matches.filterNot { TrackMatcher.verifiedForSubstitution(it, target, allowSingleAlbumRelease = downloadMode) }
+                if (downloadMode && rejected.isNotEmpty()) {
+                    // Help distinguish a catalogue mismatch from a FLAC fetch
+                    // problem, without weakening the artist/take/release gate.
+                    val example = rejected.first()
+                    TrackLog.d(TAG, "offline identity veto ${source.kind}: " +
+                        "rejected=${rejected.size}, wantedAlbum=${target.albumName ?: "unknown"}, " +
+                        "wantedYear=${target.releaseYear ?: "unknown"}, " +
+                        "exampleAlbum=${example.albumName ?: "unknown"}, " +
+                        "exampleYear=${example.releaseYear ?: "unknown"}, " +
+                        "exampleLength=${example.durationText}")
+                }
+                matches = matches.filter { TrackMatcher.verifiedForSubstitution(it, target, allowSingleAlbumRelease = downloadMode) }
             }
             if (strictLength && target.durationSec != null) {
+                val beforeLength = matches.size
                 matches = matches.filter { TrackMatcher.withinSeconds(it, target, LIVE_UPGRADE_DURATION_SEC) }
+                if (downloadMode && beforeLength > matches.size) TrackLog.d(TAG,
+                    "offline length veto ${source.kind}: rejected=${beforeLength - matches.size}, " +
+                        "wantedSeconds=${target.durationSec}")
             }
+            if (downloadMode) TrackLog.d(TAG,
+                "offline catalogue ${source.kind}: ${candidates.size} candidates, " +
+                    "$scoredCount matched identity, ${matches.size} passed release/duration")
             if (matches.isEmpty()) continue
-            streamBest(source, matches, target, request)?.let { return it }
+            streamBest(
+                source = source,
+                matches = matches,
+                target = target,
+                request = request,
+                downloadMode = downloadMode,
+                downloadQualityTarget = downloadQualityTarget,
+            )?.let { return it }
         }
         return null
     }
@@ -580,13 +886,21 @@ object SourceResolver {
         matches: List<Song>,
         target: TrackMatcher.Target,
         request: StreamRequest,
+        downloadMode: Boolean = false,
+        downloadQualityTarget: DownloadQualityTarget? = null,
     ): SourceStream? {
         val wantsLossless = request is StreamRequest.Lossless
         val ordered = preferred(matches, target, wantsLossless)
         var settleFor: SourceStream? = null
         for (match in ordered.take(STREAM_ATTEMPTS)) {
             val trackId = SourceRegistry.parseTrackKey(match.videoId)?.second ?: match.videoId
-            val opened = attempt(source) { source.stream(trackId, request) } ?: continue
+            val opened = attempt(source) {
+                if (downloadMode) {
+                    source.streamForDownload(trackId, request, downloadQualityTarget)
+                } else {
+                    source.stream(trackId, request)
+                }
+            } ?: continue
             if (!validateStream(source, trackId, opened)) continue
             val stream = opened.copy(durationSec = TrackMatcher.secondsOf(match.durationText))
             val served = stream.format
@@ -648,6 +962,9 @@ object SourceResolver {
     )
 
     private val confirmedTiers = ConcurrentHashMap<String, LosslessTier>()
+    // Track membership discovered in background or on a detail page. Cards on
+    // Home/Library/Search have only a browseId, never their full track list.
+    private val collectionTrackIds = ConcurrentHashMap<String, List<String>>()
     private val releaseExplicit = ConcurrentHashMap<String, Boolean>()
     private val playlistBadgeCache = ConcurrentHashMap<String, PlaylistBadgeAvailability>()
     private val collectionBadgeCache = ConcurrentHashMap<String, PlayableBadgeQuality>()
@@ -663,8 +980,51 @@ object SourceResolver {
     fun losslessFeatureEnabled(): Boolean =
         requestForNow() is StreamRequest.Lossless && SourceRegistry.active().any { it.kind.canServeLossless }
 
-    fun cachedTrackLosslessTier(song: Song): LosslessTier? = confirmedTiers[song.videoId]
+    fun cachedTrackLosslessTier(song: Song): LosslessTier? = verifiedTierForId(song.videoId).takeIf { it.isLossless }
     fun cachedTrackLossless(song: Song): Boolean? = cachedTrackLosslessTier(song)?.isLossless
+
+    /** Only verified playback or bytes already saved by the downloader count. */
+    private fun verifiedTierForId(videoId: String): LosslessTier {
+        val played = confirmedTiers[videoId] ?: LosslessTier.NONE
+        val offline = if (videoId in Downloads.saved.value) {
+            Downloads.savedQuality(videoId)?.losslessTier ?: LosslessTier.NONE
+        } else LosslessTier.NONE
+        return if (played.isHiRes || offline.isHiRes) LosslessTier.HI_RES_LOSSLESS
+        else if (played.isLossless || offline.isLossless) LosslessTier.LOSSLESS
+        else LosslessTier.NONE
+    }
+
+    /** Avoid remote collection scans before any card can meet the 3-track rule. */
+    fun hasVerifiedLosslessTracks(): Boolean {
+        val ids = HashSet<String>()
+        for ((id, tier) in confirmedTiers) {
+            if (tier.isLossless && ids.add(id) && ids.size >= COLLECTION_BADGE_MIN_CONFIRMED_TRACKS) return true
+        }
+        for (id in Downloads.saved.value.keys) {
+            if (verifiedTierForId(id).isLossless && ids.add(id) && ids.size >= COLLECTION_BADGE_MIN_CONFIRMED_TRACKS) return true
+        }
+        return false
+    }
+
+    /** Called with the real track order; duplicates do not count twice. */
+    fun cacheCollectionTrackIds(browseId: String?, videoIds: List<String>) {
+        val id = normalizedCollectionBrowseId(browseId) ?: return
+        val distinctIds = videoIds.asSequence().filter(String::isNotBlank).distinct().toList()
+        if (distinctIds.isEmpty() || collectionTrackIds[id] == distinctIds) return
+        collectionTrackIds[id] = distinctIds
+        bumpBadges()
+    }
+
+    /** A detail page may have loaded just its first continuation page. */
+    fun extendCollectionTrackIds(browseId: String?, videoIds: List<String>) {
+        val id = normalizedCollectionBrowseId(browseId) ?: return
+        if (videoIds.isEmpty()) return
+        val merged = (collectionTrackIds[id].orEmpty() + videoIds).filter(String::isNotBlank).distinct()
+        if (merged != collectionTrackIds[id]) {
+            collectionTrackIds[id] = merged
+            bumpBadges()
+        }
+    }
 
     private fun qualifiesForHiQuality(mimeType: String?, kbps: Int?): Boolean {
         val rate = kbps ?: return false
@@ -674,15 +1034,20 @@ object SourceResolver {
     }
 
     fun cachedTrackPlayableBadge(song: Song): PlayableBadgeQuality {
-        val tier = confirmedTiers[song.videoId] ?: LosslessTier.NONE
+        val tier = verifiedTierForId(song.videoId)
+        val downloadedFormat = if (song.videoId in Downloads.saved.value) Downloads.savedQuality(song.videoId) else null
         val remoteTrack = SourceRegistry.parseTrackKey(song.videoId) == null
         val mime = if (remoteTrack) StreamResolver.resolvedMimeType(song.videoId) else null
         val kbps = if (remoteTrack) StreamResolver.resolvedBitrateKbps(song.videoId) else null
-        val known = tier.isLossless || kbps != null
+        val offlineHiQuality = downloadedFormat?.let {
+            qualifiesForHiQuality(it.codec?.let { codec -> "audio/$codec" }, it.kbps)
+        } == true
+        val known = tier.isLossless || kbps != null || offlineHiQuality
         return PlayableBadgeQuality(
             resolved = known,
             losslessTier = tier,
-            hiQuality = tier == LosslessTier.NONE && qualifiesForHiQuality(mime, kbps),
+            hiQuality = tier == LosslessTier.NONE &&
+                (offlineHiQuality || qualifiesForHiQuality(mime, kbps)),
         )
     }
 
@@ -806,16 +1171,15 @@ object SourceResolver {
                 .mapNotNull(collectionBadgeByReleaseIdentity::get)
                 .toTypedArray(),
         )
-        if (songs.isEmpty()) return cached
+        val known = (songs.asSequence().map(Song::videoId).filter(String::isNotBlank).toList() +
+            normalizedCollectionBrowseId(browseId)?.let(collectionTrackIds::get).orEmpty()).distinct()
+        if (known.isEmpty()) return cached
 
-        // Playback can confirm more tracks after an earlier collection probe.
-        // Re-evaluate the currently known rows before trusting a stale cached
-        // "no badge" result, otherwise a collection could stay unbadged even
-        // after its fourth track has been verified.
-        val observed = collectionQualityFrom(songs.map(::cachedTrackPlayableBadge))
-        if (observed.losslessTier.isLossless || observed.hiQuality) {
-            return strongestBadge(cached, observed)
-        }
+        // Evaluate ALL distinct ids. Three confirmed tracks might be positions
+        // 14, 36 and 108 of a playlist; the first rows are not representative.
+        val observed = collectionQualityFrom(
+            known.map { id -> cachedTrackPlayableBadge(Song(id, "", "", null)) }
+        )
         return strongestBadge(cached, observed)
     }
 
@@ -830,21 +1194,20 @@ object SourceResolver {
             return cachedCollectionPlayableBadge(title, subtitle, browseId, songs)
         }
 
-        // A collection should not need to be opened manually before its badges
-        // become visible. Probe a small representative set concurrently: albums
-        // normally share one mastering tier. Only the first four perform the
-        // more expensive cross-source Lossless lookup; all sampled tracks still
-        // prove their ordinary AAC/MP4 tier.
-        val probeSongs = songs.take(COLLECTION_BADGE_PROBE_TRACKS)
-        val facts = coroutineScope {
-            probeSongs.mapIndexed { index, song ->
-                async {
-                    prepareTrackPlayableBadge(
-                        song,
-                        allowLosslessProbe = allowLosslessProbe && index < COLLECTION_LOSSLESS_PROBE_TRACKS,
-                    )
-                }
-            }.awaitAll()
+        // First count all previously confirmed tracks including offline bytes;
+        // only unresolved tracks may need additional lightweight probing.
+        val distinctSongs = songs.distinctBy(Song::videoId)
+        cacheCollectionTrackIds(browseId, distinctSongs.map(Song::videoId))
+        val candidates = distinctSongs.filter { !verifiedTierForId(it.videoId).isLossless }
+            .take(COLLECTION_LOSSLESS_PROBE_TRACKS)
+        val probed = if (allowLosslessProbe) coroutineScope {
+            candidates.map { song -> async { prepareTrackPlayableBadge(song) } }.awaitAll()
+        } else emptyList()
+        // A track inspected twice is still one track; never allow probing to
+        // inflate the three-distinct-tracks threshold.
+        val probeById = candidates.map(Song::videoId).zip(probed).toMap()
+        val facts = distinctSongs.map { song ->
+            probeById[song.videoId] ?: cachedTrackPlayableBadge(song)
         }
 
         val result = collectionQualityFrom(facts)
@@ -912,7 +1275,7 @@ object SourceResolver {
                 if (knownSongs.isEmpty() || cached.losslessKnown) return cached
             }
         }
-        val tiers = knownSongs.mapNotNull(::cachedTrackLosslessTier)
+        val tiers = knownSongs.distinctBy(Song::videoId).mapNotNull(::cachedTrackLosslessTier)
         val hiResCount = tiers.count { it.isHiRes }
         val losslessCount = tiers.count { it.isLossless }
         val best = when {

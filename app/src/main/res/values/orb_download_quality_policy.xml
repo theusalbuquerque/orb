@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_download_fallback_lower_title">Allow lower download quality</string>
+    <string name="settings_download_fallback_lower_summary">Try a lower bitrate only if the selected one is unavailable. Off means no downgrade.</string>
+    <string name="settings_download_strict_quality_summary">Downloads require the quality selected; lower quality is not downloaded without permission.</string>
+</resources>

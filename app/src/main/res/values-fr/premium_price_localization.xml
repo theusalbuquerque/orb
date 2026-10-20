@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="premium_price_unavailable">Tarif mensuel indisponible</string>
+    <string name="premium_price_approximate">Conversion indicative ; votre banque peut appliquer un autre taux ou des frais.</string>
+    <string name="premium_price_actual_brl">Facturation en BRL : %1$s</string>
+</resources>

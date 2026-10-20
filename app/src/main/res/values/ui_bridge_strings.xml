@@ -10,6 +10,7 @@
     <string name="beta_ui_remove_recent_search">Remove "%1$s" from recent searches</string>
     <string name="beta_ui_search">Search</string>
     <string name="beta_ui_clear_search">Clear search</string>
+    <string name="beta_ui_filter_all">All</string>
     <string name="beta_ui_filter_songs">Songs</string>
     <string name="beta_ui_filter_albums">Albums</string>
     <string name="beta_ui_filter_artists">Artists</string>

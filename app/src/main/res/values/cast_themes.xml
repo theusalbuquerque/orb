@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Cast's View dialogs need complete AppCompat attributes and opaque contrast backgrounds. -->
+    <style name="Theme.Orb.CastDialog" parent="Theme.AppCompat.Light.Dialog">
+        <item name="colorPrimary">#FF6750A4</item>
+        <item name="colorPrimaryDark">#FF4F378B</item>
+        <item name="colorAccent">#FF6750A4</item>
+        <item name="android:colorBackground">#FFFFFBFE</item>
+        <item name="android:windowBackground">#FFFFFBFE</item>
+        <item name="android:textColorPrimary">#FF1C1B1F</item>
+        <item name="android:textColorSecondary">#FF49454F</item>
+    </style>
+</resources>

@@ -1,0 +1,8 @@
+<resources>
+<style name="Theme.Orb" parent="android:Theme.Material.NoActionBar">
+<item name="android:windowBackground">#F4E9E6</item>
+<item name="android:windowSplashScreenBackground">#F4E9E6</item>
+<item name="android:windowSplashScreenAnimatedIcon">@drawable/orb_splash_empty</item>
+<item name="android:windowSplashScreenIconBackgroundColor">@android:color/transparent</item>
+<item name="android:windowSplashScreenAnimationDuration">0</item>
+</style></resources>

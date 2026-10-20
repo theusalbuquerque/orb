@@ -21,12 +21,12 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.style.TextGeometricTransform
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -57,7 +57,7 @@ private val DarkColors = darkColorScheme(
     onError = Color(0xFF690005),
     errorContainer = Color(0xFF93000A),
     onErrorContainer = Color(0xFFFFDAD6),
-    background = Color.Black,
+    background = Color(0xFF0B090D),
     onBackground = Color.White,
     surface = Color(0xFF0D0D0F),
     onSurface = Color.White,
@@ -88,7 +88,7 @@ private val LightColors = lightColorScheme(
     onError = Color.White,
     errorContainer = Color(0xFFFFDAD6),
     onErrorContainer = Color(0xFF410002),
-    background = Color.White,
+    background = Color(0xFFFFF8FA),
     onBackground = Color(0xFF1D1B1E),
     surface = Color(0xFFFFF8FA),
     onSurface = Color(0xFF1D1B1E),
@@ -130,7 +130,7 @@ private val ExpressiveShapes = Shapes(
 
 private val ClassicShapes = Shapes()
 
-private val BitChordTypographyBase = Typography(
+private val OrbTypographyBase = Typography(
     displayLarge = TextStyle(fontWeight = FontWeight.W800, fontSize = 34.sp, letterSpacing = (-0.8).sp),
     headlineLarge = TextStyle(fontWeight = FontWeight.W800, fontSize = 30.sp, letterSpacing = (-0.7).sp),
     headlineMedium = TextStyle(fontWeight = FontWeight.W700, fontSize = 22.sp, letterSpacing = (-0.4).sp),
@@ -142,155 +142,6 @@ private val BitChordTypographyBase = Typography(
     labelSmall = TextStyle(fontWeight = FontWeight.W600, fontSize = 11.sp),
 )
 
-/**
- * Expressive Google Sans Flex scale used only when that beta-only font is selected.
- * The family already changes, but this scale makes the difference *visible*: it
- * pushes display/headline roles harder, tightens tracking, and gives the UI a
- * more editorial/variable-font character like the user's references.
- */
-/*
- * Semantic Google Sans Flex scale.
- *
- * This is intentionally NOT a uniform "replace SF Pro with Google Sans" pass.
- * Material typography roles are already the semantic vocabulary used by Orb:
- *
- *   display*   -> page/hero text and the strongest visual statements
- *   headline*  -> section and large contextual headings
- *   title*     -> song/album/artist/person names and primary row text
- *   body*      -> descriptions, artist/subtitle text and supporting copy
- *   label*     -> metadata, counters, chips, buttons and compact UI
- *
- * Google Sans Flex mode gives every family of roles its own width, weight,
- * tracking and occasional slant. That makes the same variable face behave like
- * a small responsive type system instead of looking like one static font.
- *
- * TextGeometricTransform is also important here: it lets existing screens that
- * already use MaterialTheme.typography inherit a visibly different width/slant
- * character without hundreds of per-screen hard-coded font sizes.
- */
-private val GoogleSansFlexTypographyBase = Typography(
-    // Page/hero titles: intentionally strong and condensed. These are the
-    // places where Flex should immediately look expressive instead of "regular".
-    displayLarge = TextStyle(
-        fontWeight = FontWeight.W900,
-        fontSize = 42.sp,
-        lineHeight = 43.sp,
-        letterSpacing = (-1.35).sp,
-        textGeometricTransform = TextGeometricTransform(scaleX = 0.86f),
-    ),
-    displayMedium = TextStyle(
-        fontWeight = FontWeight.W900,
-        fontSize = 37.sp,
-        lineHeight = 39.sp,
-        letterSpacing = (-1.05).sp,
-        textGeometricTransform = TextGeometricTransform(scaleX = 0.94f, skewX = -0.035f),
-    ),
-    displaySmall = TextStyle(
-        fontWeight = FontWeight.W800,
-        fontSize = 32.sp,
-        lineHeight = 34.sp,
-        letterSpacing = (-0.85).sp,
-        textGeometricTransform = TextGeometricTransform(scaleX = 0.91f),
-    ),
-
-    // Section headers keep a strong editorial voice without competing with the
-    // page title. Different width/slant creates the Flex contrast seen in the
-    // reference material.
-    headlineLarge = TextStyle(
-        fontWeight = FontWeight.W800,
-        fontSize = 32.sp,
-        lineHeight = 34.sp,
-        letterSpacing = (-0.80).sp,
-        textGeometricTransform = TextGeometricTransform(scaleX = 0.90f, skewX = -0.018f),
-    ),
-    headlineMedium = TextStyle(
-        fontWeight = FontWeight.W800,
-        fontSize = 26.sp,
-        lineHeight = 29.sp,
-        letterSpacing = (-0.48).sp,
-        textGeometricTransform = TextGeometricTransform(scaleX = 0.98f),
-    ),
-    headlineSmall = TextStyle(
-        fontWeight = FontWeight.W700,
-        fontSize = 22.sp,
-        lineHeight = 25.sp,
-        letterSpacing = (-0.28).sp,
-        textGeometricTransform = TextGeometricTransform(scaleX = 0.96f),
-    ),
-
-    // Names: songs, albums, artists, playlists and people. They are visibly
-    // heavier than descriptions, but calmer than page/section headings.
-    titleLarge = TextStyle(
-        fontWeight = FontWeight.W800,
-        fontSize = 22.sp,
-        lineHeight = 24.sp,
-        letterSpacing = (-0.34).sp,
-        textGeometricTransform = TextGeometricTransform(scaleX = 0.93f),
-    ),
-    titleMedium = TextStyle(
-        fontWeight = FontWeight.W700,
-        fontSize = 17.sp,
-        lineHeight = 20.sp,
-        letterSpacing = (-0.12).sp,
-        textGeometricTransform = TextGeometricTransform(scaleX = 0.97f),
-    ),
-    titleSmall = TextStyle(
-        fontWeight = FontWeight.W600,
-        fontSize = 15.sp,
-        lineHeight = 18.sp,
-        letterSpacing = (-0.04).sp,
-        textGeometricTransform = TextGeometricTransform(scaleX = 0.98f),
-    ),
-
-    // Descriptions/supporting copy stay optically normal and thin. This is the
-    // counterpoint that stops the whole app from looking uniformly bold.
-    bodyLarge = TextStyle(
-        fontWeight = FontWeight.W400,
-        fontSize = 16.sp,
-        lineHeight = 21.sp,
-        letterSpacing = 0.sp,
-        textGeometricTransform = TextGeometricTransform(scaleX = 1.00f),
-    ),
-    bodyMedium = TextStyle(
-        fontWeight = FontWeight.W400,
-        fontSize = 14.sp,
-        lineHeight = 19.sp,
-        letterSpacing = 0.01.sp,
-        textGeometricTransform = TextGeometricTransform(scaleX = 1.00f),
-    ),
-    bodySmall = TextStyle(
-        fontWeight = FontWeight.W400,
-        fontSize = 12.sp,
-        lineHeight = 16.sp,
-        letterSpacing = 0.04.sp,
-        textGeometricTransform = TextGeometricTransform(scaleX = 1.00f),
-    ),
-
-    // Usernames, metadata and compact UI are intentionally much lighter than
-    // names/titles. labelMedium is especially neutral because @user handles and
-    // secondary metadata commonly use this role throughout Orb.
-    labelLarge = TextStyle(
-        fontWeight = FontWeight.W600,
-        fontSize = 14.sp,
-        lineHeight = 17.sp,
-        letterSpacing = 0.sp,
-        textGeometricTransform = TextGeometricTransform(scaleX = 0.98f),
-    ),
-    labelMedium = TextStyle(
-        fontWeight = FontWeight.W400,
-        fontSize = 12.sp,
-        lineHeight = 15.sp,
-        letterSpacing = 0.05.sp,
-        textGeometricTransform = TextGeometricTransform(scaleX = 1.01f),
-    ),
-    labelSmall = TextStyle(
-        fontWeight = FontWeight.W400,
-        fontSize = 11.sp,
-        lineHeight = 14.sp,
-        letterSpacing = 0.10.sp,
-        textGeometricTransform = TextGeometricTransform(scaleX = 0.99f),
-    ),
-)
 /** Applies [family] to every style in the scale, so nothing is left on Roboto. */
 private fun Typography.withFamily(family: FontFamily) = Typography(
     displayLarge = displayLarge.copy(fontFamily = family),
@@ -311,7 +162,7 @@ private fun Typography.withFamily(family: FontFamily) = Typography(
 )
 
 @Composable
-fun BitChordTheme(
+fun OrbTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     content: @Composable () -> Unit,
 ) {
@@ -319,13 +170,7 @@ fun BitChordTheme(
     val configuration = LocalConfiguration.current
     val dynamicColor = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S
     var dynamicPaletteVersion by remember { mutableIntStateOf(0) }
-    val selectedAppFont by AppSettings.appFont.collectAsState()
-    val defaultTypography = remember { BitChordTypographyBase.withFamily(SFProDisplay) }
-    val typography = OrbFlavorUi.resolveTypography(
-        selected = selectedAppFont,
-        defaultTypography = defaultTypography,
-        googleSansFlexTypography = GoogleSansFlexTypographyBase,
-    )
+    val typography = remember { OrbTypographyBase.withFamily(SFProDisplay) }
 
     // Android does not always recreate an already-running Activity when the
     // wallpaper/Material You palette changes. Listen to the system palette at
@@ -356,17 +201,42 @@ fun BitChordTheme(
         configuration,
         dynamicPaletteVersion,
     ) {
-        when {
-            dynamicColor && darkTheme -> dynamicDarkColorScheme(context).copy(
-                // Keep the complete Material You primary/secondary/tertiary
-                // families and container roles; only Orb's page canvas stays
-                // true black in Dark mode.
-                background = Color.Black,
-            )
+        val base = when {
+            dynamicColor && darkTheme -> dynamicDarkColorScheme(context)
             dynamicColor && !darkTheme -> dynamicLightColorScheme(context)
             darkTheme -> DarkColors
             else -> LightColors
         }
+
+        // Material 3 Expressive canvas. The first pass was intentionally
+        // conservative, but on-device it still read as pure black/white while
+        // the header looked like a separate tinted slab. Keep the neutral OLED/
+        // light anchors, then introduce enough palette chroma for Haze and
+        // Expressive Glass to have something to refract.
+        val neutralCanvas = if (darkTheme) Color.Black else Color.White
+        val primaryTint = lerp(
+            neutralCanvas,
+            base.primaryContainer,
+            if (darkTheme) 0.22f else 0.28f,
+        )
+        val secondaryTint = lerp(
+            primaryTint,
+            base.secondaryContainer,
+            if (darkTheme) 0.09f else 0.12f,
+        )
+        val expressiveCanvas = lerp(
+            secondaryTint,
+            base.tertiaryContainer,
+            if (darkTheme) 0.045f else 0.05f,
+        )
+
+        // Surface stays in exactly the same chromatic family as background.
+        // Elevated containers remain free to provide depth, but the page itself
+        // can no longer snap from a tinted header to a neutral black/white body.
+        base.copy(
+            background = expressiveCanvas,
+            surface = lerp(expressiveCanvas, base.surface, 0.12f),
+        )
     }
 
     MaterialTheme(

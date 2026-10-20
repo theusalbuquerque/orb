@@ -18,14 +18,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.SignalCellularAlt
 import androidx.compose.material.icons.rounded.Wifi
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.HorizontalDivider
+import com.music.orb.ui.components.OrbConfirmationDialog as AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import com.music.orb.ui.components.orbOverlayGlassBaseColor
+import com.music.orb.ui.components.orbGlassSurface
 import com.music.orb.ui.components.ExpressiveSwitch as Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import com.music.orb.ui.components.OrbGlassTextButton as TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -48,7 +49,6 @@ import com.music.orb.data.sources.SourceHealth
 import com.music.orb.data.sources.SourceKind
 import com.music.orb.data.sources.SourceRegistry
 import com.music.orb.data.sources.addon.AddonClient
-import com.music.orb.ui.components.TimedExperimentalNotice
 import kotlinx.coroutines.launch
 
 /** Orb audio quality and playback-source settings. */
@@ -63,13 +63,15 @@ fun SourcesScreen(
     val cellular by AppSettings.audioQualityCellular.collectAsStateWithLifecycle()
     val losslessEnabled by AppSettings.losslessAudio.collectAsStateWithLifecycle()
     val wifiMaximum by AppSettings.audioQualityWifiMaximum.collectAsStateWithLifecycle()
+    val isPremiumEntitled by AppSettings.premiumEntitled.collectAsStateWithLifecycle()
+    val cellularMaximum by AppSettings.audioQualityCellularMaximum.collectAsStateWithLifecycle()
+    val losslessMobileSupported by AppSettings.serverLosslessMobileEnabled.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     var showAddonDialog by remember { mutableStateOf(false) }
     var addonUrl by remember { mutableStateOf("") }
     var addonName by remember { mutableStateOf("Private addon") }
     var addonError by remember { mutableStateOf<String?>(null) }
     var addonChecking by remember { mutableStateOf(false) }
-    var showLosslessNotice by remember { mutableStateOf(false) }
     val addonDuplicateMessage = stringResource(R.string.audio_addon_duplicate)
 
     Column(
@@ -85,29 +87,33 @@ fun SourcesScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp)
-                .clip(RoundedCornerShape(26.dp))
-                .background(MaterialTheme.colorScheme.surfaceContainer)
+                .clip(RoundedCornerShape(24.dp))
+                .orbGlassSurface(
+                    pageColor = orbOverlayGlassBaseColor(),
+                    cornerRadius = 24.dp,
+                    manageDialogBackdrop = false,
+                )
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
                 text = stringResource(R.string.audio_lossless_title),
                 style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.primary,
+                color = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.weight(1f),
             )
             Switch(
-                checked = losslessEnabled && wifiMaximum,
+                checked = losslessEnabled,
                 onCheckedChange = { enabled ->
                     if (enabled) {
-                        // Set the Maximum ceiling first, then flip the master
-                        // Lossless flow. Playback observes the latter and will
-                        // therefore see both flags true in the same callback.
+                        // Enabling the Lossless source also selects Maximum on Wi-Fi.
                         AppSettings.setAudioQualityWifiMaximum(true)
                         AppSettings.setLosslessAudio(true)
-                        showLosslessNotice = true
                     } else {
+                        // Turning it off must clear both network ceilings so a
+                        // stale Maximum selection is never shown or restored.
                         AppSettings.setAudioQualityWifiMaximum(false)
+                        AppSettings.setAudioQualityCellularMaximum(false)
                         AppSettings.setLosslessAudio(false)
                     }
                 },
@@ -118,16 +124,38 @@ fun SourcesScreen(
             icon = Icons.Rounded.Wifi,
             title = stringResource(R.string.audio_wifi),
             selected = wifi,
+            maximumSelected = losslessEnabled && wifiMaximum,
+            maximumAvailable = true,
+            isCellular = false,
             accent = MaterialTheme.colorScheme.secondary,
-            onSelect = AppSettings::setAudioQualityWifi,
+            onSelect = { selection ->
+                if (selection == 3) {
+                    AppSettings.setAudioQualityWifiMaximum(true)
+                    AppSettings.setLosslessAudio(true)
+                } else {
+                    AppSettings.setAudioQualityWifi(qualityAtIndex(selection))
+                }
+            },
         )
         Spacer(Modifier.height(10.dp))
         NetworkQualityCard(
             icon = Icons.Rounded.SignalCellularAlt,
             title = stringResource(R.string.audio_mobile_data),
             selected = cellular,
+            maximumSelected = losslessEnabled && cellularMaximum && isPremiumEntitled && losslessMobileSupported,
+            maximumAvailable = isPremiumEntitled && losslessMobileSupported,
+            isCellular = true,
             accent = MaterialTheme.colorScheme.tertiary,
-            onSelect = AppSettings::setAudioQualityCellular,
+            onSelect = { selection ->
+                if (selection == 3) {
+                    if (isPremiumEntitled && losslessMobileSupported) {
+                        AppSettings.setAudioQualityCellularMaximum(true)
+                        AppSettings.setLosslessAudio(true)
+                    }
+                } else {
+                    AppSettings.setAudioQualityCellular(qualityAtIndex(selection))
+                }
+            },
         )
 
         Text(
@@ -152,7 +180,7 @@ fun SourcesScreen(
                         { SourceRegistry.remove(config.id) }
                     } else null,
                 )
-                HorizontalDivider()
+                Spacer(Modifier.height(6.dp))
             }
 
         TextButton(
@@ -190,6 +218,10 @@ fun SourcesScreen(
     if (showAddonDialog) {
         AlertDialog(
             onDismissRequest = { if (!addonChecking) showAddonDialog = false },
+            modifier = Modifier.orbGlassSurface(orbOverlayGlassBaseColor(), cornerRadius = 28.dp),
+            containerColor = Color.Transparent,
+            tonalElevation = 0.dp,
+            shape = RoundedCornerShape(28.dp),
             title = { Text(stringResource(R.string.audio_addon_dialog_title)) },
             text = {
                 Column {
@@ -277,15 +309,7 @@ fun SourcesScreen(
         )
     }
 
-    if (showLosslessNotice) {
-        TimedExperimentalNotice(
-            title = stringResource(R.string.audio_lossless_experimental_title),
-            message = stringResource(R.string.audio_lossless_experimental_message),
-            confirmLabel = stringResource(R.string.experimental_feature_confirm),
-            onConfirmed = { showLosslessNotice = false },
-            unlockAfterMs = 6_000L,
-        )
-    }
+
 }
 
 @Composable
@@ -294,7 +318,8 @@ private fun SectionTitle(text: String) {
         text = text,
         style = MaterialTheme.typography.titleMedium,
         color = MaterialTheme.colorScheme.primary,
-        modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 22.dp, bottom = 10.dp),
+        // Top section begins at the same 18dp offset as Orb Premium in Settings.
+        modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 18.dp, bottom = 8.dp),
     )
 }
 
@@ -303,16 +328,23 @@ private fun NetworkQualityCard(
     icon: ImageVector,
     title: String,
     selected: AudioQuality,
+    maximumSelected: Boolean,
+    maximumAvailable: Boolean,
+    isCellular: Boolean,
     accent: Color,
-    onSelect: (AudioQuality) -> Unit,
+    onSelect: (Int) -> Unit,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp)
-            .clip(RoundedCornerShape(26.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainer)
-            .padding(horizontal = 16.dp, vertical = 6.dp),
+            .clip(RoundedCornerShape(24.dp))
+            .orbGlassSurface(
+                pageColor = orbOverlayGlassBaseColor(),
+                cornerRadius = 24.dp,
+                manageDialogBackdrop = false,
+            )
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.Top,
     ) {
         Icon(
@@ -327,6 +359,9 @@ private fun NetworkQualityCard(
         QualityRow(
             title = title,
             selected = selected,
+            maximumSelected = maximumSelected,
+            maximumAvailable = maximumAvailable,
+            isCellular = isCellular,
             onSelect = onSelect,
             modifier = Modifier.weight(1f),
         )
@@ -337,7 +372,10 @@ private fun NetworkQualityCard(
 private fun QualityRow(
     title: String,
     selected: AudioQuality,
-    onSelect: (AudioQuality) -> Unit,
+    maximumSelected: Boolean,
+    maximumAvailable: Boolean,
+    isCellular: Boolean,
+    onSelect: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val displayedSelection = if (selected == AudioQuality.AAC) AudioQuality.HIGH else selected
@@ -347,36 +385,44 @@ private fun QualityRow(
             style = MaterialTheme.typography.titleMedium,
             color = MaterialTheme.colorScheme.onSurface,
         )
-        Spacer(Modifier.width(4.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            listOf(AudioQuality.LOW, AudioQuality.MEDIUM, AudioQuality.HIGH).forEach { quality ->
-                val chosen = quality == displayedSelection
-                Text(
-                    text = if (chosen) "✓ ${localizedQualityName(quality)}" else localizedQualityName(quality),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = if (chosen) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                    modifier = Modifier
-                        .clickable {
-                            // The visible High tier is Orb's Hi-Quality Audio
-                            // preset. Persist AAC explicitly so playback keeps
-                            // the AAC 320 -> AAC 250 -> Opus 128 -> AAC 128
-                            // hierarchy instead of treating HIGH as a generic
-                            // best-lossy request.
-                            onSelect(if (quality == AudioQuality.HIGH) AudioQuality.AAC else quality)
-                        }
-                        .padding(end = 18.dp, top = 8.dp, bottom = 8.dp),
-                )
-            }
-        }
+        Spacer(Modifier.height(10.dp))
+        val qualityOptions = listOf(
+            localizedQualityName(AudioQuality.LOW),
+            localizedQualityName(AudioQuality.MEDIUM),
+            localizedQualityName(AudioQuality.HIGH),
+            stringResource(R.string.audio_quality_maximum_name),
+        )
+        SegmentedControl(
+            options = qualityOptions,
+            selectedIndex = if (maximumSelected) 3 else when (displayedSelection) {
+                AudioQuality.LOW -> 0
+                AudioQuality.MEDIUM -> 1
+                else -> 2
+            },
+            onSelect = onSelect,
+            enabledIndices = if (maximumAvailable) null else setOf(0, 1, 2),
+            edgeMotion = false,
+        )
+        Spacer(Modifier.height(10.dp))
         Text(
-            text = localizedQualityDetail(displayedSelection),
-            style = MaterialTheme.typography.bodyMedium,
+            text = when {
+                maximumSelected && isCellular ->
+                    stringResource(R.string.audio_quality_cellular_maximum_detail)
+                maximumSelected ->
+                    stringResource(R.string.audio_quality_wifi_maximum_detail)
+                else -> localizedQualityDetail(displayedSelection, isCellular)
+            },
+            style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        if (isCellular && !maximumAvailable) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = stringResource(R.string.audio_quality_maximum_premium_locked),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 
@@ -387,7 +433,16 @@ private fun SourceRow(
     onRemove: (() -> Unit)? = null,
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .orbGlassSurface(
+                pageColor = orbOverlayGlassBaseColor(),
+                cornerRadius = 18.dp,
+                manageDialogBackdrop = false,
+            )
+            .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
@@ -453,8 +508,26 @@ private fun localizedQualityName(quality: AudioQuality): String = when (quality)
 }
 
 @Composable
-private fun localizedQualityDetail(quality: AudioQuality): String = when (quality) {
-    AudioQuality.LOW -> stringResource(R.string.audio_quality_low_detail)
-    AudioQuality.MEDIUM -> stringResource(R.string.audio_quality_medium_detail)
+private fun localizedQualityDetail(
+    quality: AudioQuality,
+    isCellular: Boolean,
+): String = when (quality) {
+    AudioQuality.LOW -> if (isCellular) {
+        stringResource(R.string.audio_quality_low_cellular_detail)
+    } else {
+        stringResource(R.string.audio_quality_low_detail)
+    }
+    AudioQuality.MEDIUM -> if (isCellular) {
+        stringResource(R.string.audio_quality_medium_cellular_detail)
+    } else {
+        stringResource(R.string.audio_quality_medium_detail)
+    }
     AudioQuality.HIGH, AudioQuality.AAC -> stringResource(R.string.audio_quality_high_detail)
+}
+
+/** Preserve the AAC first-note preset underneath the visible High tier. */
+private fun qualityAtIndex(index: Int): AudioQuality = when (index) {
+    0 -> AudioQuality.LOW
+    1 -> AudioQuality.MEDIUM
+    else -> AudioQuality.AAC
 }

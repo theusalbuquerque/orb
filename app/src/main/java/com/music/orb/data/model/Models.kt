@@ -86,6 +86,15 @@ data class Song(
      * navigation targets instead of making the whole byline open the first artist.
      */
     val artistLinks: List<ArtistLink> = emptyList(),
+    /**
+     * True when the listener explicitly launched this exact album/release page.
+     *
+     * The optional "Prioritize album versions" resolver may replace singles or
+     * alternate packages with a canonical album cut, but it must never rewrite
+     * a release the listener explicitly selected. This flag is playback context,
+     * not catalogue identity.
+     */
+    val preserveAlbumRelease: Boolean = false,
 )
 
 /**
@@ -148,9 +157,11 @@ sealed interface SearchResult {
 }
 
 enum class SearchFilter(val label: String, val params: String?) {
+    /** YouTube Music's unfiltered search surface. Kept first because Explore defaults to All. */
+    ALL("All", null),
+    ARTISTS("Artists", "EgWKAQIgAWoKEAkQChAFEAMQBA=="),
     SONGS("Songs", "EgWKAQIIAWoKEAkQChAFEAMQBA=="),
     ALBUMS("Albums", "EgWKAQIYAWoKEAkQChAFEAMQBA=="),
-    ARTISTS("Artists", "EgWKAQIgAWoKEAkQChAFEAMQBA=="),
     PLAYLISTS("Playlists", "EgWKAQIoAWoKEAkQChAFEAMQBA=="),
 }
 
@@ -208,6 +219,8 @@ data class YouTubeAccountIdentity(
     val thumbnailUrl: String? = null,
     val pageId: String? = null,
     val isSelected: Boolean = false,
+    /** True when identified by Google's public channels.list, not Innertube. */
+    val fromOfficialApi: Boolean = false,
 ) {
     val stableKey: String
         get() = pageId ?: "primary:${handle.ifBlank { name }}"
@@ -245,9 +258,10 @@ data class LibraryPage(
     val likedSongs: List<Song>,
     val librarySongs: List<Song>,
     val shelves: List<HomeShelf>,
+    val incomplete: Boolean = false,
 ) {
     val isEmpty: Boolean
-        get() = likedSongs.isEmpty() && librarySongs.isEmpty() && shelves.isEmpty()
+        get() = likedSongs.isEmpty() && librarySongs.isEmpty() && shelves.none { it.items.isNotEmpty() }
 }
 
 /** One artist explicitly linked by a detail-page header. */

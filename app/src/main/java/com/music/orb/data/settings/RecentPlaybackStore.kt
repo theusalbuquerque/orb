@@ -6,7 +6,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Small device-local source of truth for the Home "Recently played" shelf.
+ * Account-synchronized cache for the Home "Recently played" shelf.
  *
  * It intentionally does not depend on YouTube history: local files, downloaded
  * tracks and offline playback are just as valid as an online YouTube listen.
@@ -17,28 +17,57 @@ object RecentPlaybackStore {
     private const val PREFS = "orb_recent_playback"
     private const val KEY_ITEMS = "items"
     private const val MAX_ITEMS = 200
+    private var itemsKey = KEY_ITEMS
+    private var deviceType = "unknown"
+    val currentDeviceType: String get() = deviceType
+    val currentDeviceId: String get() {
+        val prefs = requireNotNull(preferences)
+        return prefs.getString("listening_device_id", null) ?: java.util.UUID.randomUUID().toString().also {
+            prefs.edit().putString("listening_device_id", it).apply()
+        }
+    }
+    private val _entries = kotlinx.coroutines.flow.MutableStateFlow<List<RecentPlaybackEntry>>(emptyList())
+    val entries: kotlinx.coroutines.flow.StateFlow<List<RecentPlaybackEntry>> = _entries
+
 
     @Volatile
     private var preferences: android.content.SharedPreferences? = null
 
     fun init(context: Context) {
         preferences = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        deviceType = when {
+            context.packageManager.hasSystemFeature("org.chromium.arc") -> "computer"
+            context.resources.configuration.smallestScreenWidthDp >= 600 -> "tablet"
+            else -> "phone"
+        }
+        _entries.value = read(requireNotNull(preferences))
     }
 
-    @Synchronized
     fun record(
         song: Song,
         playedAtMs: Long = System.currentTimeMillis(),
         startedAtMs: Long = playedAtMs,
-    ) {
+        eventId: String = java.util.UUID.randomUUID().toString(),
+        attributedDeviceType: String = deviceType,
+        listenedMs: Long = 0L,
+    ) = AccountHistorySync.withAccount {
+        val entry = RecentPlaybackEntry(song, playedAtMs, startedAtMs, attributedDeviceType, eventId, listenedMs)
+        AccountHistorySync.enqueue("playback", cloudPayload(entry), entry.eventId)
+        recordLocal(entry)
+    }
+
+    @Synchronized
+    private fun recordLocal(entry: RecentPlaybackEntry) {
         val prefs = preferences ?: return
         val current = read(prefs).toMutableList()
         // Every qualified playback is an event of its own. Listening to the
         // same track twice must therefore occupy two positions in Recents.
-        current.add(0, RecentPlaybackEntry(song, playedAtMs, startedAtMs))
+        current.removeAll { it.eventId == entry.eventId }
+        current.add(0, entry)
         val result = JSONArray()
         current.take(MAX_ITEMS).forEach { result.put(toJson(it)) }
-        prefs.edit().putString(KEY_ITEMS, result.toString()).apply()
+        prefs.edit().putString(itemsKey, result.toString()).apply()
+        _entries.value = current.take(MAX_ITEMS)
     }
 
     @Synchronized
@@ -53,8 +82,33 @@ object RecentPlaybackStore {
         return read(prefs).take(MAX_ITEMS)
     }
 
+    @Synchronized
+    internal fun bindAccount(userId: String?) {
+        itemsKey = if (userId == null) KEY_ITEMS else "items_account_$userId"
+        _entries.value = preferences?.let { read(it) }.orEmpty()
+    }
+
+    @Synchronized
+    internal fun applyCloud(operations: List<HistoryOperation>) {
+        val prefs = preferences ?: return
+        val local = read(prefs).associateBy { it.eventId }
+        val array = JSONArray()
+        operations.filter { it.kind == "playback" }.distinctBy { it.id }
+            .sortedByDescending { it.payload["playedAt"]?.toString()?.toLongOrNull() ?: 0L }
+            .take(MAX_ITEMS).forEach { op ->
+                val item = JSONObject(op.payload.toString())
+                local[op.id]?.song?.let { song ->
+                    song.localUri?.let { item.put("localUri", it) }
+                    song.localPath?.let { item.put("localPath", it) }
+                }
+                array.put(item)
+            }
+        prefs.edit().putString(itemsKey, array.toString()).apply()
+        _entries.value = read(prefs)
+    }
+
     private fun read(prefs: android.content.SharedPreferences): List<RecentPlaybackEntry> {
-        val raw = prefs.getString(KEY_ITEMS, null).orEmpty()
+        val raw = prefs.getString(itemsKey, null).orEmpty()
         if (raw.isBlank()) return emptyList()
         val array = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyList()
         return buildList {
@@ -65,13 +119,27 @@ object RecentPlaybackStore {
                     ?: System.currentTimeMillis()
                 val startedAt = item.optLong("startedAt", 0L).takeIf { it > 0L }
                     ?: playedAt
-                add(RecentPlaybackEntry(song, playedAt, startedAt))
+                add(RecentPlaybackEntry(song, playedAt, startedAt, item.optString("deviceType", "unknown"), item.optString("eventId", "${song.videoId}|$startedAt"), item.optLong("listenedMs", 0L)))
             }
         }
     }
 
+    internal fun withLegacyDevice(entry: RecentPlaybackEntry): RecentPlaybackEntry =
+        if (entry.deviceType == "unknown") entry.copy(deviceType = deviceType) else entry
+
+    internal fun localPayload(entry: RecentPlaybackEntry): kotlinx.serialization.json.JsonObject =
+        kotlinx.serialization.json.Json.parseToJsonElement(toJson(entry).toString()) as kotlinx.serialization.json.JsonObject
+
+    internal fun cloudPayload(entry: RecentPlaybackEntry): kotlinx.serialization.json.JsonObject {
+        val value = toJson(entry).apply { remove("localUri"); remove("localPath") }
+        return kotlinx.serialization.json.Json.parseToJsonElement(value.toString()) as kotlinx.serialization.json.JsonObject
+    }
+
     private fun toJson(entry: RecentPlaybackEntry): JSONObject = JSONObject().apply {
         val song = entry.song
+        put("eventId", entry.eventId)
+        put("deviceType", entry.deviceType)
+        put("listenedMs", entry.listenedMs)
         put("playedAt", entry.playedAtMs)
         put("startedAt", entry.startedAtMs)
         put("videoId", song.videoId)
@@ -138,6 +206,9 @@ data class RecentPlaybackEntry(
     val song: Song,
     val playedAtMs: Long,
     val startedAtMs: Long,
+    val deviceType: String = "unknown",
+    val eventId: String = "${song.videoId}|$startedAtMs",
+    val listenedMs: Long = 0L,
 ) {
     fun sessionKey(): String {
         val mediaKey = song.localUri?.takeIf { it.isNotBlank() } ?: song.videoId

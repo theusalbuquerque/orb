@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_download_fallback_high_title">Download in High quality if Lossless is unavailable</string>
+    <string name="settings_download_fallback_high_summary">Only after searching for Lossless/Hi-Res Lossless. Never downgrade to AAC when this is off.</string>
+    <string name="settings_download_patient_lossless_summary">Orb searches across Lossless sources thoroughly, using recording, artist, album and duration matching, even before the track has been played.</string>
+</resources>

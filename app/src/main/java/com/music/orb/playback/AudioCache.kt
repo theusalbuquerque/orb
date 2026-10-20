@@ -58,7 +58,7 @@ import java.util.concurrent.ConcurrentHashMap
 @UnstableApi
 object AudioCache {
 
-    private const val TAG = "BitChord"
+    private const val TAG = "Orb"
 
     /**
      * The disk budget, straight from [AppSettings] — 1GB minimum/default,
@@ -119,12 +119,11 @@ object AudioCache {
 
     /**
      * Cellular analysis must establish musical structure without downloading a
-     * near-complete track beside the audio that is already playing. Two MiB of
-     * the YouTube analysis carrier covers far more than the analyzer's opening
-     * window at ordinary Opus/AAC bitrates while leaving the radio free to keep
-     * A buffered and to prepare B.
+     * near-complete track beside the audio that is already playing. 1.25 MiB
+     * covers roughly 64-80 seconds at ordinary 160/128 kbps YouTube carriers,
+     * while leaving substantially more radio time for A's playback buffer and B.
      */
-    private const val METERED_ANALYSIS_HEAD_BYTES = 2L * 1024 * 1024
+    private const val METERED_ANALYSIS_HEAD_BYTES = 1280L * 1024L
 
     /**
      * The most [requestAnalysisHead] will pull for one track when its size *is*
@@ -529,7 +528,7 @@ object AudioCache {
                 launch {
                     delay(PREFETCH_DELAY_MS)
                     for (id in videoIds.take(QUEUE_LOOKAHEAD + 1).let { if (cacheBytes) it.drop(1) else it }) {
-                        runCatching { StreamResolver.resolve(id) }
+                        runCatching { StreamResolver.resolveImmediatePlayback(id) }
                             .onFailure { TrackLog.d(TAG, "queue warm-up skipped $id: ${it.message}", about = id) }
                         delay(QUEUE_RESOLVE_STAGGER_MS)
                     }

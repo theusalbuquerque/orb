@@ -30,7 +30,7 @@ import java.util.concurrent.TimeUnit
  */
 internal object QuickJsExecutor {
 
-    private const val TAG = "BitChord"
+    private const val TAG = "Orb"
     private const val MAX_CONCURRENT = 4
 
     private val syncHttpClient by lazy {

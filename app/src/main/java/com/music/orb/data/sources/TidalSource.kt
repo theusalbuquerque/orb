@@ -34,7 +34,15 @@ class TidalSource(
         query: String,
         limit: Int,
         waitForAll: Boolean,
-    ): List<Song> = TidalService.search(query, limit).map { track ->
+    ): List<Song> = toSongs(TidalService.search(query, limit))
+
+    override suspend fun searchForDownload(
+        query: String,
+        limit: Int,
+        waitForAll: Boolean,
+    ): List<Song> = toSongs(TidalService.search(query, limit, forDownload = true))
+
+    private fun toSongs(tracks: List<TidalService.Track>): List<Song> = tracks.map { track ->
         Song(
             videoId = SourceRegistry.trackKey(config.id, track.id.toString()),
             // TIDAL keeps remix/edit descriptors separately from title. Fold
@@ -90,6 +98,47 @@ class TidalSource(
                 stream.audioQuality?.contains("HIRES", ignoreCase = true) == true ||
                 (stream.bitDepth ?: 0) > 16 ||
                 (stream.sampleRateHz ?: 0) > 48_000 -> LosslessTier.HI_RES_LOSSLESS
+            else -> LosslessTier.LOSSLESS
+        }
+
+        return SourceStream(
+            url = stream.url,
+            format = StreamFormat(
+                codec = "flac",
+                sampleRateHz = stream.sampleRateHz,
+                bitDepth = stream.bitDepth,
+                declaredLosslessTier = tier,
+            ),
+            isDash = stream.isDash,
+            losslessVerified = stream.verifiedLossless,
+        )
+    }
+
+    override suspend fun streamForDownload(
+        trackId: String,
+        request: StreamRequest,
+        qualityTarget: DownloadQualityTarget?,
+    ): SourceStream? {
+        if (request !is StreamRequest.Lossless) return stream(trackId, request)
+
+        val id = trackId.toLongOrNull() ?: return null
+        val preferredTier = qualityTarget
+            ?.losslessTier
+            ?.takeIf { it.isLossless }
+            ?: LosslessTier.HI_RES_LOSSLESS
+        val stream = TidalService.bestLosslessDownloadStream(id, preferredTier) ?: return null
+        if (!stream.codec.equals("flac", ignoreCase = true) ||
+            (stream.isDash && !stream.verifiedLossless)
+        ) return null
+
+        val tier = when {
+            (stream.bitDepth ?: 0) > 16 ||
+                (stream.sampleRateHz ?: 0) > 48_000 -> LosslessTier.HI_RES_LOSSLESS
+            // When the provider reports a native 16-bit / 44.1 kHz rendition,
+            // do not let its HI_RES label override the known lower resolution.
+            stream.bitDepth != null || stream.sampleRateHz != null -> LosslessTier.LOSSLESS
+            stream.audioQuality?.contains("HI_RES", ignoreCase = true) == true ||
+                stream.audioQuality?.contains("HIRES", ignoreCase = true) == true -> LosslessTier.HI_RES_LOSSLESS
             else -> LosslessTier.LOSSLESS
         }
 

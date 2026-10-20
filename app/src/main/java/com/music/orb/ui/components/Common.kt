@@ -1,12 +1,22 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+
 package com.music.orb.ui.components
 
+import android.os.Build
+import android.view.WindowManager
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.LocalOverscrollConfiguration
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.clickable
@@ -17,34 +27,48 @@ import androidx.compose.material.icons.rounded.Downloading
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.PlaylistAdd
 import androidx.compose.material.icons.rounded.PlaylistPlay
+import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.SwipeToDismissBox
-import androidx.compose.material3.SwipeToDismissBoxValue
-import androidx.compose.material3.SwipeToDismissBoxState
-import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.produceState
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.music.orb.data.LocalAudioQuality
 import com.music.orb.download.DownloadState
 import com.music.orb.download.Downloads
 import com.music.orb.data.settings.AppSettings
+import com.music.orb.data.settings.AlbumRatingStore
+import com.music.orb.data.social.CommunityRatingRepository
+import com.music.orb.data.spotify.LinkedLikesSync
 import com.music.orb.ui.flavor.OrbFlavorUi
 import com.music.orb.data.sources.LosslessTier
 import com.music.orb.data.sources.SourceKind
 import com.music.orb.data.sources.SourceRegistry
 import com.music.orb.data.sources.SourceResolver
+import com.music.orb.data.sources.CollectionBadgeIndex
 import kotlin.math.abs
+import java.util.Locale
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withContext
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.windowInsetsBottomHeight
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.statusBarsIgnoringVisibility
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -53,30 +77,48 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
+import com.music.orb.ui.components.OrbGlassButton as Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -85,6 +127,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.DialogWindowProvider
 import coil3.compose.AsyncImage
 import com.music.orb.data.model.ROW_ART_PX
 import com.music.orb.data.model.BrowseType
@@ -97,9 +140,380 @@ import androidx.compose.foundation.border
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.semantics
 import com.music.orb.R
 import com.music.orb.ui.player.NowPlayingLaunchOriginRegistry
+
+/**
+ * Shared page-tinted translucent glass used by album/artist/playlist controls,
+ * share surfaces, sheets and popups. Keeping overlays on this helper prevents
+ * each dialog from drifting to its own opaque Material surface.
+ */
+/**
+ * Orb Expressive Glass tone. The material stays mostly neutral so controls keep
+ * one identity across artworks; the current page/artwork contributes only a
+ * restrained tint. This is intentionally closer to frosted system glass than
+ * to a translucent copy of the dominant artwork colour.
+ */
+@Composable
+fun orbExpressiveGlassTone(
+    pageColor: Color,
+    artworkInfluence: Float = 0.16f,
+): Color {
+    val neutral = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 1f)
+    return lerp(
+        neutral,
+        pageColor.copy(alpha = 1f),
+        artworkInfluence.coerceIn(0f, 0.42f),
+    )
+}
+
+@Composable
+fun orbExpressiveGlassContentColor(
+    pageColor: Color,
+    artworkInfluence: Float = 0.16f,
+): Color =
+    artworkSurfaceForegrounds(
+        orbExpressiveGlassTone(pageColor, artworkInfluence),
+    ).primary
+
+/**
+ * Colour source for the *outer* frosted panel of an Orb bottom sheet.
+ * ARTWORK is reserved for the song Action Button; BACKDROP lets the actual
+ * blurred activity underneath supply the hue instead of a neutral colour slab.
+ * Ordinary controls/badges keep the existing Expressive Glass material.
+ */
+/**
+ * The exact lightweight veil used for transport controls in Now Playing.
+ * The page already provides a cover-derived background; paint only a faint
+ * light/dark veil using the adaptive foreground, not an opaque Material tone.
+ * The caller owns clipping to the desired Expressive control shape.
+ */
+fun Modifier.orbNowPlayingStyleGlass(
+    contentColor: Color,
+    opacity: Float = 0.08f,
+    highlight: Float = 0.025f,
+): Modifier = this
+    .background(contentColor.copy(alpha = opacity.coerceIn(0f, 0.22f)))
+    .background(
+        Brush.verticalGradient(
+            colors = listOf(
+                contentColor.copy(alpha = highlight.coerceIn(0f, 0.08f)),
+                Color.Transparent,
+            ),
+        ),
+    )
+
+enum class OrbSheetTintMode { ARTWORK, BACKDROP }
+
+fun Modifier.orbGlassSurface(
+    pageColor: Color,
+    cornerRadius: Dp? = null,
+    drawRim: Boolean = true,
+    backdropBlur: Dp = 56.dp,
+    overlayStrength: Boolean = false,
+    overlayOpacity: Float? = null,
+    artworkInfluenceOverride: Float? = null,
+    contentColorHint: Color? = null,
+    observeTapFeedback: Boolean = true,
+    manageDialogBackdrop: Boolean = true,
+    // Use only for outer bottom-sheet surfaces. Leaves controls and badges intact.
+    lightweightSheetMaterial: Boolean = false,
+    sheetTintMode: OrbSheetTintMode? = null,
+): Modifier = composed {
+    // ModalBottomSheet / AlertDialog / Dialog live in their own Android window.
+    // A translucent paint alone only lowers opacity; it cannot blur the activity
+    // behind that window. Apply Android's real background blur whenever this
+    // glass surface is hosted by a dialog window, while regular in-page controls
+    // keep using the same glass paint without touching the activity window.
+    val view = LocalView.current
+    val context = LocalContext.current
+    val density = LocalDensity.current
+    val dialogWindow = (view.parent as? DialogWindowProvider)?.window
+    val managedDialogWindow = dialogWindow.takeIf { manageDialogBackdrop }
+    // V28 trial: an approximately 10% stronger frost only on bottom-sheet
+    // panels. This changes the blur diffusion, not the 10% outside scrim or
+    // the tint/color of ordinary glass buttons and album badges.
+    val effectiveBlur = if (sheetTintMode != null) maxOf(backdropBlur, 92.dp)
+        else if (lightweightSheetMaterial) maxOf(backdropBlur, 84.dp)
+        else backdropBlur
+    val blurPx = with(density) { effectiveBlur.roundToPx() }
+
+    // AlertDialog/Dialog surfaces do not call RegisterSheetBackdrop themselves.
+    // When this glass modifier is hosted by a dialog window, register it here so
+    // the activity content behind the window receives the same real blur used by
+    // the song Action Button sheet. Regular in-page glass has no dialogWindow and
+    // therefore never affects the root backdrop.
+    DisposableEffect(managedDialogWindow, context) {
+        if (managedDialogWindow == null) {
+            onDispose { }
+        } else {
+            SheetBackdropRegistry.opened()
+            OrbHaptics.overlayEnter(context)
+            val previousAnimations = managedDialogWindow.attributes.windowAnimations
+            managedDialogWindow.attributes = managedDialogWindow.attributes.apply {
+                windowAnimations = R.style.OrbOverlayWindowAnimation
+            }
+            onDispose {
+                OrbHaptics.overlayExit(context)
+                managedDialogWindow.attributes = managedDialogWindow.attributes.apply {
+                    windowAnimations = previousAnimations
+                }
+                SheetBackdropRegistry.closed()
+            }
+        }
+    }
+
+    DisposableEffect(managedDialogWindow, blurPx) {
+        if (managedDialogWindow == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            onDispose { }
+        } else {
+            val oldBlurBehind = managedDialogWindow.attributes.blurBehindRadius
+            val hadBlurFlag = managedDialogWindow.attributes.flags and WindowManager.LayoutParams.FLAG_BLUR_BEHIND != 0
+
+            managedDialogWindow.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
+            managedDialogWindow.attributes = managedDialogWindow.attributes.apply {
+                blurBehindRadius = maxOf(blurBehindRadius, blurPx)
+            }
+            runCatching { managedDialogWindow.setBackgroundBlurRadius(blurPx) }
+
+            onDispose {
+                managedDialogWindow.attributes = managedDialogWindow.attributes.apply {
+                    blurBehindRadius = oldBlurBehind
+                }
+                runCatching { managedDialogWindow.setBackgroundBlurRadius(0) }
+                if (!hadBlurFlag && oldBlurBehind == 0) {
+                    managedDialogWindow.clearFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
+                }
+            }
+        }
+    }
+
+    // Dialog sheets contain interactive controls and scrollable lists. An outer
+    // pointer observer can race their first tap; leave haptics to the actual
+    // clickable row/button, not to its glass background.
+    val receivesOverlayFeedback = observeTapFeedback && overlayStrength && managedDialogWindow == null
+    val tapFeedbackModifier = if (receivesOverlayFeedback) {
+        Modifier.pointerInput(context) {
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                val start = down.position
+                var moved = false
+                while (true) {
+                    val event = awaitPointerEvent(PointerEventPass.Final)
+                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                    if ((change.position - start).getDistance() > viewConfiguration.touchSlop) moved = true
+                    if (!change.pressed) {
+                        if (!moved) OrbHaptics.overlayTap(context)
+                        break
+                    }
+                }
+            }
+        }
+    } else Modifier
+
+    // Expressive Glass: neutral material first, artwork tint second. The stronger
+    // backdrop blur carries depth; the paint itself stays translucent enough to
+    // reveal context, with a soft internal highlight instead of a coloured slab.
+    val artworkInfluence = artworkInfluenceOverride
+        ?.coerceIn(0f, 0.42f)
+        ?: if (overlayStrength || managedDialogWindow != null) 0.18f else 0.14f
+    val glassTone = orbExpressiveGlassTone(pageColor, artworkInfluence)
+
+    this.then(tapFeedbackModifier).drawWithCache {
+        val radius = CornerRadius(cornerRadius?.toPx() ?: (size.minDimension / 2f))
+        // Outer sheets must never be a grey neutral plate. ARTWORK uses the
+        // extracted song colour; BACKDROP is almost colourless so the real
+        // blurred surface beneath it determines the resulting colour.
+        if (sheetTintMode != null) {
+            val requestedOpacity = overlayOpacity?.coerceIn(0f, 1f)
+            val tint = when (sheetTintMode) {
+                OrbSheetTintMode.ARTWORK -> pageColor.copy(alpha = requestedOpacity ?: 0.34f)
+                // Most of the perceived colour comes from the blurred content
+                // underneath, not from a grey Material surface painted over it.
+                // +10% *relative* frost: keep most colour coming from the live
+                // blurred screen, not from a new white/grey overlay.
+                OrbSheetTintMode.BACKDROP -> pageColor.copy(alpha = (requestedOpacity ?: 0.40f) * 0.275f)
+            }
+            val lightTheme = pageColor.luminance() > 0.5f
+            // The shared sheet perimeter is perceptible on blurred artwork,
+            // without changing the translucent material or individual controls.
+            val rim = if (lightTheme) Color.Black.copy(alpha = 0.22f)
+                else Color.White.copy(alpha = 0.25f)
+            val rimWidth = 0.9.dp.toPx()
+            onDrawBehind {
+                // The real blurred backdrop owns the light and colour. An
+                // extra bright gradient here made the glass appear to glow
+                // independently of the content underneath.
+                drawRoundRect(tint, cornerRadius = radius)
+                if (drawRim) drawRoundRect(rim, cornerRadius = radius, style = Stroke(rimWidth))
+            }
+        } else {
+        val opaqueTone = glassTone.copy(alpha = 1f)
+        val overlay = overlayStrength || managedDialogWindow != null
+        val requestedAlpha = overlayOpacity?.coerceIn(0f, 1f)
+            ?: if (lightweightSheetMaterial) 0.40f else if (overlay) 0.56f else 0.43f
+        // Only legacy sheet panels without an explicit ARTWORK/BACKDROP mode.
+        // Never frost nested controls, in-page cards or the ordinary badges.
+        val baseAlpha = if (lightweightSheetMaterial) (requestedAlpha * 1.08f).coerceAtMost(1f)
+            else requestedAlpha
+        val base = opaqueTone.copy(alpha = baseAlpha)
+
+        // A tiny neutral separation layer keeps the glass readable on both very
+        // bright and very dark artwork without reintroducing a strong colour wash.
+        val separator = (if (opaqueTone.luminance() >= 0.58f) Color.Black else Color.White)
+            .copy(alpha = if (lightweightSheetMaterial) 0.016f else if (overlay) 0.035f else 0.045f)
+        val foreground = contentColorHint ?: artworkSurfaceForegrounds(opaqueTone).primary
+
+        fun contrast(surface: Color): Float {
+            val a = foreground.luminance()
+            val b = surface.luminance()
+            return (maxOf(a, b) + 0.05f) / (minOf(a, b) + 0.05f)
+        }
+
+        val materialSurface = separator.compositeOver(base.compositeOver(opaqueTone))
+        val shade = if (foreground.luminance() > 0.5f) Color.Black else Color.White
+        fun readable(alpha: Float): Boolean =
+            contrast(shade.copy(alpha = alpha).compositeOver(materialSurface)) >= 4.5f
+
+        var contrastLayer = Color.Transparent
+        if (!readable(0f)) {
+            var low = 0f
+            var high = 0.62f
+            repeat(12) {
+                val middle = (low + high) / 2f
+                if (readable(middle)) high = middle else low = middle
+            }
+            contrastLayer = shade.copy(alpha = high)
+        }
+
+        // The highlight is deliberately achromatic: artwork owns atmosphere,
+        // while the glass itself reads as one consistent Orb material.
+        val highlightInk = if (opaqueTone.luminance() < 0.52f) Color.White else Color.Black
+        val innerHighlight = Brush.linearGradient(
+            colors = listOf(
+                highlightInk.copy(alpha = if (lightweightSheetMaterial) 0.052f else if (overlay) 0.115f else 0.095f),
+                highlightInk.copy(alpha = if (lightweightSheetMaterial) 0.012f else 0.030f),
+                Color.Transparent,
+            ),
+            start = Offset.Zero,
+            end = Offset(size.width * 0.82f, size.height),
+        )
+        val lowerShadeInk = if (opaqueTone.luminance() < 0.52f) Color.Black else Color.White
+        val lowerShade = Brush.verticalGradient(
+            colors = listOf(Color.Transparent, lowerShadeInk.copy(alpha = if (lightweightSheetMaterial) 0.012f else 0.035f)),
+            startY = size.height * 0.42f,
+            endY = size.height,
+        )
+        val rimColor = foreground.copy(alpha = if (overlay) 0.105f else 0.085f)
+        val stroke = 0.5.dp.toPx()
+
+        onDrawBehind {
+            drawRoundRect(base, cornerRadius = radius)
+            drawRoundRect(separator, cornerRadius = radius)
+            drawRoundRect(contrastLayer, cornerRadius = radius)
+            drawRoundRect(innerHighlight, cornerRadius = radius)
+            drawRoundRect(lowerShade, cornerRadius = radius)
+            if (drawRim) drawRoundRect(rimColor, cornerRadius = radius, style = Stroke(stroke))
+        }
+        }
+    }
+}
+
+@Composable
+fun OrbGlassContentTheme(
+    pageColor: Color,
+    content: @Composable () -> Unit,
+) {
+    val foregrounds = artworkSurfaceForegrounds(orbExpressiveGlassTone(pageColor))
+    MaterialTheme(
+        colorScheme = MaterialTheme.colorScheme.copy(
+            onBackground = foregrounds.primary,
+            onSurface = foregrounds.primary,
+            onSurfaceVariant = foregrounds.secondary,
+            onPrimaryContainer = foregrounds.primary,
+            onSecondaryContainer = foregrounds.primary,
+            onTertiaryContainer = foregrounds.primary,
+        ),
+    ) {
+        CompositionLocalProvider(LocalContentColor provides foregrounds.primary) {
+            content()
+        }
+    }
+}
+
+/**
+ * Shared inner surface for ordinary ModalBottomSheets. The sheet window itself
+ * stays transparent; the actual frosted material is painted around the content
+ * so it can never disappear because a ModalBottomSheet ignores/modifies its
+ * outer modifier. The drag handle is inside the glass as well.
+ */
+@Composable
+fun OrbGlassSheetSurface(
+    pageColor: Color,
+    cornerRadius: Dp = 36.dp,
+    modifier: Modifier = Modifier,
+    content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit,
+) {
+    val foregrounds = artworkSurfaceForegrounds(orbExpressiveGlassTone(pageColor))
+    var entered by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { entered = true }
+    val entrance by animateFloatAsState(
+        targetValue = if (entered) 1f else 0f,
+        animationSpec = spring(dampingRatio = 0.78f, stiffness = 360f),
+        label = "orbGlassSheetEntrance",
+    )
+    OrbGlassContentTheme(pageColor) {
+        Column(
+            modifier = modifier
+                .fillMaxWidth()
+                .graphicsLayer {
+                    alpha = 0.82f + 0.18f * entrance
+                    translationY = (1f - entrance) * 18.dp.toPx()
+                    val scale = 0.985f + 0.015f * entrance
+                    scaleX = scale
+                    scaleY = scale
+                }
+                .orbSheetPanelElevation(RoundedCornerShape(topStart = cornerRadius, topEnd = cornerRadius))
+                .clip(RoundedCornerShape(topStart = cornerRadius, topEnd = cornerRadius))
+                .orbGlassSurface(
+                    pageColor = pageColor,
+                    cornerRadius = cornerRadius,
+                    backdropBlur = 56.dp,
+                    overlayStrength = true,
+                    overlayOpacity = 0.40f,
+                    lightweightSheetMaterial = true,
+                    sheetTintMode = OrbSheetTintMode.BACKDROP,
+                    observeTapFeedback = false,
+                ),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(28.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Box(
+                    Modifier
+                        .size(width = 32.dp, height = 4.dp)
+                        .clip(CircleShape)
+                        .background(foregrounds.primary.copy(alpha = 0.42f)),
+                )
+            }
+            content()
+            // The same rendered glass extends behind Android's gesture handle.
+            Spacer(Modifier.fillMaxWidth().windowInsetsBottomHeight(WindowInsets.navigationBars))
+        }
+    }
+}
+
+@Composable
+fun orbOverlayGlassBaseColor(): Color = MaterialTheme.colorScheme.surfaceContainer
+
+@Composable
+fun orbOverlayGlassContentColor(pageColor: Color = orbOverlayGlassBaseColor()): Color =
+    orbExpressiveGlassContentColor(pageColor)
 
 fun Modifier.thumbnailBorder(shape: Shape): Modifier = composed {
     this.border(
@@ -174,10 +588,10 @@ fun HiQualityWordmark(
     iconWidth: Dp = 19.dp,
     iconHeight: Dp = 12.dp,
     style: TextStyle = TextStyle(
-        fontSize = 9.sp,
+        fontSize = 8.5.sp,
         fontWeight = FontWeight.SemiBold,
         letterSpacing = 0.2.sp,
-        lineHeight = 9.sp,
+        lineHeight = 8.5.sp,
     ),
 ) {
     val description = stringResource(R.string.hi_quality_audio_available)
@@ -218,10 +632,10 @@ fun LosslessWordmark(
     iconWidth: Dp = 19.dp,
     iconHeight: Dp = 12.dp,
     style: TextStyle = TextStyle(
-        fontSize = 9.sp,
+        fontSize = 8.5.sp,
         fontWeight = FontWeight.SemiBold,
         letterSpacing = 0.2.sp,
-        lineHeight = 9.sp,
+        lineHeight = 8.5.sp,
     ),
 ) {
     // Use the caller's contextual content colour exactly. Album/playlist
@@ -252,11 +666,111 @@ fun LosslessWordmark(
     }
 }
 
+/** Shared translucent material for Explicit/rating badges across album, Home, Library and Search.
+ * It intentionally mirrors the album glass material instead of falling back to a solid container. */
+fun Modifier.orbBadgeGlassSurface(
+    pageColor: Color,
+    cornerRadius: Dp = 5.dp,
+    drawRim: Boolean = false,
+    contentColorHint: Color? = null,
+    transparentLikeNowPlaying: Boolean = false,
+): Modifier = composed {
+    // Badges are miniature Expressive Glass, not tiny opaque labels. Keep the
+    // same neutral-first recipe used by buttons/sheets and reduce only the
+    // physical depth so 14–18dp seals stay crisp instead of looking muddy.
+    val glassTone = orbExpressiveGlassTone(pageColor, artworkInfluence = 0.12f)
+    // A release-page seal must use the same foreground as the neighbouring
+    // playback/action buttons. Without this hint, a light artwork page can
+    // end up with dark button glyphs and white badge lettering.
+    val foreground = contentColorHint ?: artworkSurfaceForegrounds(glassTone).primary
+    if (transparentLikeNowPlaying) {
+        this.orbNowPlayingStyleGlass(foreground)
+    } else this.drawWithCache {
+        val radius = CornerRadius(cornerRadius.toPx())
+        val opaqueTone = glassTone.copy(alpha = 1f)
+        val base = opaqueTone.copy(alpha = 0.40f)
+        val separatorInk = if (opaqueTone.luminance() >= 0.58f) Color.Black else Color.White
+        val separator = separatorInk.copy(alpha = 0.040f)
+        val highlightInk = if (opaqueTone.luminance() < 0.52f) Color.White else Color.Black
+        val highlight = Brush.linearGradient(
+            colors = listOf(
+                highlightInk.copy(alpha = 0.105f),
+                highlightInk.copy(alpha = 0.026f),
+                Color.Transparent,
+            ),
+            start = Offset.Zero,
+            end = Offset(size.width * 0.82f, size.height),
+        )
+        val lowerShadeInk = if (opaqueTone.luminance() < 0.52f) Color.Black else Color.White
+        val lowerShade = Brush.verticalGradient(
+            colors = listOf(Color.Transparent, lowerShadeInk.copy(alpha = 0.030f)),
+            startY = size.height * 0.44f,
+            endY = size.height,
+        )
+        val rimColor = foreground.copy(alpha = 0.095f)
+        val stroke = 0.5.dp.toPx()
+        onDrawBehind {
+            drawRoundRect(base, cornerRadius = radius)
+            drawRoundRect(separator, cornerRadius = radius)
+            drawRoundRect(highlight, cornerRadius = radius)
+            drawRoundRect(lowerShade, cornerRadius = radius)
+            if (drawRim) drawRoundRect(rimColor, cornerRadius = radius, style = Stroke(stroke))
+        }
+    }
+}
+
+
 /**
- * Release-level badges shown below album/single metadata. Release pages spell
- * Explicit out in full while preserving the compact outlined-seal language of
- * the universal E used in rows/player. Lossless and Hi-Q Audio remain
- * monochrome wordmarks that inherit the surrounding surface colour.
+ * The compact Explicit seal owns its material inside the vector frame.
+ * The outer layout box is transparent, so no glass plate can extend past the
+ * seal's own rounded border.
+ */
+@Composable
+fun ExplicitBadgeSeal(
+    pageColor: Color,
+    size: Dp,
+    modifier: Modifier = Modifier,
+    contentColorOverride: Color? = null,
+    transparentLikeNowPlaying: Boolean = false,
+) {
+    val description = stringResource(R.string.explicit_content)
+    val contentColor = contentColorOverride ?: orbExpressiveGlassContentColor(pageColor)
+    val radius = size * (5f / 18f)
+
+    Box(
+        modifier = modifier
+            .size(size)
+            .clip(RoundedCornerShape(radius))
+            .orbBadgeGlassSurface(
+                pageColor = pageColor,
+                cornerRadius = radius,
+                drawRim = false,
+                contentColorHint = contentColor,
+                transparentLikeNowPlaying = transparentLikeNowPlaying,
+            )
+            .semantics { contentDescription = description },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "E",
+            color = contentColor,
+            style = TextStyle(
+                fontSize = 9.25.sp,
+                fontWeight = FontWeight.ExtraBold,
+                letterSpacing = 0.sp,
+                lineHeight = 9.25.sp,
+            ),
+            maxLines = 1,
+            modifier = Modifier.clearAndSetSemantics { },
+        )
+    }
+}
+
+/**
+ * Release-level badges shown below album/single/EP metadata. Explicit uses the
+ * same compact E everywhere; its glass and foreground are derived from the
+ * contextual page/player surface so the badge follows Material 3 Expressive
+ * color rather than owning a fixed palette.
  */
 @Composable
 fun ReleaseBadges(
@@ -267,15 +781,27 @@ fun ReleaseBadges(
     centered: Boolean = false,
     isHiResLossless: Boolean = false,
     isHiQuality: Boolean = false,
+    plainExplicit: Boolean = false,
+    glassPageColor: Color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    transparentLikeNowPlaying: Boolean = false,
 ) {
     if (!isExplicit && !isLossless && !isHiQuality) return
+    @Suppress("UNUSED_VARIABLE")
+    val keepSourceCompatibility = plainExplicit
     val losslessDescription = stringResource(
         if (isHiResLossless) R.string.hi_res_lossless_available else R.string.lossless_available,
     )
     val losslessLabel = stringResource(
         if (isHiResLossless) R.string.hi_res_lossless_badge else R.string.lossless_badge,
     )
-    val arrangement = if (centered) Arrangement.Center else Arrangement.Start
+    val arrangement = if (centered) {
+        Arrangement.spacedBy(5.dp, Alignment.CenterHorizontally)
+    } else {
+        Arrangement.spacedBy(5.dp)
+    }
+    // Reuse the exact colour provided by the release page; it is also the
+    // foreground used by its Play, shuffle, share and overflow controls.
+    val badgeContentColor = color
 
     Row(
         modifier = modifier,
@@ -283,39 +809,104 @@ fun ReleaseBadges(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (isExplicit) {
-            ReleaseExplicitWordmark(color = color.copy(alpha = 0.88f))
+            ExplicitBadgeSeal(
+                pageColor = glassPageColor,
+                size = 14.5.dp,
+                contentColorOverride = badgeContentColor,
+                transparentLikeNowPlaying = transparentLikeNowPlaying,
+            )
         }
-        if (isExplicit && (isLossless || isHiQuality)) Spacer(Modifier.width(6.dp))
-        if (isLossless) {
-            LosslessWordmark(
-                text = losslessLabel,
-                color = color.copy(alpha = 0.88f),
-                iconWidth = 20.dp,
-                iconHeight = 13.dp,
-                style = TextStyle(
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    letterSpacing = 0.sp,
-                    lineHeight = 10.sp,
-                ),
+        if (isLossless || isHiQuality) {
+            Row(
                 modifier = Modifier
-                    .height(18.dp)
-                    .semantics { contentDescription = losslessDescription },
-            )
-        } else if (isHiQuality) {
-            HiQualityWordmark(
-                color = color.copy(alpha = 0.88f),
-                iconWidth = 20.dp,
-                iconHeight = 13.dp,
-                style = TextStyle(
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    letterSpacing = 0.sp,
-                    lineHeight = 10.sp,
-                ),
-                modifier = Modifier.height(18.dp),
-            )
+                    .height(14.5.dp)
+                    .clip(RoundedCornerShape(4.5.dp))
+                    .orbBadgeGlassSurface(
+                        glassPageColor,
+                        cornerRadius = 4.5.dp,
+                        contentColorHint = badgeContentColor,
+                        transparentLikeNowPlaying = transparentLikeNowPlaying,
+                    )
+                    .padding(horizontal = 4.5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (isLossless) {
+                    LosslessWordmark(
+                        text = losslessLabel,
+                        color = badgeContentColor,
+                        iconWidth = 15.5.dp,
+                        iconHeight = 10.dp,
+                        style = TextStyle(
+                            fontSize = 8.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            letterSpacing = 0.sp,
+                            lineHeight = 8.5.sp,
+                        ),
+                        modifier = Modifier
+                            .height(14.5.dp)
+                            .semantics { contentDescription = losslessDescription },
+                    )
+                } else {
+                    HiQualityWordmark(
+                        color = badgeContentColor,
+                        iconWidth = 15.5.dp,
+                        iconHeight = 10.dp,
+                        style = TextStyle(
+                            fontSize = 8.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            letterSpacing = 0.sp,
+                            lineHeight = 8.5.sp,
+                        ),
+                        modifier = Modifier.height(14.5.dp),
+                    )
+                }
+            }
         }
+    }
+}
+
+/** Album/single/EP rating badge shared by album cards and release pages. */
+@Composable
+fun AlbumRatingBadge(
+    albumId: String?,
+    glassPageColor: Color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    modifier: Modifier = Modifier,
+    contentColorOverride: Color? = null,
+    transparentLikeNowPlaying: Boolean = false,
+) {
+    if (albumId.isNullOrBlank()) return
+    // Public-facing seal shows the community mean, not the viewer's own vote.
+    // It includes registered editions and IDs linked in Other versions.
+    val revision by AlbumRatingStore.revision.collectAsStateWithLifecycle()
+    val rating by produceState<Float?>(initialValue = null, key1 = albumId, key2 = revision) {
+        value = runCatching { CommunityRatingRepository.albumAverage(albumId) }.getOrNull()
+    }
+    val contentColor = contentColorOverride ?: orbExpressiveGlassContentColor(glassPageColor)
+    Row(
+        modifier = modifier
+            .height(14.5.dp)
+            .clip(RoundedCornerShape(5.dp))
+            .orbBadgeGlassSurface(
+                glassPageColor,
+                cornerRadius = 5.dp,
+                contentColorHint = contentColor,
+                transparentLikeNowPlaying = transparentLikeNowPlaying,
+            )
+            .padding(horizontal = 5.dp),
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = Icons.Rounded.Star,
+            contentDescription = null,
+            tint = contentColor,
+            modifier = Modifier.size(12.dp),
+        )
+        Text(
+            text = rating?.let { String.format(Locale.getDefault(), "%.1f", it) } ?: "—",
+            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 12.sp),
+            color = contentColor,
+        )
     }
 }
 
@@ -324,28 +915,22 @@ fun ReleaseBadges(
 private fun ReleaseExplicitWordmark(
     color: Color,
     modifier: Modifier = Modifier,
+    outlined: Boolean = true,
 ) {
     val label = stringResource(R.string.explicit_badge_full).uppercase()
     val description = stringResource(R.string.explicit_content)
     Box(
-        modifier = modifier
-            .height(16.dp)
-            .border(
-                width = 0.8.dp,
-                color = color,
-                shape = RoundedCornerShape(3.dp),
-            )
-            .padding(horizontal = 4.dp),
+        modifier = modifier.height(14.5.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             text = label,
             color = color,
             style = TextStyle(
-                fontSize = 8.sp,
+                fontSize = 8.5.sp,
                 fontWeight = FontWeight.ExtraBold,
                 letterSpacing = 0.sp,
-                lineHeight = 8.sp,
+                lineHeight = 8.5.sp,
             ),
             maxLines = 1,
             modifier = Modifier.semantics { contentDescription = description },
@@ -364,57 +949,75 @@ fun CompactMediaBadges(
     modifier: Modifier = Modifier,
     isHiResLossless: Boolean = false,
     isHiQuality: Boolean = false,
+    glassPageColor: Color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    transparentLikeNowPlaying: Boolean = false,
 ) {
     if (!isExplicit && !isLossless && !isHiQuality) return
-    val explicitDescription = stringResource(R.string.explicit_content)
     val losslessDescription = stringResource(
         if (isHiResLossless) R.string.hi_res_lossless_available else R.string.lossless_available,
     )
     val losslessLabel = stringResource(
         if (isHiResLossless) R.string.hi_res_lossless_badge else R.string.lossless_badge,
     )
+    val badgeContentColor = color
     Row(
         modifier = modifier,
         horizontalArrangement = Arrangement.spacedBy(5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (isExplicit) {
-            Icon(
-                painter = painterResource(R.drawable.ic_explicit_badge),
-                contentDescription = explicitDescription,
-                tint = color.copy(alpha = 0.86f),
-                modifier = Modifier.size(13.dp),
+            ExplicitBadgeSeal(
+                pageColor = glassPageColor,
+                size = 14.5.dp,
+                contentColorOverride = badgeContentColor,
+                transparentLikeNowPlaying = transparentLikeNowPlaying,
             )
         }
-        if (isLossless) {
-            LosslessWordmark(
-                text = losslessLabel,
-                color = color.copy(alpha = 0.86f),
-                iconWidth = 17.5.dp,
-                iconHeight = 11.dp,
-                style = TextStyle(
-                    fontSize = 9.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    letterSpacing = 0.sp,
-                    lineHeight = 9.sp,
-                ),
+        if (isLossless || isHiQuality) {
+            Row(
                 modifier = Modifier
-                    .height(17.dp)
-                    .semantics { contentDescription = losslessDescription },
-            )
-        } else if (isHiQuality) {
-            HiQualityWordmark(
-                color = color.copy(alpha = 0.86f),
-                iconWidth = 17.5.dp,
-                iconHeight = 11.dp,
-                style = TextStyle(
-                    fontSize = 9.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    letterSpacing = 0.sp,
-                    lineHeight = 9.sp,
-                ),
-                modifier = Modifier.height(17.dp),
-            )
+                    .height(14.5.dp)
+                    .clip(RoundedCornerShape(4.5.dp))
+                    .orbBadgeGlassSurface(
+                        glassPageColor,
+                        cornerRadius = 4.5.dp,
+                        contentColorHint = badgeContentColor,
+                        transparentLikeNowPlaying = transparentLikeNowPlaying,
+                    )
+                    .padding(horizontal = 4.5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (isLossless) {
+                    LosslessWordmark(
+                        text = losslessLabel,
+                        color = badgeContentColor,
+                        iconWidth = 15.5.dp,
+                        iconHeight = 10.dp,
+                        style = TextStyle(
+                            fontSize = 8.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            letterSpacing = 0.sp,
+                            lineHeight = 8.5.sp,
+                        ),
+                        modifier = Modifier
+                            .height(14.5.dp)
+                            .semantics { contentDescription = losslessDescription },
+                    )
+                } else {
+                    HiQualityWordmark(
+                        color = badgeContentColor,
+                        iconWidth = 15.5.dp,
+                        iconHeight = 10.dp,
+                        style = TextStyle(
+                            fontSize = 8.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            letterSpacing = 0.sp,
+                            lineHeight = 8.5.sp,
+                        ),
+                        modifier = Modifier.height(14.5.dp),
+                    )
+                }
+            }
         }
     }
 }
@@ -434,6 +1037,19 @@ fun rememberTrackLosslessBadgeState(
 ): LosslessBadgeState {
     val local = !song.localUri.isNullOrBlank() || !song.localPath.isNullOrBlank()
     val context = LocalContext.current
+    // The Home cards are usually online catalogue Songs; they do not carry
+    // localUri even if that same track is downloaded. Observe the saved map so
+    // the badge updates immediately when a new offline rendition is committed.
+    val savedDownloads by Downloads.saved.collectAsStateWithLifecycle()
+    val downloadedFormat = if (song.videoId in savedDownloads) {
+        Downloads.savedQuality(song.videoId)
+    } else null
+    if (downloadedFormat != null) {
+        val offlineTier = downloadedFormat.losslessTier
+        return offlineTier.toBadgeState().copy(
+            isHiQuality = !offlineTier.isLossless && (downloadedFormat.kbps ?: 0) >= 256,
+        )
+    }
 
     if (local) {
         val cachedLocal = LocalAudioQuality.cached(song)
@@ -504,6 +1120,9 @@ fun rememberReleaseLosslessBadgeState(
     if (!isRelease) return LosslessBadgeState()
 
     val badgeCacheRevision by SourceResolver.badgeCacheRevision.collectAsStateWithLifecycle()
+    // A completed download can change a collection's three-track threshold
+    // even if no playback source was resolved during this session.
+    val savedDownloads by Downloads.saved.collectAsStateWithLifecycle()
     val configs by SourceRegistry.configs.collectAsStateWithLifecycle()
     val wifiQuality by AppSettings.audioQualityWifi.collectAsStateWithLifecycle()
     val cellularQuality by AppSettings.audioQualityCellular.collectAsStateWithLifecycle()
@@ -515,7 +1134,7 @@ fun rememberReleaseLosslessBadgeState(
     }
 
     var state by remember(
-        title, subtitle, browseId, songIdentityKey, badgeCacheRevision,
+        title, subtitle, browseId, songIdentityKey, badgeCacheRevision, savedDownloads,
         wifiQuality, cellularQuality, wifiMaximum, losslessEnabled, onWifi, configs,
     ) {
         mutableStateOf(
@@ -530,7 +1149,7 @@ fun rememberReleaseLosslessBadgeState(
         state = SourceResolver.cachedCollectionPlayableBadge(title, subtitle, browseId, knownSongs).toBadgeState()
     }
 
-    LaunchedEffect(badgeCacheRevision) {
+    LaunchedEffect(badgeCacheRevision, savedDownloads) {
         state = SourceResolver.cachedCollectionPlayableBadge(title, subtitle, browseId, knownSongs).toBadgeState()
     }
     return state
@@ -578,9 +1197,26 @@ fun rememberCollectionBadges(
     knownSongs: List<Song> = emptyList(),
     allowProbe: Boolean = true,
 ): CollectionBadgeState {
-    // Explicit and quality share the same cache revision so a card on Home,
-    // Explore or Library repaints immediately after another surface validates it.
+    // A card only has a browseId, unlike the detail screen. Index its real
+    // track membership in the background so offline/playback confirmations
+    // anywhere in a long playlist are visible without opening it first.
+    val context = LocalContext.current
     val badgeCacheRevision by SourceResolver.badgeCacheRevision.collectAsStateWithLifecycle()
+    val savedDownloads by Downloads.saved.collectAsStateWithLifecycle()
+    // Do not key the HTTP work to the ever-changing cache revision. Otherwise
+    // finishing one card's scan cancels the next card's in-flight scan.
+    val hasLosslessEvidence = SourceResolver.hasVerifiedLosslessTracks()
+    val knownTrackIds = remember(knownSongs) { knownSongs.map(Song::videoId) }
+    LaunchedEffect(browseId, knownTrackIds) {
+        if (knownTrackIds.isNotEmpty()) {
+            SourceResolver.extendCollectionTrackIds(browseId, knownTrackIds)
+        }
+    }
+    LaunchedEffect(browseId, type, knownSongs.isEmpty(), hasLosslessEvidence) {
+        if (knownSongs.isEmpty() && hasLosslessEvidence) {
+            CollectionBadgeIndex.ensureIndexed(context, browseId, type)
+        }
+    }
     val verifiedQuality = rememberReleaseLosslessBadgeState(
         title = title,
         subtitle = subtitle,
@@ -651,43 +1287,48 @@ fun ExplicitTitle(
     badgeSpacing: Dp = 4.dp,
     // One universal visual size for the Explicit seal across the whole app.
     // The VectorDrawable itself owns the frame/glyph proportions.
-    badgeSize: Dp = 13.dp,
+    badgeSize: Dp = 14.5.dp,
     // Kept for source compatibility with existing callers. The vector owns
     // the E geometry now, so text size no longer affects the rendered badge.
     badgeFontSize: TextUnit = 9.sp,
-    badgeVerticalOffset: Dp = 1.dp,
+    badgeVerticalOffset: Dp = 0.dp,
+    badgePageColor: Color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    badgeContentColor: Color? = null,
     fadeOverflow: Boolean = false,
     keepBadgeVisible: Boolean = false,
 ) {
+    var titleWidthPx by remember(text, style) { mutableStateOf(0) }
+    var viewportWidthPx by remember(text, style) { mutableStateOf(0) }
+    val needsFade = { viewportWidthPx > 0 && titleWidthPx > viewportWidthPx }
     if (!isExplicit) {
-        var overflowing by remember(text, maxLines) { mutableStateOf(false) }
         val marqueeEnabled = keepBadgeVisible && maxLines == 1
         Text(
             text = text,
             style = style,
             color = color,
             modifier = modifier
+                .onSizeChanged { viewportWidthPx = it.width }
+                .endFade(enabled = { fadeOverflow && marqueeEnabled && needsFade() }, width = 14.dp)
                 .then(
                     if (marqueeEnabled) {
-                        Modifier.basicMarquee(iterations = Int.MAX_VALUE)
+                        Modifier.basicMarquee(
+                            iterations = Int.MAX_VALUE,
+                            initialDelayMillis = 1200,
+                            repeatDelayMillis = 1200,
+                            velocity = 30.dp,
+                        )
                     } else {
                         Modifier
                     },
-                )
-                .endFade(
-                    enabled = fadeOverflow && overflowing,
-                    width = 14.dp,
                 ),
             maxLines = maxLines,
             overflow = if (marqueeEnabled) TextOverflow.Clip else overflow,
             textAlign = textAlign,
-            onTextLayout = { overflowing = it.hasVisualOverflow },
+            onTextLayout = { titleWidthPx = it.size.width },
         )
         return
     }
 
-    val description = stringResource(R.string.explicit_content)
-    var overflowing by remember(text, maxLines) { mutableStateOf(false) }
 
     Row(
         modifier = modifier,
@@ -702,45 +1343,44 @@ fun ExplicitTitle(
             // its normal ellipsis while the badge receives reserved width.
             overflow = if (keepBadgeVisible && maxLines == 1) TextOverflow.Clip else overflow,
             textAlign = textAlign,
+            onTextLayout = { titleWidthPx = it.size.width },
             modifier = Modifier
                 .weight(1f, fill = false)
+                .onSizeChanged { viewportWidthPx = it.width }
+                .endFade(enabled = { keepBadgeVisible && fadeOverflow && maxLines == 1 && needsFade() }, width = 14.dp)
                 .then(
                     if (keepBadgeVisible && maxLines == 1) {
-                        Modifier.basicMarquee(iterations = Int.MAX_VALUE)
+                        Modifier.basicMarquee(
+                            iterations = Int.MAX_VALUE,
+                            initialDelayMillis = 1200,
+                            repeatDelayMillis = 1200,
+                            velocity = 30.dp,
+                        )
                     } else {
                         Modifier
                     },
-                )
-                .endFade(
-                    enabled = keepBadgeVisible && fadeOverflow && overflowing,
-                    width = 14.dp,
                 ),
-            onTextLayout = { overflowing = it.hasVisualOverflow },
         )
         Spacer(Modifier.width(badgeSpacing))
-        // The frame and E are one geometric vector. Its default 13dp size is
-        // shared by Now Playing, MiniPlayer, cards and ordinary list rows.
-        Icon(
-            painter = painterResource(R.drawable.ic_explicit_badge),
-            contentDescription = description,
-            tint = color.copy(alpha = 0.88f),
-            modifier = Modifier
-                .offset(y = badgeVerticalOffset)
-                .size(badgeSize),
+        ExplicitBadgeSeal(
+            pageColor = badgePageColor,
+            size = badgeSize,
+            modifier = Modifier.offset(y = badgeVerticalOffset),
+            contentColorOverride = badgeContentColor,
         )
     }
 }
 
 private fun Modifier.endFade(
-    enabled: Boolean,
+    enabled: () -> Boolean,
     width: Dp,
-): Modifier = if (!enabled) {
-    this
-} else {
-    this
-        .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+): Modifier = this
+        .graphicsLayer {
+            compositingStrategy = if (enabled()) CompositingStrategy.Offscreen else CompositingStrategy.Auto
+        }
         .drawWithContent {
             drawContent()
+            if (!enabled()) return@drawWithContent
             val fadeWidth = width.toPx().coerceAtMost(size.width)
             val fadeStart = (size.width - fadeWidth).coerceAtLeast(0f)
             drawRect(
@@ -754,7 +1394,6 @@ private fun Modifier.endFade(
                 blendMode = BlendMode.DstIn,
             )
         }
-}
 
 /**
  * One track row, used by search, library and detail pages.
@@ -780,7 +1419,7 @@ fun DownloadStatusGlyph(
     val active by Downloads.active.collectAsStateWithLifecycle()
     val saved by Downloads.saved.collectAsStateWithLifecycle()
     val icon = when (active[videoId]) {
-        is DownloadState.Queued, is DownloadState.Running -> Icons.Rounded.Downloading
+        is DownloadState.Queued, is DownloadState.Resolving, is DownloadState.Running -> Icons.Rounded.Downloading
         else -> if (assumeSaved || videoId in saved) Icons.Rounded.DownloadDone else null
     } ?: return
 
@@ -831,9 +1470,19 @@ fun SongRow(
     expressiveContainer: Boolean = false,
     forceDownloadedGlyph: Boolean = false,
     fullExplicitBadge: Boolean = false,
+    /** Material source used by Explicit/quality badges rendered inside this row. */
+    badgePageColor: Color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    /** Keep album/playlist inline seals as clear as Now Playing's controls. */
+    transparentDetailBadges: Boolean = false,
 ) {
-    val swipeStateHolder = remember { mutableStateOf<SwipeToDismissBoxState?>(null) }
     var boxWidth by remember { mutableFloatStateOf(0f) }
+    var swipeOffsetTarget by remember(song.videoId) { mutableFloatStateOf(0f) }
+    var horizontalDragging by remember(song.videoId) { mutableStateOf(false) }
+    val swipeOffsetPx by animateFloatAsState(
+        targetValue = swipeOffsetTarget,
+        animationSpec = if (horizontalDragging) snap() else spring(dampingRatio = 0.82f, stiffness = 480f),
+        label = "songRowSwipeOffset",
+    )
     val localTrack = !song.localUri.isNullOrBlank() || !song.localPath.isNullOrBlank()
     val rowQuality = if (showSearchBadges || localTrack) {
         rememberTrackLosslessBadgeState(
@@ -847,26 +1496,8 @@ fun SongRow(
 
     val hasDirectionalSwipe = onSwipeRight != null || onSwipeLeft != null
     val hasAnySwipe = hasDirectionalSwipe || onSwipeToQueue != null
-    val swipeState = rememberSwipeToDismissBoxState(
-        confirmValueChange = { value ->
-            if (value != SwipeToDismissBoxValue.Settled && hasAnySwipe) {
-                val offset = try { swipeStateHolder.value?.requireOffset() ?: 0f } catch (e: Exception) { 0f }
-                // Only act if the physical drag reached almost half the row,
-                // ignoring short accidental flings. Use the signed pixel offset
-                // rather than Start/End so “right” and “left” remain literal even
-                // if the device is running an RTL locale.
-                if (abs(offset) >= boxWidth * 0.45f) {
-                    when {
-                        offset > 0f -> (onSwipeRight ?: onSwipeToQueue)?.invoke()
-                        offset < 0f -> (onSwipeLeft ?: onSwipeToQueue)?.invoke()
-                    }
-                }
-            }
-            false // never actually dismiss; snap back
-        },
-        positionalThreshold = { distance -> distance * 0.5f },
-    )
-    swipeStateHolder.value = swipeState
+    val swipeContext = LocalContext.current
+    var lastSwipeDirection by remember(song.videoId) { mutableStateOf(0) }
 
     if (!hasAnySwipe) {
         SongRowContent(
@@ -876,20 +1507,70 @@ fun SongRow(
             expressiveContainer = expressiveContainer,
             forceDownloadedGlyph = forceDownloadedGlyph,
             fullExplicitBadge = fullExplicitBadge,
+            badgePageColor = badgePageColor,
+            transparentDetailBadges = transparentDetailBadges,
         )
         return
     }
 
-    SwipeToDismissBox(
-        state = swipeState,
-        modifier = modifier.onSizeChanged { boxWidth = it.width.toFloat() },
-        backgroundContent = { QueueSwipeBackground(swipeState, directionalActions = hasDirectionalSwipe) },
+    Box(
+        modifier = modifier
+            .onSizeChanged { boxWidth = it.width.toFloat() }
+            .pointerInput(song.videoId, hasAnySwipe, boxWidth) {
+                detectOrbHorizontalDragGestures(
+                    horizontalDominance = 1.40f,
+                    onDragStart = {
+                        horizontalDragging = true
+                        lastSwipeDirection = 0
+                    },
+                    onHorizontalDrag = { deltaX ->
+                        if (boxWidth > 0f) {
+                            swipeOffsetTarget = (swipeOffsetTarget + deltaX)
+                                .coerceIn(-boxWidth * 0.62f, boxWidth * 0.62f)
+                            val activation = (boxWidth * 0.08f).coerceAtLeast(1f)
+                            val direction = when {
+                                swipeOffsetTarget >= activation -> 1
+                                swipeOffsetTarget <= -activation -> -1
+                                else -> 0
+                            }
+                            if (direction != 0 && direction != lastSwipeDirection) {
+                                OrbHaptics.perform(swipeContext, OrbHaptics.Kind.NAVIGATION)
+                            }
+                            lastSwipeDirection = direction
+                        }
+                    },
+                    onDragEnd = { totalDeltaX ->
+                        horizontalDragging = false
+                        val reachedAction = boxWidth > 0f && abs(swipeOffsetTarget) >= boxWidth * 0.45f
+                        if (reachedAction) {
+                            if (swipeOffsetTarget > 0f) {
+                                (onSwipeRight ?: onSwipeToQueue)?.invoke()
+                            } else if (swipeOffsetTarget < 0f) {
+                                (onSwipeLeft ?: onSwipeToQueue)?.invoke()
+                            }
+                        }
+                        swipeOffsetTarget = 0f
+                        lastSwipeDirection = 0
+                    },
+                    onDragCancel = {
+                        horizontalDragging = false
+                        swipeOffsetTarget = 0f
+                        lastSwipeDirection = 0
+                    },
+                )
+            },
     ) {
+        QueueSwipeBackground(
+            offsetPx = swipeOffsetPx,
+            directionalActions = hasDirectionalSwipe,
+        )
         SongRowContent(
             song = song,
             onClick = onClick,
             onLongPress = onLongPress,
-            modifier = Modifier.background(rowBackground),
+            modifier = Modifier
+                .graphicsLayer { translationX = swipeOffsetPx }
+                .background(rowBackground),
             trackNumber = trackNumber,
             subtitleColor = subtitleColor,
             showInlineBadges = showInlineBadges,
@@ -897,6 +1578,8 @@ fun SongRow(
             expressiveContainer = expressiveContainer,
             forceDownloadedGlyph = forceDownloadedGlyph,
             fullExplicitBadge = fullExplicitBadge,
+            badgePageColor = badgePageColor,
+            transparentDetailBadges = transparentDetailBadges,
         )
     }
 }
@@ -904,7 +1587,7 @@ fun SongRow(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun QueueSwipeBackground(
-    swipeState: SwipeToDismissBoxState,
+    offsetPx: Float,
     directionalActions: Boolean,
 ) {
     val legacyPlayNext by AppSettings.swipeToPlayNext.collectAsStateWithLifecycle()
@@ -912,13 +1595,12 @@ private fun QueueSwipeBackground(
         modifier = Modifier
             .fillMaxSize()
             .drawWithContent {
-                val offset = try { swipeState.requireOffset() } catch (e: Exception) { 0f }
-                if (offset > 0f) {
-                    clipRect(left = 0f, top = 0f, right = offset, bottom = size.height) {
+                if (offsetPx > 0f) {
+                    clipRect(left = 0f, top = 0f, right = offsetPx.coerceAtMost(size.width), bottom = size.height) {
                         this@drawWithContent.drawContent()
                     }
-                } else if (offset < 0f) {
-                    clipRect(left = size.width + offset, top = 0f, right = size.width, bottom = size.height) {
+                } else if (offsetPx < 0f) {
+                    clipRect(left = (size.width + offsetPx).coerceAtLeast(0f), top = 0f, right = size.width, bottom = size.height) {
                         this@drawWithContent.drawContent()
                     }
                 }
@@ -942,20 +1624,32 @@ private fun QueueSwipeBackground(
 
 @Composable
 private fun QueueSwipeLabel(playNext: Boolean) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    val shape = RoundedCornerShape(15.dp)
+    val contentColor = MaterialTheme.colorScheme.primary
+    Row(
+        modifier = Modifier
+            .widthIn(min = 172.dp)
+            .heightIn(min = 56.dp)
+            .clip(shape)
+            .background(contentColor.copy(alpha = 0.13f))
+            .padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
+    ) {
         Icon(
             if (playNext) Icons.Rounded.PlaylistPlay else Icons.Rounded.PlaylistAdd,
             contentDescription = null,
-            tint = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.size(20.dp),
+            tint = contentColor,
+            modifier = Modifier.size(26.dp),
         )
-        Spacer(Modifier.width(6.dp))
+        Spacer(Modifier.width(10.dp))
         Text(
             text = stringResource(
                 if (playNext) R.string.song_action_play_next else R.string.song_action_add_to_queue,
             ),
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.primary,
+            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+            color = contentColor,
+            maxLines = 1,
         )
     }
 }
@@ -974,6 +1668,8 @@ private fun SongRowContent(
     expressiveContainer: Boolean = false,
     forceDownloadedGlyph: Boolean = false,
     fullExplicitBadge: Boolean = false,
+    badgePageColor: Color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    transparentDetailBadges: Boolean = false,
 ) {
     var launchBounds by remember(song.videoId) { mutableStateOf<Rect?>(null) }
     val launchAwareClick = {
@@ -1041,7 +1737,7 @@ private fun SongRowContent(
                     .background(MaterialTheme.colorScheme.surfaceVariant),
             )
         }
-        Spacer(Modifier.width(14.dp))
+        Spacer(Modifier.width(if (trackNumber != null) 10.dp else 14.dp))
         Column(Modifier.weight(1f)) {
             if (showInlineBadges) {
                 Row(
@@ -1070,6 +1766,8 @@ private fun SongRowContent(
                                     isHiResLossless = quality.isHiResLossless,
                                     isHiQuality = quality.isHiQuality,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    glassPageColor = badgePageColor,
+                                    transparentLikeNowPlaying = transparentDetailBadges,
                                 )
                             } else {
                                 CompactMediaBadges(
@@ -1078,6 +1776,8 @@ private fun SongRowContent(
                                     isHiResLossless = quality.isHiResLossless,
                                     isHiQuality = quality.isHiQuality,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    glassPageColor = badgePageColor,
+                                    transparentLikeNowPlaying = transparentDetailBadges,
                                 )
                             }
                         }
@@ -1091,6 +1791,7 @@ private fun SongRowContent(
                     color = MaterialTheme.colorScheme.onBackground,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
+                    badgePageColor = badgePageColor,
                 )
             }
             Spacer(Modifier.height(2.dp))
@@ -1130,7 +1831,7 @@ private fun SongRowContent(
             ) {
                 Icon(
                     Icons.Rounded.MoreVert,
-                    contentDescription = "More",
+                    contentDescription = stringResource(R.string.collection_actions_more),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(20.dp),
                 )
@@ -1139,32 +1840,74 @@ private fun SongRowContent(
     }
 }
 
-/**
- * Pull-to-refresh for the tab feeds, with the usual circular puck suppressed.
- *
- * The feeds sit under a frosted bar that already occupies the top 96dp, so a
- * puck dropping into that space would be blurred out by the glass it lands
- * behind. The drag feedback is the loader line along the bottom edge of the
- * bar instead — which is why [state] is hoisted: the bar lives beside this
- * content, not inside it, and has to follow the same drag.
+/** Pull to refresh without any content translation or in-list indicator.
+ * The floating OrbRefreshDroplet is drawn above the header by MainActivity.
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun PullToRefresh(
     refreshing: Boolean,
     onRefresh: () -> Unit,
     state: PullToRefreshState,
     modifier: Modifier = Modifier,
+    indicatorTopPadding: Dp = WindowInsets.statusBarsIgnoringVisibility.asPaddingValues().calculateTopPadding() + 64.dp,
+    pageColor: Color = MaterialTheme.colorScheme.background,
+    indicatorColor: Color = MaterialTheme.colorScheme.primary,
     content: @Composable () -> Unit,
 ) {
-    PullToRefreshBox(
-        isRefreshing = refreshing,
-        onRefresh = onRefresh,
-        state = state,
-        modifier = modifier.fillMaxSize(),
-        indicator = {},
-    ) {
-        content()
+    // Detach the gooey blob BEFORE it can become an unnaturally long cone.
+    // At 82% of the stock pull distance, refresh immediately, even if the
+    // finger is still down. Keep suppression until finger-up to
+    // prevent a second callback from the underlying Material3 handler.
+    val latestOnRefresh by rememberUpdatedState(onRefresh)
+    var autoRefreshSent by remember(state) { mutableStateOf(false) }
+    // The Material3 state may reset its fraction to zero WHILE the user's
+    // finger is still down. Track the actual pointer instead, so we cannot
+    // dispatch a second refresh during the same long press.
+    var fingerDown by remember(state) { mutableStateOf(false) }
+    LaunchedEffect(state, refreshing, autoRefreshSent) {
+        snapshotFlow { state.distanceFraction }
+            .collectLatest { fraction ->
+                if (fraction >= 0.82f && !refreshing && !autoRefreshSent) {
+                    autoRefreshSent = true
+                    latestOnRefresh()
+                }
+            }
+    }
+    LaunchedEffect(state, refreshing, autoRefreshSent) {
+        if (autoRefreshSent && !refreshing) {
+            // Wait for BOTH the real touch release and an idle pull state.
+            snapshotFlow { !fingerDown && state.distanceFraction <= 0.04f }
+                .first { it }
+            delay(320L)
+            autoRefreshSent = false
+        }
+    }
+    // No page translations, stretch overscroll or in-list progress indicator.
+    CompositionLocalProvider(LocalOverscrollConfiguration provides null) {
+        PullToRefreshBox(
+            isRefreshing = refreshing,
+            onRefresh = { if (!autoRefreshSent) latestOnRefresh() },
+            state = state,
+            modifier = modifier
+                .fillMaxSize()
+                .background(pageColor)
+                .pointerInput(state) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                        fingerDown = true
+                        var isPressed = true
+                        while (isPressed) {
+                            val event = awaitPointerEvent(PointerEventPass.Final)
+                            isPressed = event.changes.any { it.pressed }
+                        }
+                        fingerDown = false
+                    }
+                },
+            indicator = {},
+        ) {
+            Box(Modifier.fillMaxSize()) { content() }
+        }
     }
 }
 

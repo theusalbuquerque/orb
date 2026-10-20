@@ -1,7 +1,7 @@
 #include "resampler.h"
 #include <algorithm>
 #include <cmath>
-namespace bitchord::smart {
+namespace orb::smart {
 namespace { constexpr int kHalfTaps = 16; constexpr double kPi = 3.14159265358979323846;
 inline double sinc(double x){ if(std::abs(x)<1e-12) return 1.0; const double p=kPi*x; return std::sin(p)/p; }
 inline double hann(double x){ x=std::abs(x); if(x>=kHalfTaps) return 0.0; return 0.5+0.5*std::cos(kPi*x/kHalfTaps); }

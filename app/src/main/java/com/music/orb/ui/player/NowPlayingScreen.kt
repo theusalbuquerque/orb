@@ -1,9 +1,12 @@
 package com.music.orb.ui.player
 
+import com.music.orb.ui.components.PlayerTransportVisual
+import com.music.orb.ui.components.PlayerIdentityAppearance
+import com.music.orb.ui.components.PlayerPlayPauseShape
+
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
-import android.content.res.Configuration
 import android.os.Build
 import android.view.WindowManager
 import android.widget.Toast
@@ -22,12 +25,15 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.text.ClickableText
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -64,6 +70,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DragHandle
+import androidx.compose.material.icons.rounded.DevicesOther
 import androidx.compose.material.icons.rounded.FastForward
 import androidx.compose.material.icons.rounded.FastRewind
 import androidx.compose.material.icons.rounded.MoreHoriz
@@ -82,6 +89,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableLongState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -97,9 +105,11 @@ import kotlinx.coroutines.flow.first
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.CompositingStrategy
@@ -115,6 +125,9 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
@@ -158,8 +171,11 @@ import com.music.orb.ui.components.LosslessWordmark
 import com.music.orb.ui.components.HiQualityWordmark
 import com.music.orb.ui.components.LosslessBadgeState
 import com.music.orb.ui.components.rememberTrackLosslessBadgeState
+import com.music.orb.ui.components.orbBadgeGlassSurface
+import com.music.orb.ui.components.OrbOutputSheet
+import com.music.orb.ui.components.TimedExperimentalNotice
 import com.music.orb.ui.theme.rememberArtworkPalette
-import com.music.orb.ui.icons.BitChordIcons
+import com.music.orb.ui.icons.OrbIcons
 import com.music.orb.ui.flavor.OrbFlavorUi
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.music.orb.data.NerdStats
@@ -176,12 +192,66 @@ import com.music.orb.data.settings.TransitionWindow
 import com.music.orb.data.model.ArtistLink
 import com.music.orb.data.model.LikeStatus
 import com.music.orb.data.model.Song
+import com.music.orb.data.model.ROW_ART_PX
 import com.music.orb.data.model.artworkAt
 import com.music.orb.playback.BACK_RESTARTS_AFTER_MS
 import com.music.orb.playback.autoplaySectionStart
 import java.util.concurrent.TimeUnit
 
-private const val ART_PX = 1200
+// Share the high-resolution URL/cache with detail headers. The 160px row
+// thumbnail is displayed first, so Now Playing never waits on a 1200px fetch.
+private const val ART_PX = 720
+/**
+ * Reuses an image that was already decoded for a list row while the sharper
+ * header-size image is loading. Only the upper layer replaces the thumbnail;
+ * neither layer changes the artwork transition/geometry supplied by caller.
+ */
+@Composable
+private fun FastNowPlayingCover(
+    song: Song,
+    modifier: Modifier,
+    contentScale: ContentScale = ContentScale.Fit,
+    alignment: Alignment = Alignment.Center,
+    onReady: () -> Unit,
+    onFailure: () -> Unit,
+) {
+    val context = LocalContext.current
+    var sharpReady by remember(song.videoId, song.thumbnailUrl) { mutableStateOf(false) }
+    Box(modifier = modifier) {
+        if (!sharpReady) {
+            AsyncImage(
+                model = ImageRequest.Builder(context)
+                    .data(song.artworkAt(ROW_ART_PX))
+                    .size(ROW_ART_PX)
+                    .build(),
+                contentDescription = null,
+                contentScale = contentScale,
+                alignment = alignment,
+                onState = { if (it is AsyncImagePainter.State.Success) onReady() },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+        AsyncImage(
+            model = ImageRequest.Builder(context)
+                .data(song.artworkAt(ART_PX))
+                .size(ART_PX)
+                .build(),
+            contentDescription = null,
+            contentScale = contentScale,
+            alignment = alignment,
+            onState = { state ->
+                if (state is AsyncImagePainter.State.Success) {
+                    sharpReady = true
+                    onReady()
+                } else if (state is AsyncImagePainter.State.Error) {
+                    onFailure()
+                }
+            },
+            modifier = Modifier.fillMaxSize(),
+        )
+    }
+}
+
 private const val ALBUM_SETTLE_MS = 700L
 private const val SEEK_SETTLE_TOLERANCE_MS = 1_500L
 private const val SEEK_SETTLE_TIMEOUT_MS = 4_000L
@@ -202,11 +272,11 @@ private val HERO_COLOR_FLOW_OVERLAP = 76.dp
 // artwork/surface split as a vertical seam. Keep the physical right-edge
 // colours alive farther into the controls surface and overlap farther back
 // into the cover before converging to one solid colour.
-private val LANDSCAPE_HERO_COLOR_FLOW_WIDTH = 360.dp
-private val LANDSCAPE_HERO_COLOR_FLOW_OVERLAP = 156.dp
-private val LANDSCAPE_HERO_MERGE_BAND = 480.dp
-private val LANDSCAPE_HERO_MERGE_OVERLAP = 240.dp
-private val LANDSCAPE_HERO_MERGE_BLUR = 60.dp
+private val LANDSCAPE_HERO_COLOR_FLOW_WIDTH = 460.dp
+private val LANDSCAPE_HERO_COLOR_FLOW_OVERLAP = 190.dp
+private val LANDSCAPE_HERO_MERGE_BAND = 520.dp
+private val LANDSCAPE_HERO_MERGE_OVERLAP = 260.dp
+private val LANDSCAPE_HERO_MERGE_BLUR = 68.dp
 // Portrait tablet keeps the same overlap values as the established vertical
 // treatment; only landscape uses the expanded lateral runway above.
 private val TABLET_HERO_COLOR_FLOW_OVERLAP = HERO_COLOR_FLOW_OVERLAP
@@ -215,7 +285,6 @@ private val PLAYER_GUTTER = 30.dp
 private val PLAYER_MAX_WIDTH = 560.dp
 private val TABLET_PLAYER_MAX_WIDTH = 640.dp
 private val TABLET_ARTWORK_MAX = 760.dp
-private val TABLET_ARTWORK_MIN = 300.dp
 // Large-screen artwork is allowed to meet the window edge. The system bars
 // already render edge-to-edge over the player, so reserving a second visual
 // gutter made the cover look artificially cropped on tablets/foldables.
@@ -223,7 +292,6 @@ private val TABLET_ARTWORK_START = 0.dp
 private val TABLET_CONTROLS_GAP = 32.dp
 private val TABLET_CONTROLS_MIN_WIDTH = 320.dp
 private val TABLET_VERTICAL_SAFE = 0.dp
-private const val TABLET_TWO_PANE_MIN_WIDTH_DP = 800
 
 /**
  * Applies display-only behavior to the window that actually hosts Now Playing.
@@ -241,49 +309,38 @@ private fun NowPlayingWindowBehavior(
 ) {
     val view = LocalView.current
 
-    DisposableEffect(
-        view,
-        hideStatusBar,
-        keepScreenOn,
-        darkStatusIcons,
-        darkNavigationIcons,
-    ) {
+    // Visibility must not be re-applied when artwork colors or lyric state change:
+    // that used to briefly show/hide the system bar and shift underlying UI.
+    DisposableEffect(view, hideStatusBar) {
         val window = (view.parent as? DialogWindowProvider)?.window
             ?: view.context.findActivity()?.window
-
-        val insetsController = window?.let {
-            WindowInsetsControllerCompat(it, it.decorView)
-        }
-
-        // Now Playing is edge-to-edge over the source artwork. A white cover
-        // needs dark status icons; dark artwork needs light ones. Navigation
-        // icons follow the generated player surface at the bottom.
-        insetsController?.isAppearanceLightStatusBars = darkStatusIcons
-        insetsController?.isAppearanceLightNavigationBars = darkNavigationIcons
-
+        val controller = window?.let { WindowInsetsControllerCompat(it, it.decorView) }
         if (hideStatusBar) {
-            insetsController?.hide(WindowInsetsCompat.Type.statusBars())
-            // The first edge swipe should reveal the status bar and leave it
-            // visible. The following swipe can then be handled by the
-            // ModalBottomSheet to lower Now Playing. Transient bars can cause
-            // the same gesture to compete with the sheet dismissal.
-            insetsController?.systemBarsBehavior =
+            controller?.hide(WindowInsetsCompat.Type.statusBars())
+            controller?.systemBarsBehavior =
                 WindowInsetsControllerCompat.BEHAVIOR_SHOW_BARS_BY_SWIPE
         } else {
-            insetsController?.show(WindowInsetsCompat.Type.statusBars())
+            controller?.show(WindowInsetsCompat.Type.statusBars())
         }
+        onDispose { controller?.show(WindowInsetsCompat.Type.statusBars()) }
+    }
 
-        if (keepScreenOn) {
-            window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        } else {
-            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        }
+    // Recoloring system icons does not recreate the visibility effect or toggle screen wakefulness.
+    DisposableEffect(view, darkStatusIcons, darkNavigationIcons) {
+        val window = (view.parent as? DialogWindowProvider)?.window
+            ?: view.context.findActivity()?.window
+        val controller = window?.let { WindowInsetsControllerCompat(it, it.decorView) }
+        controller?.isAppearanceLightStatusBars = darkStatusIcons
+        controller?.isAppearanceLightNavigationBars = darkNavigationIcons
+        onDispose { }
+    }
 
-        onDispose {
-            // Both preferences are scoped to the full Now Playing window only.
-            insetsController?.show(WindowInsetsCompat.Type.statusBars())
-            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        }
+    DisposableEffect(view, keepScreenOn) {
+        val window = (view.parent as? DialogWindowProvider)?.window
+            ?: view.context.findActivity()?.window
+        if (keepScreenOn) window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose { window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
     }
 }
 
@@ -296,8 +353,10 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
 @Composable
 fun fullBleedArtworkAvailable(): Boolean {
     val configuration = LocalConfiguration.current
-    val isTablet = configuration.smallestScreenWidthDp >= 600
-    return isTablet ||
+    val wide = hasWideNowPlayingViewport(
+        configuration.screenWidthDp.toFloat(), configuration.screenHeightDp.toFloat())
+    val isTabletLandscape = configuration.smallestScreenWidthDp >= 600 && wide
+    return isTabletLandscape ||
         configuration.screenWidthDp.dp <= PLAYER_MAX_WIDTH + PLAYER_GUTTER * 2
 }
 
@@ -509,54 +568,195 @@ private val GLOW_ROOM = 10.dp
 private const val LYRICS_UNAVAILABLE_HOLD_MS = 5_000L
 private const val LYRICS_UNAVAILABLE_FADE_MS = 900
 
+/**
+ * Keeps shared Now Playing elements in screen coordinates while the modal sheet
+ * itself is moving. The parent sheet contributes [sheetOffsetPx] to Y, so the
+ * child cancels that displacement and follows one continuous trajectory toward
+ * the corresponding MiniPlayer element.
+ */
+private fun stagedMotionProgress(progress: Float, start: Float, end: Float): Float {
+    if (end <= start) return if (progress >= end) 1f else 0f
+    val raw = ((progress - start) / (end - start)).coerceIn(0f, 1f)
+    return raw * raw * (3f - 2f * raw)
+}
+
+private fun Modifier.sharedPlayerCollapseTransform(
+    sourceBounds: Rect?,
+    targetBounds: Rect?,
+    progress: Float,
+    sheetOffsetPx: Float,
+): Modifier {
+    if (sourceBounds == null || targetBounds == null) return this
+    val raw = ((progress.coerceIn(0f, 1f) - 0.015f) / 0.965f).coerceIn(0f, 1f)
+    val eased = raw * raw * (3f - 2f * raw)
+    val sourceWidth = sourceBounds.width.coerceAtLeast(1f)
+    val sourceHeight = sourceBounds.height.coerceAtLeast(1f)
+    val targetScaleX = targetBounds.width.coerceAtLeast(1f) / sourceWidth
+    val targetScaleY = targetBounds.height.coerceAtLeast(1f) / sourceHeight
+    val sourceCenterX = sourceBounds.left + sourceBounds.width / 2f
+    val sourceCenterY = sourceBounds.top + sourceBounds.height / 2f
+    val targetCenterX = targetBounds.left + targetBounds.width / 2f
+    val targetCenterY = targetBounds.top + targetBounds.height / 2f
+    val handoffAlpha = if (raw < 0.91f) {
+        1f
+    } else {
+        (1f - (raw - 0.91f) / 0.09f).coerceIn(0f, 1f)
+    }
+
+    return graphicsLayer {
+        transformOrigin = TransformOrigin.Center
+        scaleX = 1f + (targetScaleX - 1f) * eased
+        scaleY = 1f + (targetScaleY - 1f) * eased
+        translationX = (targetCenterX - sourceCenterX) * eased
+        // The ModalBottomSheet has already moved the entire player down by this
+        // amount. Cancel it so this element can independently converge on its
+        // fixed MiniPlayer destination.
+        translationY = (targetCenterY - sourceCenterY) * eased - sheetOffsetPx
+        alpha = handoffAlpha
+    }
+}
+
+// Consolidating the Now Playing inputs prevents Compose from generating a
+// massive method signature with dozens of changed/default bitmasks.
+// The player behavior and presentation remain in NowPlayingScreen below.
+internal class NowPlayingArguments(
+    val albumSequential: Boolean = false,
+    val showTransportControls: Boolean = true,
+    val controlledByRoomTitle: String? = null,
+    val roomQueue: Boolean = false,
+    val song: Song,
+    val transitionFromSong: Song? = null,
+    val trackTransitionProgress: Float = 1f,
+    val isPlaying: Boolean,
+    val isLoading: Boolean,
+    val positionMs: Long,
+    val durationMs: Long,
+    val queue: List<Song>,
+    val queueIndex: Int,
+    val hasPrevious: Boolean,
+    val hasNext: Boolean,
+    val repeatMode: Int,
+    val shuffleEnabled: Boolean,
+    val autoplayEnabled: Boolean,
+    val signedIn: Boolean,
+    val likeStatus: LikeStatus,
+    val onToggleLike: () -> Unit,
+    val onPlayPause: () -> Unit,
+    val onNext: () -> Unit,
+    val onPrevious: () -> Unit,
+    val onSeek: (Long) -> Unit,
+    val onSeekFraction: (Float) -> Unit,
+    val onToggleShuffle: () -> Unit,
+    val onCycleRepeat: () -> Unit,
+    val onToggleAutoplay: () -> Unit,
+    val onJumpTo: (Int) -> Unit,
+    val onRemoveFromQueue: (Int) -> Unit,
+    val onMoveInQueue: (Int, Int) -> Unit,
+    val onClearQueue: () -> Unit,
+    val onOpenMenu: () -> Unit,
+    val onOpenAlbum: (String) -> Unit,
+    val onOpenArtist: (String?, String) -> Unit,
+    val lyrics: List<LyricLine>?,
+    val lyricsSource: LyricsSource?,
+    val lyricsUnavailable: Boolean,
+    val lyricsOpen: Boolean,
+    val onLyricsOpenChange: (Boolean) -> Unit,
+    val queueOpen: Boolean,
+    val onQueueOpenChange: (Boolean) -> Unit,
+    val onBackFromNowPlaying: () -> Unit,
+    val transportEnabled: Boolean = true,
+    val launchProgress: Float = 1f,
+    val collapseProgress: Float = 0f,
+    val collapseSheetOffsetPx: Float = 0f,
+    val miniArtworkBounds: Rect? = null,
+    val miniPlayPauseBounds: Rect? = null,
+    val miniNextBounds: Rect? = null,
+    val onArtworkBoundsChanged: (Rect) -> Unit = {},
+    val onArtworkReadyChanged: (Boolean) -> Unit = {},
+    val onIdentityBoundsChanged: (Rect) -> Unit = {},
+    val onIdentityAppearanceChanged: (PlayerIdentityAppearance) -> Unit = {},
+    val onPlayPauseBoundsChanged: (Rect) -> Unit = {},
+    val onNextBoundsChanged: (Rect) -> Unit = {},
+    val modifier: Modifier = Modifier,
+)
+
 @Composable
-fun NowPlayingScreen(
-    albumSequential: Boolean = false,
-    song: Song,
-    transitionFromSong: Song? = null,
-    trackTransitionProgress: Float = 1f,
-    isPlaying: Boolean,
-    isLoading: Boolean,
-    positionMs: Long,
-    durationMs: Long,
-    queue: List<Song>,
-    queueIndex: Int,
-    hasPrevious: Boolean,
-    hasNext: Boolean,
-    repeatMode: Int,
-    shuffleEnabled: Boolean,
-    autoplayEnabled: Boolean,
-    signedIn: Boolean,
-    likeStatus: LikeStatus,
-    onToggleLike: () -> Unit,
-    onPlayPause: () -> Unit,
-    onNext: () -> Unit,
-    onPrevious: () -> Unit,
-    onSeek: (Long) -> Unit,
-    onSeekFraction: (Float) -> Unit,
-    onToggleShuffle: () -> Unit,
-    onCycleRepeat: () -> Unit,
-    onToggleAutoplay: () -> Unit,
-    onJumpTo: (Int) -> Unit,
-    onRemoveFromQueue: (Int) -> Unit,
-    onMoveInQueue: (Int, Int) -> Unit,
-    onClearQueue: () -> Unit,
-    onOpenMenu: () -> Unit,
-    onOpenAlbum: (String) -> Unit,
-    onOpenArtist: (String?, String) -> Unit,
-    lyrics: List<LyricLine>?,
-    lyricsSource: LyricsSource?,
-    lyricsUnavailable: Boolean,
-    lyricsOpen: Boolean,
-    onLyricsOpenChange: (Boolean) -> Unit,
-    queueOpen: Boolean,
-    onQueueOpenChange: (Boolean) -> Unit,
-    onBackFromNowPlaying: () -> Unit,
-    transportEnabled: Boolean = true,
-    modifier: Modifier = Modifier,
-) {
+internal fun NowPlayingScreen(args: NowPlayingArguments) {
+    val albumSequential = args.albumSequential
+    val showTransportControls = args.showTransportControls
+    val controlledByRoomTitle = args.controlledByRoomTitle
+    val roomQueue = args.roomQueue
+    val song = args.song
+    val transitionFromSong = args.transitionFromSong
+    val trackTransitionProgress = args.trackTransitionProgress
+    val isPlaying = args.isPlaying
+    val isLoading = args.isLoading
+    val positionMs = args.positionMs
+    val durationMs = args.durationMs
+    val queue = args.queue
+    val queueIndex = args.queueIndex
+    val hasPrevious = args.hasPrevious
+    val hasNext = args.hasNext
+    val repeatMode = args.repeatMode
+    val shuffleEnabled = args.shuffleEnabled
+    val autoplayEnabled = args.autoplayEnabled
+    val signedIn = args.signedIn
+    val likeStatus = args.likeStatus
+    val onToggleLike = args.onToggleLike
+    val onPlayPause = args.onPlayPause
+    val onNext = args.onNext
+    val onPrevious = args.onPrevious
+    val onSeek = args.onSeek
+    val onSeekFraction = args.onSeekFraction
+    val onToggleShuffle = args.onToggleShuffle
+    val onCycleRepeat = args.onCycleRepeat
+    val onToggleAutoplay = args.onToggleAutoplay
+    val onJumpTo = args.onJumpTo
+    val onRemoveFromQueue = args.onRemoveFromQueue
+    val onMoveInQueue = args.onMoveInQueue
+    val onClearQueue = args.onClearQueue
+    val onOpenMenu = args.onOpenMenu
+    val onOpenAlbum = args.onOpenAlbum
+    val onOpenArtist = args.onOpenArtist
+    val lyrics = args.lyrics
+    val lyricsSource = args.lyricsSource
+    val lyricsUnavailable = args.lyricsUnavailable
+    val lyricsOpen = args.lyricsOpen
+    val onLyricsOpenChange = args.onLyricsOpenChange
+    val queueOpen = args.queueOpen
+    val onQueueOpenChange = args.onQueueOpenChange
+    val onBackFromNowPlaying = args.onBackFromNowPlaying
+    val transportEnabled = args.transportEnabled
+    val launchProgress = args.launchProgress
+    val collapseProgress = args.collapseProgress
+    val collapseSheetOffsetPx = args.collapseSheetOffsetPx
+    val miniArtworkBounds = args.miniArtworkBounds
+    val miniPlayPauseBounds = args.miniPlayPauseBounds
+    val miniNextBounds = args.miniNextBounds
+    val onArtworkBoundsChanged = args.onArtworkBoundsChanged
+    val onArtworkReadyChanged = args.onArtworkReadyChanged
+    val onIdentityBoundsChanged = args.onIdentityBoundsChanged
+    val onIdentityAppearanceChanged = args.onIdentityAppearanceChanged
+    val onPlayPauseBoundsChanged = args.onPlayPauseBoundsChanged
+    val onNextBoundsChanged = args.onNextBoundsChanged
+    val modifier = args.modifier
+
     val context = LocalContext.current
     val translationScope = rememberCoroutineScope()
+    val automixEnabled by AppSettings.automixEnabled.collectAsStateWithLifecycle()
+    var outputSheetOpen by remember { mutableStateOf(false) }
+    var likeBurstNonce by remember { mutableIntStateOf(0) }
+    var automixNoticeOpen by remember { mutableStateOf(false) }
+
+    if (automixNoticeOpen) {
+        TimedExperimentalNotice(
+            title = stringResource(R.string.automix_experimental_title),
+            message = stringResource(R.string.automix_experimental_message),
+            confirmLabel = stringResource(R.string.experimental_feature_confirm),
+            onConfirmed = { automixNoticeOpen = false },
+            unlockAfterMs = 6_000L,
+        )
+    }
     val translationTarget = remember(context.resources.configuration) {
         context.resources.configuration.locales[0]?.toLanguageTag().orEmpty()
     }
@@ -674,29 +874,47 @@ fun NowPlayingScreen(
     }
     val visualConfiguration = LocalConfiguration.current
     val density = LocalDensity.current
+    val launchP = launchProgress.coerceIn(0f, 1f)
+    // One continuous opening timeline. The surface starts becoming present
+    // immediately, while the player content follows with a short, smooth
+    // translation. Shared artwork/transport controls land last under the bridge.
+    val launchSurfaceAlpha = stagedMotionProgress(launchP, 0.18f, 0.82f)
+    val launchContentAlpha = stagedMotionProgress(launchP, 0.22f, 0.90f)
+    // Prepare the real artwork under the bridge before the latter fades out.
+    val launchArtworkLandingAlpha = stagedMotionProgress(launchP, 0.88f, 0.94f)
+    val launchIdentityLandingAlpha = if (launchP >= 1f) 1f else 0f
+    val launchSharedControlAlpha = if (launchP >= 1f) 1f else 0f
+    // Once a downward collapse starts, a clipping-free overlay owns the shared
+    // artwork/identity/transport geometry. Fade the in-sheet copies over the
+    // first few percent so they never get sliced by the sheet boundary.
+    val collapseSharedSourceAlpha = 1f - stagedMotionProgress(collapseProgress, 0f, 0.06f)
+    val collapseContentAlpha = 1f - stagedMotionProgress(collapseProgress, 0.06f, 0.72f)
+    val sharedControlSourceAlpha = launchSharedControlAlpha * collapseSharedSourceAlpha
     var playerViewportSize by remember { mutableStateOf(IntSize.Zero) }
-    val configurationIsLandscape =
-        visualConfiguration.orientation == Configuration.ORIENTATION_LANDSCAPE
-    val measuredViewportMatchesOrientation =
-        playerViewportSize.width > 0 && playerViewportSize.height > 0 &&
-            ((playerViewportSize.width >= playerViewportSize.height) == configurationIsLandscape)
-    // During the rotation frame onSizeChanged may still contain the old
-    // orientation. Fall back to the fresh Configuration for that single frame
-    // so the spring never launches toward a stale portrait/landscape size.
-    val viewportWidth = if (measuredViewportMatchesOrientation) {
+    val hasMeasuredViewport = playerViewportSize.width > 0 && playerViewportSize.height > 0
+    // Compose's actual laid-out window is authoritative. In particular,
+    // Android's orientation and screenWidthDp can remain PORTRAIT while an
+    // unlocked/letterboxed window has already become wide. Previously that
+    // disagreement forced the single-column UI onto a landscape device.
+    // This calculation is entirely independent from YouTube Music login.
+    val viewportWidth = if (hasMeasuredViewport) {
         with(density) { playerViewportSize.width.toDp() }
     } else {
         visualConfiguration.screenWidthDp.dp
     }
-    val viewportHeight = if (measuredViewportMatchesOrientation) {
+    val viewportHeight = if (hasMeasuredViewport) {
         with(density) { playerViewportSize.height.toDp() }
     } else {
         visualConfiguration.screenHeightDp.dp
     }
 
-    val isTablet = visualConfiguration.smallestScreenWidthDp >= 600
-    val isPhoneLandscape =
-        !isTablet && visualConfiguration.orientation == Configuration.ORIENTATION_LANDSCAPE
+    // The measured geometry is authoritative, rather than a possibly stale
+    // Android orientation flag. Portrait tablets deliberately use phone layout.
+    val isLandscapeViewport =
+        hasWideNowPlayingViewport(viewportWidth.value, viewportHeight.value)
+    val isTabletDevice = visualConfiguration.smallestScreenWidthDp >= 600
+    val isTablet = isTabletDevice && isLandscapeViewport
+    val isPhoneLandscape = !isTabletDevice && isLandscapeViewport
     // Expanded lyrics/queue on a phone need a denser, reading-first layout.
     // This state exists only inside Now Playing; the rest of the phone UI stays portrait.
     val mobileLandscapeFocusRequested = isPhoneLandscape && (lyricsOpen || queueOpen)
@@ -708,9 +926,11 @@ fun NowPlayingScreen(
     // A rotated phone intentionally reuses the exact same two-pane player
     // geometry as a landscape tablet. Phone landscape is only reachable while
     // Now Playing owns rotation, so this cannot affect the rest of the app.
-    val isTabletLandscape =
-        visualConfiguration.orientation == Configuration.ORIENTATION_LANDSCAPE &&
-            (isPhoneLandscape || visualConfiguration.screenWidthDp >= TABLET_TWO_PANE_MIN_WIDTH_DP)
+    // The two-pane composition is enabled for every sufficiently wide real
+    // viewport, including rotated phones, tablets and resizable windows. Do
+    // not gate the player layout on a YouTube Music session or a configuration
+    // orientation flag, which can be stale on some OEM devices.
+    val isTabletLandscape = isLandscapeViewport
     val isTabletPortrait = isTablet && !isTabletLandscape
     val usesWidePlayerGeometry = isTablet || isPhoneLandscape
 
@@ -718,18 +938,24 @@ fun NowPlayingScreen(
     // the remaining width can still host the controls. The old 54%-of-width
     // cap is what left the visible empty strip under the artwork.
     val landscapeArtworkTarget = if (isTabletLandscape) {
-        val maxArtworkLeavingControls = (
-            viewportWidth - TABLET_ARTWORK_START - TABLET_CONTROLS_GAP - 20.dp -
-                TABLET_CONTROLS_MIN_WIDTH
-            ).coerceAtLeast(if (isPhoneLandscape) 180.dp else TABLET_ARTWORK_MIN)
-        val fullHeightArtwork = minOf(
-            (viewportHeight - TABLET_VERTICAL_SAFE).coerceAtLeast(180.dp),
-            maxArtworkLeavingControls,
+        // Reserve the actual right-side gutter and a usable controls column
+        // *before* calculating cover size. Never force a minimum album-art
+        // width that steals space from playback controls in multi-window or
+        // on smaller landscape tablets.
+        val controlsMinWidth = minOf(
+            TABLET_CONTROLS_MIN_WIDTH,
+            (viewportWidth * 0.44f).coerceAtLeast(180.dp),
         )
-        // Keep the landscape artwork physically unchanged when Lyrics/Queue
-        // enters Focus Pane. Space is recovered entirely from the controls
-        // surface; the cover never shrinks, recenters or jumps on expansion.
-        fullHeightArtwork.coerceAtLeast(if (isPhoneLandscape) 180.dp else TABLET_ARTWORK_MIN)
+        val artworkWidthBudget = (
+            viewportWidth - TABLET_ARTWORK_START - TABLET_CONTROLS_GAP -
+                28.dp - controlsMinWidth
+            ).coerceAtLeast(0.dp)
+        // Keep the same large full-height cover whenever enough room exists,
+        // while the right pane always retains its reserved width.
+        minOf(
+            (viewportHeight - TABLET_VERTICAL_SAFE).coerceAtLeast(0.dp),
+            artworkWidthBudget,
+        )
     } else {
         0.dp
     }
@@ -743,14 +969,20 @@ fun NowPlayingScreen(
     } else {
         portraitArtworkTarget
     }
-    val tabletArtworkAnimated by animateDpAsState(
-        targetValue = tabletArtworkTarget,
-        animationSpec = spring(
-            dampingRatio = 0.86f,
-            stiffness = Spring.StiffnessLow,
-        ),
-        label = "tablet-now-playing-artwork-geometry",
-    )
+    // Orientation switches must not animate the artwork from a portrait-width
+    // square into a narrow landscape pane: that briefly pushes the controls
+    // off-screen. Restart the spring for each geometry mode instead.
+    val tabletArtworkAnimated = key(isTabletLandscape) {
+        val animated by animateDpAsState(
+            targetValue = tabletArtworkTarget,
+            animationSpec = spring(
+                dampingRatio = 0.86f,
+                stiffness = Spring.StiffnessLow,
+            ),
+            label = "tablet-now-playing-artwork-geometry",
+        )
+        animated
+    }
     val tabletArtworkSize = if (isTabletLandscape) tabletArtworkAnimated else 0.dp
     val tabletPortraitArtworkSize = if (isTabletPortrait) tabletArtworkAnimated else 0.dp
     // Focus Pane must not move the cover either: keep the exact same top-left
@@ -943,18 +1175,45 @@ fun NowPlayingScreen(
     val playerContentColor = bestForegroundForArtworkSurface(playerBottomEdgeColor)
     val outgoingSurfaceContentColor = bestForegroundForArtworkSurface(outgoingBottomEdgeField.solidColor)
     val incomingSurfaceContentColor = bestForegroundForArtworkSurface(playerBottomEdgeField.solidColor)
-    fun automixAreaContentColor(start: Float, end: Float): Color {
-        if (!isAutomixArtworkTransition || visualFromSong == null) return playerContentColor
+    fun automixAreaProgress(start: Float, end: Float): Float {
+        if (!isAutomixArtworkTransition || visualFromSong == null) return 1f
         val raw = ((visualSurfaceProgress - start) / (end - start).coerceAtLeast(0.001f))
             .coerceIn(0f, 1f)
-        val eased = raw * raw * (3f - 2f * raw)
+        return raw * raw * (3f - 2f * raw)
+    }
+    fun automixAreaContentColor(start: Float, end: Float): Color {
+        if (!isAutomixArtworkTransition || visualFromSong == null) return playerContentColor
+        val eased = automixAreaProgress(start, end)
         return lerpColor(outgoingSurfaceContentColor, incomingSurfaceContentColor, eased)
+    }
+    fun automixAreaSurfaceColor(start: Float, end: Float): Color {
+        if (!isAutomixArtworkTransition || visualFromSong == null) return playerBottomEdgeColor
+        val eased = automixAreaProgress(start, end)
+        return lerpColor(
+            outgoingBottomEdgeField.solidColor,
+            playerBottomEdgeField.solidColor,
+            eased,
+        )
     }
     // Text/icons follow the travelling colour frontier in their own physical
     // bands instead of all flipping after the transition has completed.
     val titleContentColor = automixAreaContentColor(0.00f, 0.30f)
+    val titleSurfaceColor = automixAreaSurfaceColor(0.00f, 0.30f)
     val sliderContentColor = automixAreaContentColor(0.28f, 0.56f)
     val controlsContentColor = automixAreaContentColor(0.52f, 0.98f)
+    val controlsSurfaceColor = automixAreaSurfaceColor(0.52f, 0.98f)
+    // The lower Now Playing canvas is already the solid continuation of the
+    // artwork's bottom edge. Controls therefore use transparent glass over that
+    // canvas instead of introducing a second coloured material. Their glyphs
+    // follow the exact same adaptive foreground as the title/text on this area.
+    val controlsButtonContentColor = controlsContentColor
+
+    if (outputSheetOpen) {
+        OrbOutputSheet(
+            pageColor = controlsSurfaceColor,
+            onDismiss = { outputSheetOpen = false },
+        )
+    }
 
     val playerPalette = sourceArtworkPalette.copy(
         background = playerBottomEdgeColor,
@@ -1138,6 +1397,7 @@ fun NowPlayingScreen(
     // no longer decides whether a wide layout gets artwork at all.
     val heroVisualEnabled = heroMode || isTabletLandscape
     var artLoaded by remember(song.videoId) { mutableStateOf(false) }
+    LaunchedEffect(artLoaded) { onArtworkReadyChanged(artLoaded) }
     var heroSettled by remember { mutableStateOf(false) }
     LaunchedEffect(artLoaded) { if (artLoaded) heroSettled = true }
     // Animated artwork is controlled only by the dedicated setting.
@@ -1178,6 +1438,8 @@ fun NowPlayingScreen(
     val heroHaze = remember { HazeState() }
     val reduceDynamicBlur by AppSettings.reduceDynamicBlur.collectAsStateWithLifecycle()
 
+    var collapseArtworkSourceBounds by remember(song.videoId) { mutableStateOf<Rect?>(null) }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -1189,6 +1451,7 @@ fun NowPlayingScreen(
         Box(
             modifier = Modifier
                 .fillMaxSize()
+                .graphicsLayer { alpha = launchSurfaceAlpha }
                 .hazeSource(heroHaze),
         ) {
             // The Automix wipe is spatial, not one global colour lerp: A is
@@ -1247,6 +1510,11 @@ fun NowPlayingScreen(
                             .align(Alignment.TopStart)
                             .fillMaxWidth()
                             .height(heroArtworkHeight)
+                }.onGloballyPositioned { coordinates ->
+                    val bounds = coordinates.boundsInWindow()
+                    if (bounds.width > 1f && bounds.height > 1f) {
+                        onArtworkBoundsChanged(bounds)
+                    }
                 }
 
                 if (heroVisualEnabled && !(stillCovered && heroClip != null) && heroT > 0.001f) {
@@ -1270,15 +1538,12 @@ fun NowPlayingScreen(
                                 .graphicsLayer { alpha = heroT },
                         )
                     }
-                    AsyncImage(
-                        model = ImageRequest.Builder(context)
-                            .data(song.artworkAt(ART_PX))
-                            .size(ART_PX)
-                            .build(),
-                        contentDescription = null,
+                    FastNowPlayingCover(
+                        song = song,
                         contentScale = ContentScale.Fit,
                         alignment = Alignment.TopCenter,
-                        onState = { artLoaded = it is AsyncImagePainter.State.Success },
+                        onReady = { artLoaded = true },
+                        onFailure = { onArtworkReadyChanged(true) },
                         modifier = heroArtworkModifier
                             .then(
                                 when {
@@ -1290,9 +1555,22 @@ fun NowPlayingScreen(
                                 },
                             )
                             .graphicsLayer {
-                                alpha = heroT *
+                                alpha = heroT * launchArtworkLandingAlpha * collapseSharedSourceAlpha *
                                     (1f - if (heroClip != null && visualFromSong == null) canvasCover.floatValue else 0f)
-                            },
+                            }
+                            .onGloballyPositioned { coordinates ->
+                                val bounds = coordinates.boundsInRoot()
+                                if (collapseProgress <= 0.02f || collapseArtworkSourceBounds == null) {
+                                    collapseArtworkSourceBounds = bounds
+                                    onArtworkBoundsChanged(bounds)
+                                }
+                            }
+                            .sharedPlayerCollapseTransform(
+                                sourceBounds = collapseArtworkSourceBounds,
+                                targetBounds = miniArtworkBounds,
+                                progress = collapseProgress,
+                                sheetOffsetPx = collapseSheetOffsetPx,
+                            ),
                     )
                 }
 
@@ -1304,7 +1582,20 @@ fun NowPlayingScreen(
                             onRenderedChanged = { canvasRendered = it },
                             onCoverChanged = { canvasCover.floatValue = it },
                             modifier = heroArtworkModifier
-                                .graphicsLayer { alpha = heroT },
+                                .graphicsLayer { alpha = heroT * launchArtworkLandingAlpha * collapseSharedSourceAlpha }
+                                .onGloballyPositioned { coordinates ->
+                                    val bounds = coordinates.boundsInRoot()
+                                    if (collapseProgress <= 0.02f || collapseArtworkSourceBounds == null) {
+                                        collapseArtworkSourceBounds = bounds
+                                        onArtworkBoundsChanged(bounds)
+                                    }
+                                }
+                                .sharedPlayerCollapseTransform(
+                                    sourceBounds = collapseArtworkSourceBounds,
+                                    targetBounds = miniArtworkBounds,
+                                    progress = collapseProgress,
+                                    sheetOffsetPx = collapseSheetOffsetPx,
+                                ),
                         )
                     }
                 }
@@ -1348,13 +1639,20 @@ fun NowPlayingScreen(
                         .drawWithContent {
                             drawContent()
                             val maskBrush = if (isTabletLandscape) {
+                                // Unlike portrait, the landscape continuation has a finite
+                                // right edge inside the controls pane. Fade it back into the solid
+                                // palette surface before that edge, otherwise the image layer ends
+                                // while still fully opaque and reads as a vertical seam.
                                 Brush.horizontalGradient(
                                     0.00f to Color.Transparent,
-                                    0.10f to Color.White.copy(alpha = 0.12f),
-                                    0.24f to Color.White.copy(alpha = 0.52f),
-                                    0.42f to Color.White.copy(alpha = 0.92f),
-                                    0.56f to Color.White,
-                                    1.00f to Color.White,
+                                    0.08f to Color.White.copy(alpha = 0.16f),
+                                    0.22f to Color.White.copy(alpha = 0.58f),
+                                    0.38f to Color.White.copy(alpha = 0.94f),
+                                    0.54f to Color.White,
+                                    0.70f to Color.White.copy(alpha = 0.86f),
+                                    0.84f to Color.White.copy(alpha = 0.46f),
+                                    0.94f to Color.White.copy(alpha = 0.16f),
+                                    1.00f to Color.Transparent,
                                 )
                             } else {
                                 Brush.verticalGradient(
@@ -1451,12 +1749,14 @@ fun NowPlayingScreen(
                         mask = if (isTabletLandscape) {
                             Brush.horizontalGradient(
                                 0.00f to Color.Transparent,
-                                0.08f to Color.Black.copy(alpha = 0.10f),
-                                0.22f to Color.Black.copy(alpha = 0.48f),
-                                0.38f to Color.Black.copy(alpha = 0.90f),
-                                0.62f to Color.Black,
-                                0.82f to Color.Black.copy(alpha = 0.76f),
-                                0.94f to Color.Black.copy(alpha = 0.24f),
+                                0.08f to Color.Black.copy(alpha = 0.08f),
+                                0.20f to Color.Black.copy(alpha = 0.42f),
+                                0.36f to Color.Black.copy(alpha = 0.84f),
+                                0.54f to Color.Black,
+                                0.68f to Color.Black.copy(alpha = 0.94f),
+                                0.80f to Color.Black.copy(alpha = 0.70f),
+                                0.90f to Color.Black.copy(alpha = 0.38f),
+                                0.97f to Color.Black.copy(alpha = 0.12f),
                                 1.00f to Color.Transparent,
                             )
                         } else {
@@ -1481,7 +1781,8 @@ fun NowPlayingScreen(
                 .navigationBarsPadding()
                 .graphicsLayer {
                     val settle = orientationSettle.value.coerceIn(0f, 1f)
-                    alpha = 0.78f + 0.22f * settle
+                    alpha = (0.78f + 0.22f * settle) * launchContentAlpha * collapseContentAlpha
+                    translationY = (1f - collapseContentAlpha) * 10.dp.toPx()
                     val settleScale = 0.988f + 0.012f * settle
                     scaleX = settleScale
                     scaleY = settleScale
@@ -1526,7 +1827,13 @@ fun NowPlayingScreen(
                     // Keep the identity row's physical height fixed while Lyrics/Queue
                     // morph in. On narrow phone landscape we reclaim space by shrinking
                     // typography, not by moving/re-centering the title and artist.
-                    val focusHeaderHeight = HEADER_HEIGHT
+                    val focusHeaderHeight = if (isPhoneLandscape && !hideStatusBarNowPlaying) {
+                        // A few extra dp keep the artist glyph descenders inside the identity
+                        // header when the status bar consumes part of the short landscape pane.
+                        64.dp
+                    } else {
+                        HEADER_HEIGHT
+                    }
                     val fullArt = if (isTabletLandscape) {
                         0.dp
                     } else {
@@ -1542,45 +1849,52 @@ fun NowPlayingScreen(
                     val artSize = if (isTabletLandscape) 0.dp else lerp(fullArt, THUMB_SIZE, artP)
                     val artTop = if (isTabletLandscape) 0.dp else lerp(groupTop, 0.dp, artP)
                     val artStart = if (isTabletLandscape) 0.dp else lerp((maxWidth - fullArt) / 2, 0.dp, artP)
-                    // On real tablets only, opening Lyrics/Queue drops the
-                    // identity row (title + like + action button) by 10dp.
-                    val tabletExpandedIdentityShift = if (isTablet && isTabletLandscape) {
-                        lerp(0.dp, 10.dp, panelProgress)
-                    } else {
-                        0.dp
-                    }
                     val titleTop = if (isTabletLandscape) {
-                        // Landscape identity: phones use a compact focus header at the top
-                        // when Lyrics/Queue are expanded; tablets keep the requested +10dp
-                        // expanded-state shift.
                         val closedTitleTop = if (syncedLyricsEnabled) {
                             (maxHeight - focusHeaderHeight - 38.dp).coerceAtLeast(0.dp)
                         } else {
                             0.dp
                         }
                         if (isPhoneLandscape) {
-                            // In phone-landscape focus mode the compact identity belongs to
-                            // the top of the right pane, above Lyrics/Queue. Do not let the
-                            // expanded body render behind it. To avoid the old "title flying"
-                            // animation, the row crossfades through its midpoint while its
-                            // anchor changes from the normal resting position to the focus top.
+                            // Phone landscape already uses the compact focus header at the top.
+                            // Keep its approved crossfade/anchor swap unchanged.
                             if (mobileLandscapeFocusProgress >= 0.5f) {
                                 4.dp
                             } else {
                                 closedTitleTop + 15.dp
                             }
                         } else {
-                            closedTitleTop + tabletExpandedIdentityShift
+                            // Real tablets must follow the same hierarchy as the phone player:
+                            // when Queue/Lyrics opens, track identity comes first, then the panel
+                            // heading/content below it. `artP` also follows the dismiss gesture,
+                            // so opening/closing never causes a hard jump in title/actions.
+                            lerp(closedTitleTop, 4.dp, artP.coerceIn(0f, 1f))
                         }
                     } else {
                         lerp(groupTop + fullArt + ART_TITLE_GAP, 0.dp, artP)
                     }
                     val titleStart = if (isTabletLandscape) 0.dp else lerp(0.dp, THUMB_SIZE + 12.dp, artP)
+                    // A visible status bar reduces the already short phone-landscape control pane.
+                    // Lift the complete identity/actions row together so the artist baseline never
+                    // gets clipped against the lower controls. Hidden-status-bar geometry is unchanged.
+                    val phoneLandscapeStatusBarIdentityLift = if (
+                        isPhoneLandscape && !hideStatusBarNowPlaying
+                    ) {
+                        12.dp
+                    } else {
+                        0.dp
+                    }
 
                     Box(
                         modifier = Modifier
                             .offset(x = artStart, y = artTop)
                             .size(artSize)
+                            .onGloballyPositioned { coordinates ->
+                                val bounds = coordinates.boundsInWindow()
+                                if (bounds.width > 1f && bounds.height > 1f) {
+                                    onArtworkBoundsChanged(bounds)
+                                }
+                            }
                             .lyricsDismissSwipe(
                                 enabled = lyricsOpen || queueOpen,
                                 onDragProgress = { progress ->
@@ -1617,7 +1931,7 @@ fun NowPlayingScreen(
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .graphicsLayer { alpha = 1f - heroT }
+                                .graphicsLayer { alpha = (1f - heroT) * launchArtworkLandingAlpha }
                                 .shadow(
                                     if (artLoaded) lerp(14.dp, 6.dp, artP) else 0.dp,
                                     RoundedCornerShape(lerp(10.dp, 7.dp, artP)),
@@ -1628,7 +1942,7 @@ fun NowPlayingScreen(
                         ) {
                             if (!artLoaded) {
                                 Icon(
-                                    imageVector = BitChordIcons.MusicNote,
+                                    imageVector = OrbIcons.MusicNote,
                                     contentDescription = null,
                                     tint = Color.White.copy(alpha = 0.35f),
                                     modifier = Modifier.size(lerp(40.dp, 20.dp, artP)),
@@ -1653,14 +1967,11 @@ fun NowPlayingScreen(
                                         ),
                                 )
                             }
-                            AsyncImage(
-                                model = ImageRequest.Builder(LocalContext.current)
-                                    .data(song.artworkAt(ART_PX))
-                                    .size(ART_PX)
-                                    .build(),
-                                contentDescription = null,
+                            FastNowPlayingCover(
+                                song = song,
                                 contentScale = ContentScale.Fit,
-                                onState = { artLoaded = it is AsyncImagePainter.State.Success },
+                                onReady = { artLoaded = true },
+                                onFailure = { onArtworkReadyChanged(true) },
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .then(
@@ -1699,7 +2010,7 @@ fun NowPlayingScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .offset(y = titleTop)
+                            .offset(y = titleTop - phoneLandscapeStatusBarIdentityLift)
                             .padding(start = titleStart)
                             .height(focusHeaderHeight)
                             .graphicsLayer { alpha = identityAnchorCrossfadeAlpha }
@@ -1737,7 +2048,15 @@ fun NowPlayingScreen(
                             label = "nowPlayingTrackIdentity",
                             modifier = Modifier.weight(1f),
                         ) { shownSong ->
-                            Column {
+                            Column(
+                                modifier = Modifier.graphicsLayer { alpha = launchIdentityLandingAlpha }
+                                    .onGloballyPositioned { coordinates ->
+                                    val bounds = coordinates.boundsInRoot()
+                                    if (bounds.width > 1f && bounds.height > 1f) {
+                                        onIdentityBoundsChanged(bounds)
+                                    }
+                                },
+                            ) {
                                 val titleSize = if (isTabletLandscape) {
                                     if (isPhoneLandscape) {
                                         lerp(24.sp, 18.sp, mobileLandscapeFocusProgress)
@@ -1756,28 +2075,36 @@ fun NowPlayingScreen(
                                 } else {
                                     lerp(16.sp, 14.sp, artP)
                                 }
+                                val identityAppearance = PlayerIdentityAppearance(
+                                    titleStyle = MaterialTheme.typography.titleMedium.copy(fontSize = titleSize),
+                                    artistStyle = MaterialTheme.typography.bodyMedium.copy(fontSize = artistSize),
+                                    color = titleContentColor,
+                                    transportColor = sliderContentColor,
+                                    transportContainerColor = sliderContentColor.copy(alpha = 0.18f),
+                                )
+                                androidx.compose.runtime.SideEffect {
+                                    onIdentityAppearanceChanged(identityAppearance)
+                                }
                                 ExplicitTitle(
                                     text = shownSong.title,
                                     isExplicit = shownSong.isExplicit,
-                                    style = MaterialTheme.typography.titleLarge.copy(
+                                    style = MaterialTheme.typography.titleMedium.copy(
                                         fontSize = titleSize,
                                     ),
                                     color = titleContentColor,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                     badgeSpacing = 5.dp,
-                                    badgeSize = 13.dp,
-                                    badgeFontSize = 10.sp,
                                     fadeOverflow = true,
                                     keepBadgeVisible = true,
+                                    badgePageColor = titleSurfaceColor,
                                     modifier = Modifier.opensPage(shownSong.albumId, onOpenAlbum),
                                 )
                                 ArtistCreditsText(
                                     text = shownSong.artist,
                                     artists = shownSong.artistLinks,
                                     fallbackArtistId = shownSong.artistId,
-                                    style = MaterialTheme.typography.titleLarge.copy(
-                                        fontWeight = FontWeight.W500,
+                                    style = MaterialTheme.typography.bodyMedium.copy(
                                         fontSize = artistSize,
                                     ),
                                     color = titleContentColor,
@@ -1834,7 +2161,7 @@ fun NowPlayingScreen(
                                         }
                                         CircleGlyph(
                                             icon = Icons.Rounded.Close,
-                                            contentDescription = "Close expanded panel",
+                                            contentDescription = stringResource(R.string.orb_lockscreen_close),
                                             onClick = {
                                                 onLyricsOpenChange(false)
                                                 onQueueOpenChange(false)
@@ -1846,20 +2173,47 @@ fun NowPlayingScreen(
                                     } else {
                                         if (signedIn && song.localUri == null) {
                                             val liked = likeStatus == LikeStatus.LIKE
-                                            CircleGlyph(
-                                                icon = if (liked) BitChordIcons.HeartFilled else BitChordIcons.Heart,
-                                                contentDescription = if (liked) "Remove from Liked Music" else "Like",
-                                                onClick = onToggleLike,
-                                                active = liked,
-                                                tintColor = titleContentColor,
-                                                touchSize = if (OrbFlavorUi.expressive) 38.dp else 36.dp,
-                                                iconSize = if (OrbFlavorUi.expressive) 25.dp else 20.dp,
-                                            )
+                                            val heartTouchSize = if (OrbFlavorUi.expressive) 38.dp else 36.dp
+                                            Box(
+                                                modifier = Modifier.size(heartTouchSize),
+                                                contentAlignment = Alignment.Center,
+                                            ) {
+                                                Icon(
+                                                    imageVector = if (liked) OrbIcons.HeartFilled else OrbIcons.Heart,
+                                                    contentDescription = null,
+                                                    tint = titleContentColor.copy(alpha = 0.30f),
+                                                    modifier = Modifier.size(
+                                                        if (OrbFlavorUi.expressive) 27.dp else 22.dp,
+                                                    ),
+                                                )
+                                                CircleGlyph(
+                                                    icon = if (liked) OrbIcons.HeartFilled else OrbIcons.Heart,
+                                                    contentDescription = if (liked) "Remove from Liked Music" else "Like",
+                                                    onClick = {
+                                                        if (!liked) likeBurstNonce += 1
+                                                        onToggleLike()
+                                                    },
+                                                    active = liked,
+                                                    tintColor = titleContentColor,
+                                                    touchSize = heartTouchSize,
+                                                    iconSize = if (OrbFlavorUi.expressive) 25.dp else 20.dp,
+                                                )
+                                                HeartBurstOverlay(
+                                                    trigger = likeBurstNonce,
+                                                    tint = titleContentColor,
+                                                    modifier = Modifier
+                                                        .matchParentSize()
+                                                        .graphicsLayer {
+                                                            scaleX = 1.38f
+                                                            scaleY = 1.38f
+                                                        },
+                                                )
+                                            }
                                             Spacer(Modifier.width(5.dp))
                                         }
                                         CircleGlyph(
                                             icon = if (OrbFlavorUi.expressive) Icons.Rounded.MoreVert else Icons.Rounded.MoreHoriz,
-                                            contentDescription = "More",
+                                            contentDescription = stringResource(R.string.collection_actions_more),
                                             onClick = onOpenMenu,
                                             tintColor = titleContentColor,
                                             touchSize = if (OrbFlavorUi.expressive) 32.dp else 36.dp,
@@ -1882,20 +2236,30 @@ fun NowPlayingScreen(
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(
-                                top = focusHeaderHeight + when {
-                                    // Phone-landscape focus identity is fixed at y=4dp; keep
-                                    // Lyrics/Queue entirely below that header so title/artist
-                                    // can never overlap the expanded content.
-                                    mobileLandscapeFocusLayout -> 8.dp
-                                    isTabletLandscape -> 30.dp
-                                    else -> 10.dp
+                                top = when {
+                                    // In every horizontal focus layout the identity is the first
+                                    // element of the right pane. Queue/Lyrics starts only after it,
+                                    // matching the phone hierarchy: identity -> "Queue"/lyrics.
+                                    mobileLandscapeFocusLayout -> focusHeaderHeight + 8.dp
+                                    isTabletLandscape -> focusHeaderHeight + 10.dp
+                                    else -> focusHeaderHeight + 10.dp
                                 },
-                                bottom = if (mobileLandscapeFocusLayout) 4.dp else 0.dp,
-                            ),
+                                bottom = when {
+                                    mobileLandscapeFocusLayout -> 4.dp
+                                    isTabletLandscape -> 0.dp
+                                    else -> 0.dp
+                                },
+                            )
+                            // Dismiss/open translations must stay inside the panel region too;
+                            // otherwise a translated lyric/queue row can temporarily cross the
+                            // reserved identity strip even though its layout bounds are correct.
+                            .clipToBounds(),
                     ) { mode ->
                         when (mode) {
                             1 -> {
                                 LyricsPanel(
+                                    trackKey = song.videoId,
+                                    lyricsUnavailable = lyricsUnavailable,
                                     lines = displayedLyrics.orEmpty(),
                                     positionMs = positionMs,
                                     isPlaying = isPlaying,
@@ -1939,11 +2303,14 @@ fun NowPlayingScreen(
                                         currentIndex = queueIndex,
                                         autoplayEnabled = autoplayEnabled,
                                         shuffleEnabled = shuffleEnabled,
+                                        editable = transportEnabled,
+                                        allowShuffledDrag = roomQueue,
                                         onJumpTo = onJumpTo,
                                         onRemove = onRemoveFromQueue,
                                         onMove = onMoveInQueue,
                                         onClear = onClearQueue,
                                         contentColor = playerContentColor,
+                                        surfaceColor = playerBottomEdgeColor,
                                         modifier = Modifier.weight(1f),
                                     )
                                 }
@@ -2002,25 +2369,33 @@ fun NowPlayingScreen(
                                     style = MaterialTheme.typography.labelSmall,
                                     color = sliderContentColor.copy(alpha = 0.54f),
                                 )
-                                Row(
+                                if(showTransportControls) Row(
                                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     FocusTransportGlyph(
                                         icon = Icons.Rounded.SkipPrevious,
-                                        contentDescription = "Previous",
+                                        contentDescription = stringResource(R.string.orb_lockscreen_previous),
                                         enabled = transportEnabled &&
                                             (hasPrevious || positionMs > BACK_RESTARTS_AFTER_MS),
-                                        tintColor = controlsContentColor,
-                                        onClick = onPrevious,
+                                        tintColor = controlsButtonContentColor,
+                                        surfaceColor = controlsSurfaceColor,
+                                        onClick = com.music.orb.ui.components.OrbHaptics.transportClick(onPrevious),
                                     )
                                     if (isLoading) {
                                         Box(
-                                            modifier = Modifier.size(42.dp),
+                                            modifier = Modifier
+                                                .size(42.dp)
+                                                .clip(RoundedCornerShape(14.dp))
+                                                .nowPlayingTransparentGlass(
+                                                    contentColor = controlsButtonContentColor,
+                                                    opacity = 0.08f,
+                                                    highlight = 0.025f,
+                                                ),
                                             contentAlignment = Alignment.Center,
                                         ) {
                                             CircularProgressIndicator(
-                                                color = controlsContentColor,
+                                                color = controlsButtonContentColor,
                                                 strokeWidth = 2.dp,
                                                 modifier = Modifier.size(24.dp),
                                             )
@@ -2029,18 +2404,20 @@ fun NowPlayingScreen(
                                         FocusTransportGlyph(
                                             icon = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                                             contentDescription = if (isPlaying) "Pause" else "Play",
-                                            enabled = transportEnabled,
-                                            tintColor = controlsContentColor,
+                                            enabled = transportEnabled || com.music.orb.data.rooms.RoomRepository.isGuest(),
+                                            tintColor = controlsButtonContentColor,
+                                            surfaceColor = controlsSurfaceColor,
                                             prominent = true,
-                                            onClick = onPlayPause,
+                                            onClick = com.music.orb.ui.components.OrbHaptics.transportClick(onPlayPause),
                                         )
                                     }
                                     FocusTransportGlyph(
                                         icon = Icons.Rounded.SkipNext,
-                                        contentDescription = "Next",
+                                        contentDescription = stringResource(R.string.orb_lockscreen_next),
                                         enabled = transportEnabled && hasNext,
-                                        tintColor = controlsContentColor,
-                                        onClick = onNext,
+                                        tintColor = controlsButtonContentColor,
+                                        surfaceColor = controlsSurfaceColor,
+                                        onClick = com.music.orb.ui.components.OrbHaptics.transportClick(onNext),
                                     )
                                 }
                                 Text(
@@ -2067,10 +2444,10 @@ fun NowPlayingScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .offset(
-                                    y = if (isTabletLandscape) {
-                                        (-8).dp + phoneLandscapeMainShift
-                                    } else {
-                                        (-18).dp
+                                    y = when {
+                                        isPhoneLandscape -> (-4).dp + phoneLandscapeMainShift
+                                        isTabletLandscape -> (-8).dp + phoneLandscapeMainShift
+                                        else -> (-18).dp
                                     },
                                 )
                                 .graphicsLayer {
@@ -2148,11 +2525,12 @@ fun NowPlayingScreen(
                     val wifiMaximum by AppSettings.audioQualityWifiMaximum.collectAsStateWithLifecycle()
                     val cellularMaximum by AppSettings.audioQualityCellularMaximum.collectAsStateWithLifecycle()
                     val premiumEntitled by AppSettings.premiumEntitled.collectAsStateWithLifecycle()
+                    val losslessMobileEnabled by AppSettings.serverLosslessMobileEnabled.collectAsStateWithLifecycle()
                     val losslessAudio by AppSettings.losslessAudio.collectAsStateWithLifecycle()
                     val activeQuality = if (onWifi == true) wifiQuality else cellularQuality
                     val activeMaximum = losslessAudio && (
                         (onWifi == true && wifiMaximum) ||
-                            (onWifi == false && premiumEntitled)
+                            (onWifi == false && cellularMaximum && premiumEntitled && losslessMobileEnabled)
                         )
                     Box(
                         modifier = Modifier
@@ -2197,6 +2575,7 @@ fun NowPlayingScreen(
                             activeMaximum = activeMaximum,
                             trackDurationMs = durationMs,
                             contentColor = sliderContentColor,
+                            badgePageColor = controlsSurfaceColor,
                             modifier = Modifier
                                 .align(Alignment.Center)
                                 .padding(horizontal = 8.dp),
@@ -2229,6 +2608,7 @@ fun NowPlayingScreen(
                             // Transport controls may still fade out while lyrics are
                             // expanded, but they keep their footprint so no geometry
                             // below them moves.
+                            if (showTransportControls) {
                             if (OrbFlavorUi.expressive) {
                                 Box(
                                     modifier = Modifier
@@ -2257,11 +2637,19 @@ fun NowPlayingScreen(
                                         canGoPrevious = transportEnabled && !lyricsOpen &&
                                                 (hasPrevious || positionMs > BACK_RESTARTS_AFTER_MS),
                                         canGoNext = transportEnabled && !lyricsOpen && hasNext,
-                                        canPlayPause = transportEnabled && !lyricsOpen,
-                                        tintColor = controlsContentColor,
+                                        canPlayPause = (transportEnabled || com.music.orb.data.rooms.RoomRepository.isGuest()) && !lyricsOpen,
+                                        tintColor = controlsButtonContentColor,
+                                        surfaceColor = controlsSurfaceColor,
                                         onPrevious = onPrevious,
                                         onPlayPause = onPlayPause,
                                         onNext = onNext,
+                                        collapseProgress = collapseProgress,
+                                        collapseSheetOffsetPx = collapseSheetOffsetPx,
+                                        miniPlayPauseBounds = miniPlayPauseBounds,
+                                        miniNextBounds = miniNextBounds,
+                                        onPlayPauseBoundsChanged = onPlayPauseBoundsChanged,
+                                        onNextBoundsChanged = onNextBoundsChanged,
+                                        launchSharedControlAlpha = sharedControlSourceAlpha,
                                     )
                                 }
                             } else {
@@ -2289,20 +2677,43 @@ fun NowPlayingScreen(
                                 ) {
                                     TransportGlyph(
                                         icon = Icons.Rounded.FastRewind,
-                                        contentDescription = "Previous",
+                                        contentDescription = stringResource(R.string.orb_lockscreen_previous),
                                         size = 46.dp,
-                                        onClick = onPrevious,
+                                        onClick = com.music.orb.ui.components.OrbHaptics.transportClick(onPrevious),
                                         enabled = transportEnabled && !lyricsOpen &&
                                                 (hasPrevious || positionMs > BACK_RESTARTS_AFTER_MS),
-                                        tintColor = controlsContentColor,
+                                        tintColor = controlsButtonContentColor,
+                                        surfaceColor = controlsSurfaceColor,
                                     )
                                     if (isLoading) {
+                                        var loadingPlayBounds by remember(song.videoId) { mutableStateOf<Rect?>(null) }
                                         Box(
-                                            modifier = Modifier.size(74.dp),
+                                            modifier = Modifier
+                                                .size(74.dp)
+                                                .clip(RoundedCornerShape(28.dp))
+                                                .nowPlayingTransparentGlass(
+                                                    contentColor = controlsButtonContentColor,
+                                                    opacity = 0.08f,
+                                                    highlight = 0.025f,
+                                                )
+                                                .onGloballyPositioned { coordinates ->
+                                                    val bounds = coordinates.boundsInRoot()
+                                                    if (collapseProgress <= 0.02f || loadingPlayBounds == null) {
+                                                        loadingPlayBounds = bounds
+                                                        onPlayPauseBoundsChanged(bounds)
+                                                    }
+                                                }
+                                                .sharedPlayerCollapseTransform(
+                                                    loadingPlayBounds,
+                                                    miniPlayPauseBounds,
+                                                    collapseProgress,
+                                                    collapseSheetOffsetPx,
+                                                )
+                                                .graphicsLayer { alpha = sharedControlSourceAlpha },
                                             contentAlignment = Alignment.Center,
                                         ) {
                                             CircularProgressIndicator(
-                                                color = controlsContentColor,
+                                                color = controlsButtonContentColor,
                                                 strokeWidth = 3.dp,
                                                 modifier = Modifier.size(38.dp),
                                             )
@@ -2312,136 +2723,82 @@ fun NowPlayingScreen(
                                             icon = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                                             contentDescription = if (isPlaying) "Pause" else "Play",
                                             size = 62.dp,
-                                            onClick = onPlayPause,
-                                            enabled = transportEnabled && !lyricsOpen,
-                                            tintColor = controlsContentColor,
+                                            onClick = com.music.orb.ui.components.OrbHaptics.transportClick(onPlayPause),
+                                            enabled = (transportEnabled || com.music.orb.data.rooms.RoomRepository.isGuest()) && !lyricsOpen,
+                                            tintColor = controlsButtonContentColor,
+                                            surfaceColor = controlsSurfaceColor,
+                                            collapseProgress = collapseProgress,
+                                            collapseSheetOffsetPx = collapseSheetOffsetPx,
+                                            collapseTargetBounds = miniPlayPauseBounds,
+                                            onBoundsChanged = onPlayPauseBoundsChanged,
+                                            launchSharedControlAlpha = sharedControlSourceAlpha,
                                         )
                                     }
                                     TransportGlyph(
                                         icon = Icons.Rounded.FastForward,
-                                        contentDescription = "Next",
+                                        contentDescription = stringResource(R.string.orb_lockscreen_next),
                                         size = 46.dp,
-                                        onClick = onNext,
+                                        onClick = com.music.orb.ui.components.OrbHaptics.transportClick(onNext),
                                         enabled = transportEnabled && !lyricsOpen && hasNext,
-                                        tintColor = controlsContentColor,
+                                        tintColor = controlsButtonContentColor,
+                                        surfaceColor = controlsSurfaceColor,
+                                        collapseProgress = collapseProgress,
+                                        collapseSheetOffsetPx = collapseSheetOffsetPx,
+                                        collapseTargetBounds = miniNextBounds,
+                                        onBoundsChanged = onNextBoundsChanged,
+                                        launchSharedControlAlpha = sharedControlSourceAlpha,
                                     )
                                 }
+                            }
+
+                            }
+                            if (controlledByRoomTitle != null) {
+                                Text(
+                                    text = stringResource(R.string.rooms_media_controlled_by_host, controlledByRoomTitle),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = controlsContentColor,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp),
+                                )
                             }
 
                             Spacer(Modifier.height(62.dp))
 
-                            // Shuffle / repeat / AutoPlay / queue are persistent
-                            // controls. Expanding lyrics must not fade, move or
-                            // remove this row; it stays in exactly the same position
-                            // and remains interactive.
-                            if (OrbFlavorUi.expressive) {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .offset(y = if (isTabletLandscape) (-2).dp else (-12).dp),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    Row(
-                                        modifier = Modifier,
-                                        horizontalArrangement = Arrangement.spacedBy(1.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                    ) {
-                                        BottomGlyph(
-                                            icon = BitChordIcons.Shuffle,
-                                            contentDescription = if (shuffleEnabled) "Shuffle on" else "Shuffle off",
-                                            onClick = onToggleShuffle,
-                                            enabled = true,
-                                            highlighted = shuffleEnabled,
-                                            tintColor = controlsContentColor,
-                                        )
-                                        BottomGlyph(
-                                            icon = if (repeatMode == Player.REPEAT_MODE_ONE) {
-                                                BitChordIcons.RepeatOne
-                                            } else {
-                                                BitChordIcons.Repeat
-                                            },
-                                            contentDescription = when (repeatMode) {
-                                                Player.REPEAT_MODE_ONE -> "Repeat one"
-                                                Player.REPEAT_MODE_ALL -> "Repeat all"
-                                                else -> "Repeat off"
-                                            },
-                                            onClick = onCycleRepeat,
-                                            enabled = true,
-                                            highlighted = repeatMode != Player.REPEAT_MODE_OFF,
-                                            tintColor = controlsContentColor,
-                                        )
-                                        BottomGlyph(
-                                            icon = BitChordIcons.Infinity,
-                                            contentDescription = if (autoplayEnabled) "AutoPlay on" else "AutoPlay off",
-                                            onClick = onToggleAutoplay,
-                                            enabled = true,
-                                            highlighted = autoplayEnabled,
-                                            tintColor = controlsContentColor,
-                                        )
-                                        BottomGlyph(
-                                            icon = Icons.AutoMirrored.Rounded.QueueMusic,
-                                            contentDescription = "Up next",
-                                            onClick = {
-                                                onQueueOpenChange(!queueOpen)
-                                            },
-                                            enabled = true,
-                                            highlighted = queueOpen,
-                                            tintColor = controlsContentColor,
-                                        )
+                            // Sparse lower controls: output on the left, a segmented
+                            // Shuffle/Repeat pair in the center, and Queue on the right.
+                            // Autoplay remains a persistent Playback setting.
+                            NowPlayingBottomControls(
+                                onOpenOutput = { outputSheetOpen = true },
+                                shuffleEnabled = shuffleEnabled,
+                                repeatMode = repeatMode,
+                                lyricsOpen = lyricsOpen,
+                                lyricsEnabled = syncedLyricsEnabled,
+                                queueOpen = queueOpen,
+                                transportEnabled = transportEnabled,
+                                tintColor = controlsButtonContentColor,
+                                surfaceColor = controlsSurfaceColor,
+                                onToggleShuffle = onToggleShuffle,
+                                onCycleRepeat = onCycleRepeat,
+                                onToggleLyrics = {
+                                    if (lyricsOpen) {
+                                        onLyricsOpenChange(false)
+                                    } else {
+                                        onQueueOpenChange(false)
+                                        onLyricsOpenChange(true)
                                     }
-                                }
-                            } else {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .offset(y = if (isTabletLandscape) (-2).dp else (-12).dp),
-                                    horizontalArrangement = Arrangement.SpaceEvenly,
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    BottomGlyph(
-                                        icon = BitChordIcons.Shuffle,
-                                        contentDescription = if (shuffleEnabled) "Shuffle on" else "Shuffle off",
-                                        onClick = onToggleShuffle,
-                                        enabled = true,
-                                        highlighted = shuffleEnabled,
-                                        tintColor = controlsContentColor,
-                                    )
-                                    BottomGlyph(
-                                        icon = if (repeatMode == Player.REPEAT_MODE_ONE) {
-                                            BitChordIcons.RepeatOne
-                                        } else {
-                                            BitChordIcons.Repeat
-                                        },
-                                        contentDescription = when (repeatMode) {
-                                            Player.REPEAT_MODE_ONE -> "Repeat one"
-                                            Player.REPEAT_MODE_ALL -> "Repeat all"
-                                            else -> "Repeat off"
-                                        },
-                                        onClick = onCycleRepeat,
-                                        enabled = true,
-                                        highlighted = repeatMode != Player.REPEAT_MODE_OFF,
-                                        tintColor = controlsContentColor,
-                                    )
-                                    BottomGlyph(
-                                        icon = BitChordIcons.Infinity,
-                                        contentDescription = if (autoplayEnabled) "AutoPlay on" else "AutoPlay off",
-                                        onClick = onToggleAutoplay,
-                                        enabled = true,
-                                        highlighted = autoplayEnabled,
-                                        tintColor = controlsContentColor,
-                                    )
-                                    BottomGlyph(
-                                        icon = Icons.AutoMirrored.Rounded.QueueMusic,
-                                        contentDescription = "Up next",
-                                        onClick = {
-                                            onQueueOpenChange(!queueOpen)
-                                        },
-                                        enabled = true,
-                                        highlighted = queueOpen,
-                                        tintColor = controlsContentColor,
-                                    )
-                                }
-                            }
+                                },
+                                onToggleQueue = {
+                                    if (queueOpen) {
+                                        onQueueOpenChange(false)
+                                    } else {
+                                        onLyricsOpenChange(false)
+                                        onQueueOpenChange(true)
+                                    }
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .offset(y = if (isTabletLandscape) (-2).dp else (-12).dp),
+                            )
 
                             Spacer(Modifier.height(18.dp))
                         }
@@ -2459,8 +2816,11 @@ fun NowPlayingScreen(
                                     R.string.lyrics_translation_translate
                                 },
                             )
-                            val sourceText = lyricsSource?.let { "Lyrics by ${it.label}" }
-                                ?: if (lyricsUnavailable) "No lyrics found" else null
+                            val sourceText = lyricsSource?.let {
+                                stringResource(R.string.now_playing_lyrics_source_credit, it.label)
+                            } ?: if (lyricsUnavailable) {
+                                stringResource(R.string.now_playing_lyrics_not_available)
+                            } else null
 
                             Column(
                                 modifier = Modifier
@@ -2700,6 +3060,8 @@ private fun ContentDrawScope.sweepTo(layout: TextLayoutResult, revealedChars: Fl
 
 @Composable
 private fun LyricsPanel(
+    trackKey: Any,
+    lyricsUnavailable: Boolean,
     lines: List<LyricLine>,
     positionMs: Long,
     isPlaying: Boolean,
@@ -2765,11 +3127,20 @@ private fun LyricsPanel(
 
     if (lines.isEmpty()) {
         Box(modifier, contentAlignment = Alignment.Center) {
-            Text(
-                text = "No lyrics for this track",
-                style = MaterialTheme.typography.titleMedium,
-                color = contentColor.copy(alpha = 0.60f),
-            )
+            if (lyricsUnavailable) {
+                Text(
+                    text = stringResource(R.string.now_playing_lyrics_not_available),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = contentColor.copy(alpha = 0.60f),
+                )
+            } else {
+                // Fetching is a separate state. Do not announce failure before
+                // the lyrics sources have actually finished resolving this song.
+                LyricsLoadingLine(
+                    trackKey = trackKey,
+                    contentColor = contentColor,
+                )
+            }
         }
         return
     }
@@ -2810,8 +3181,8 @@ private fun LyricsPanel(
                     label = "noteSize",
                 )
                 Icon(
-                    imageVector = BitChordIcons.MusicNote,
-                    contentDescription = "Instrumental",
+                    imageVector = OrbIcons.MusicNote,
+                    contentDescription = stringResource(R.string.now_playing_instrumental),
                     tint = contentColor.copy(alpha = lineAlpha),
                     modifier = Modifier
                         .blur(blur, BlurredEdgeTreatment.Unbounded)
@@ -2927,7 +3298,7 @@ private fun CurrentLyricLine(
     ) {
         if (instrumental) {
             Icon(
-                imageVector = BitChordIcons.MusicNote,
+                imageVector = OrbIcons.MusicNote,
                 contentDescription = null,
                 tint = contentColor,
                 modifier = Modifier.size(16.dp),
@@ -2958,7 +3329,7 @@ private fun CurrentLyricLine(
         }
         Spacer(Modifier.width(6.dp))
         Icon(
-            imageVector = BitChordIcons.ChevronRight,
+            imageVector = OrbIcons.ChevronRight,
             contentDescription = null,
             tint = contentColor.copy(alpha = 0.50f),
             modifier = Modifier.size(14.dp),
@@ -3014,12 +3385,33 @@ private fun LyricsLoadingLine(
     )
 }
 
+private fun Modifier.nowPlayingTransparentGlass(
+    contentColor: Color,
+    opacity: Float,
+    highlight: Float = opacity * 0.30f,
+): Modifier =
+    this
+        // No independent artwork/Material tone here: the Now Playing canvas is
+        // already the music-derived surface. A light/dark veil matching the
+        // adaptive foreground is enough to read as glass without becoming a
+        // coloured slab. Clipping is owned by each control before this modifier.
+        .background(contentColor.copy(alpha = opacity.coerceIn(0f, 0.22f)))
+        .background(
+            Brush.verticalGradient(
+                colors = listOf(
+                    contentColor.copy(alpha = highlight.coerceIn(0f, 0.08f)),
+                    Color.Transparent,
+                ),
+            ),
+        )
+
 @Composable
 private fun FocusTransportGlyph(
     icon: ImageVector,
     contentDescription: String,
     enabled: Boolean,
     tintColor: Color,
+    surfaceColor: Color,
     prominent: Boolean = false,
     onClick: () -> Unit,
 ) {
@@ -3045,8 +3437,10 @@ private fun FocusTransportGlyph(
                 alpha = if (enabled) 1f else 0.30f
             }
             .clip(if (prominent) RoundedCornerShape(14.dp) else CircleShape)
-            .background(
-                if (prominent) tintColor.copy(alpha = 0.13f) else Color.Transparent,
+            .nowPlayingTransparentGlass(
+                contentColor = tintColor,
+                opacity = if (prominent) 0.08f else if (pressed) 0.10f else 0f,
+                highlight = if (prominent) 0.025f else if (pressed) 0.035f else 0f,
             )
             .clickable(
                 interactionSource = interactionSource,
@@ -3117,123 +3511,191 @@ private fun ExpressiveTransportCluster(
     canGoNext: Boolean,
     canPlayPause: Boolean,
     tintColor: Color,
+    surfaceColor: Color,
     onPrevious: () -> Unit,
     onPlayPause: () -> Unit,
     onNext: () -> Unit,
+    collapseProgress: Float,
+    collapseSheetOffsetPx: Float,
+    miniPlayPauseBounds: Rect?,
+    miniNextBounds: Rect?,
+    onPlayPauseBoundsChanged: (Rect) -> Unit,
+    onNextBoundsChanged: (Rect) -> Unit,
+    launchSharedControlAlpha: Float = 1f,
 ) {
-    var activeSlot by remember { mutableIntStateOf(1) }
     val slotSize = 72.dp
-    val slotGap = 18.dp
-    val step = slotSize + slotGap
+    val gap = 18.dp
+    val clusterWidth = slotSize * 3f + gap * 2f
+    val scope = rememberCoroutineScope()
+    var frameTarget by remember { mutableIntStateOf(1) }
+    var frameGeneration by remember { mutableIntStateOf(0) }
+    var collapsePlayBounds by remember { mutableStateOf<Rect?>(null) }
+    var collapseNextBounds by remember { mutableStateOf<Rect?>(null) }
 
-    // A side click cancels/restarts this effect naturally; no competing delayed
-    // jobs can pull the highlight back at the wrong time.
-    LaunchedEffect(activeSlot) {
-        if (activeSlot != 1) {
-            delay(320)
-            activeSlot = 1
+    fun pulseFrame(target: Int, action: () -> Unit) {
+        if (target == 0 && !canGoPrevious) return
+        if (target == 2 && !canGoNext) return
+        frameGeneration += 1
+        val generation = frameGeneration
+        frameTarget = target
+        action()
+        scope.launch {
+            // Keep the travelled frame at Skip/Back long enough for the transfer
+            // to read as one physical object leaving Play/Pause and returning.
+            delay(320L)
+            if (generation == frameGeneration) frameTarget = 1
         }
     }
 
-    val indicatorOffset by animateDpAsState(
-        targetValue = when (activeSlot) {
-            0 -> 0.dp
-            2 -> step * 2
-            else -> step
-        },
+    val targetSize = if (frameTarget == 1) slotSize else 62.dp
+    val frameSize by animateDpAsState(
+        targetValue = targetSize,
         animationSpec = spring(
-            dampingRatio = 0.72f,
-            stiffness = Spring.StiffnessLow,
-        ),
-        label = "expressiveTransportIndicatorOffset",
-    )
-    val indicatorSize by animateDpAsState(
-        targetValue = if (activeSlot == 1) 72.dp else 62.dp,
-        animationSpec = spring(
-            dampingRatio = 0.70f,
+            dampingRatio = Spring.DampingRatioMediumBouncy,
             stiffness = Spring.StiffnessMediumLow,
         ),
-        label = "expressiveTransportIndicatorSize",
+        label = "transport-frame-size",
     )
-    val indicatorCorner by animateDpAsState(
-        targetValue = if (activeSlot == 1) 24.dp else 31.dp,
+    val centerCorner = when {
+        isLoading -> 36.dp
+        isPlaying -> 20.dp
+        else -> 36.dp
+    }
+    val playPauseCorner by animateDpAsState(
+        targetValue = centerCorner,
         animationSpec = spring(
-            dampingRatio = 0.72f,
+            dampingRatio = Spring.DampingRatioMediumBouncy,
             stiffness = Spring.StiffnessMediumLow,
         ),
-        label = "expressiveTransportIndicatorCorner",
+        label = "transport-play-pause-corner",
+    )
+    val frameCorner by animateDpAsState(
+        targetValue = if (frameTarget == 1) playPauseCorner else 31.dp,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMediumLow,
+        ),
+        label = "transport-frame-corner",
+    )
+    val targetX = when (frameTarget) {
+        0 -> (slotSize - targetSize) / 2f
+        2 -> slotSize * 2f + gap * 2f + (slotSize - targetSize) / 2f
+        else -> slotSize + gap
+    }
+    val frameX by animateDpAsState(
+        targetValue = targetX,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMediumLow,
+        ),
+        label = "transport-frame-x",
+    )
+    val frameY by animateDpAsState(
+        targetValue = (80.dp - targetSize) / 2f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMediumLow,
+        ),
+        label = "transport-frame-y",
     )
 
     Box(
-        modifier = Modifier.size(width = slotSize * 3 + slotGap * 2, height = 80.dp),
-        contentAlignment = Alignment.CenterStart,
+        modifier = Modifier.size(width = clusterWidth, height = 80.dp),
     ) {
         Box(
             modifier = Modifier
-                .offset(x = indicatorOffset + (slotSize - indicatorSize) / 2)
-                .size(indicatorSize)
-                .clip(RoundedCornerShape(indicatorCorner))
-                .background(tintColor.copy(alpha = 0.17f)),
+                .offset(x = frameX, y = frameY)
+                .size(frameSize)
+                .graphicsLayer { alpha = launchSharedControlAlpha }
+                .clip(RoundedCornerShape(frameCorner))
+                .nowPlayingTransparentGlass(
+                    contentColor = tintColor,
+                    // Play/Pause uses the same lightweight transparent glass as
+                    // the lower controls. This is the *only* transport background:
+                    // when Skip/Back is tapped this exact object travels away from
+                    // the center, becomes circular at the destination, then returns.
+                    opacity = 0.08f,
+                    highlight = 0.025f,
+                ),
         )
 
-        Row(horizontalArrangement = Arrangement.spacedBy(slotGap)) {
+        Row(
+            modifier = Modifier.fillMaxSize(),
+            horizontalArrangement = Arrangement.spacedBy(gap),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             ExpressiveTransportSlot(
                 modifier = Modifier.size(slotSize),
-                selected = activeSlot == 0,
                 enabled = canGoPrevious,
                 baseTint = tintColor,
-                onClick = {
-                    activeSlot = 0
-                    onPrevious()
+                onClick = com.music.orb.ui.components.OrbHaptics.transportClick {
+                    pulseFrame(0, onPrevious)
                 },
-            ) { iconTint ->
-                Icon(
-                    imageVector = Icons.Rounded.SkipPrevious,
-                    contentDescription = "Previous",
-                    tint = iconTint,
-                    modifier = Modifier.size(31.dp),
+            ) {
+                PlayerTransportVisual(
+                    Icons.Rounded.SkipPrevious,
+                    slotSize,
+                    selected = false,
+                    foregroundColor = tintColor,
                 )
             }
             ExpressiveTransportSlot(
-                modifier = Modifier.size(slotSize),
-                selected = activeSlot == 1,
+                modifier = Modifier
+                    .size(slotSize)
+                    .onGloballyPositioned { coordinates ->
+                        val bounds = coordinates.boundsInRoot()
+                        if (collapseProgress <= 0.02f || collapsePlayBounds == null) {
+                            collapsePlayBounds = bounds
+                            onPlayPauseBoundsChanged(bounds)
+                        }
+                    }
+                    .sharedPlayerCollapseTransform(
+                        collapsePlayBounds, miniPlayPauseBounds,
+                        collapseProgress, collapseSheetOffsetPx,
+                    )
+                    .graphicsLayer { alpha = launchSharedControlAlpha },
                 enabled = canPlayPause,
                 baseTint = tintColor,
-                onClick = {
-                    activeSlot = 1
-                    onPlayPause()
-                },
-            ) { iconTint ->
-                if (isLoading) {
-                    CircularProgressIndicator(
-                        color = iconTint,
-                        strokeWidth = 3.dp,
-                        modifier = Modifier.size(32.dp),
-                    )
-                } else {
-                    Icon(
-                        imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                        contentDescription = if (isPlaying) "Pause" else "Play",
-                        tint = iconTint,
-                        modifier = Modifier.size(36.dp),
-                    )
-                }
+                cornerRadius = playPauseCorner,
+                onClick = com.music.orb.ui.components.OrbHaptics.transportClick(onPlayPause),
+            ) {
+                PlayerTransportVisual(
+                    icon = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                    slotSize = slotSize,
+                    selected = true,
+                    isLoading = isLoading,
+                    foregroundColor = tintColor,
+                    containerColor = Color.Transparent,
+                    containerCornerRadius = playPauseCorner,
+                    drawContainer = false,
+                )
             }
             ExpressiveTransportSlot(
-                modifier = Modifier.size(slotSize),
-                selected = activeSlot == 2,
+                modifier = Modifier
+                    .size(slotSize)
+                    .onGloballyPositioned { coordinates ->
+                        val bounds = coordinates.boundsInRoot()
+                        if (collapseProgress <= 0.02f || collapseNextBounds == null) {
+                            collapseNextBounds = bounds
+                            onNextBoundsChanged(bounds)
+                        }
+                    }
+                    .sharedPlayerCollapseTransform(
+                        collapseNextBounds, miniNextBounds,
+                        collapseProgress, collapseSheetOffsetPx,
+                    )
+                    .graphicsLayer { alpha = launchSharedControlAlpha },
                 enabled = canGoNext,
                 baseTint = tintColor,
-                onClick = {
-                    activeSlot = 2
-                    onNext()
+                onClick = com.music.orb.ui.components.OrbHaptics.transportClick {
+                    pulseFrame(2, onNext)
                 },
-            ) { iconTint ->
-                Icon(
-                    imageVector = Icons.Rounded.SkipNext,
-                    contentDescription = "Next",
-                    tint = iconTint,
-                    modifier = Modifier.size(31.dp),
+            ) {
+                PlayerTransportVisual(
+                    Icons.Rounded.SkipNext,
+                    slotSize,
+                    selected = false,
+                    foregroundColor = tintColor,
                 )
             }
         }
@@ -3243,32 +3705,32 @@ private fun ExpressiveTransportCluster(
 @Composable
 private fun ExpressiveTransportSlot(
     modifier: Modifier = Modifier,
-    selected: Boolean,
     enabled: Boolean,
     baseTint: Color,
+    cornerRadius: Dp = 24.dp,
     onClick: () -> Unit,
     content: @Composable (tint: Color) -> Unit,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
-        targetValue = if (pressed) 0.90f else 1f,
+        targetValue = if (pressed && enabled) 0.90f else 1f,
         animationSpec = spring(
             dampingRatio = Spring.DampingRatioMediumBouncy,
             stiffness = Spring.StiffnessMediumLow,
         ),
         label = "expressiveTransportSlotScale",
     )
-    val tint = when {
-        !enabled -> baseTint.copy(alpha = 0.34f)
-        selected -> baseTint
-        else -> baseTint.copy(alpha = 0.92f)
-    }
+    val tint = if (enabled) baseTint else baseTint.copy(alpha = 0.34f)
 
     Box(
         modifier = modifier
-            .graphicsLayer { scaleX = scale; scaleY = scale }
-            .clip(RoundedCornerShape(28.dp))
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+                alpha = if (enabled) 1f else 0.38f
+            }
+            .clip(RoundedCornerShape(cornerRadius))
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
@@ -3289,7 +3751,14 @@ private fun TransportGlyph(
     onClick: () -> Unit,
     enabled: Boolean = true,
     tintColor: Color = Color.White,
+    surfaceColor: Color,
+    collapseProgress: Float = 0f,
+    collapseSheetOffsetPx: Float = 0f,
+    collapseTargetBounds: Rect? = null,
+    onBoundsChanged: (Rect) -> Unit = {},
+    launchSharedControlAlpha: Float = 1f,
 ) {
+    var collapseSourceBounds by remember { mutableStateOf<Rect?>(null) }
     val alpha by animateFloatAsState(
         targetValue = if (enabled) 1f else 0.3f,
         label = "transportAlpha",
@@ -3299,6 +3768,20 @@ private fun TransportGlyph(
         Box(
             modifier = Modifier
                 .size(size + 12.dp)
+                .onGloballyPositioned { coordinates ->
+                    val bounds = coordinates.boundsInRoot()
+                    if (collapseProgress <= 0.02f || collapseSourceBounds == null) {
+                        collapseSourceBounds = bounds
+                        onBoundsChanged(bounds)
+                    }
+                }
+                .sharedPlayerCollapseTransform(
+                    collapseSourceBounds,
+                    collapseTargetBounds,
+                    collapseProgress,
+                    collapseSheetOffsetPx,
+                )
+                .graphicsLayer { this.alpha = launchSharedControlAlpha }
                 .clip(CircleShape)
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
@@ -3329,18 +3812,6 @@ private fun TransportGlyph(
         ),
         label = "expressiveTransportScale",
     )
-    val containerAlpha by animateFloatAsState(
-        targetValue = when {
-            !enabled -> 0.055f
-            prominent -> 0.22f
-            else -> 0.105f
-        },
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = Spring.StiffnessMedium,
-        ),
-        label = "expressiveTransportContainer",
-    )
     val buttonSize = if (prominent) 80.dp else 64.dp
     val shape = RoundedCornerShape(if (prominent) 28.dp else 22.dp)
     val iconSize = if (prominent) 36.dp else 30.dp
@@ -3348,9 +3819,30 @@ private fun TransportGlyph(
     Box(
         modifier = Modifier
             .size(buttonSize)
-            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .onGloballyPositioned { coordinates ->
+                val bounds = coordinates.boundsInRoot()
+                if (collapseProgress <= 0.02f || collapseSourceBounds == null) {
+                    collapseSourceBounds = bounds
+                    onBoundsChanged(bounds)
+                }
+            }
+            .sharedPlayerCollapseTransform(
+                collapseSourceBounds,
+                collapseTargetBounds,
+                collapseProgress,
+                collapseSheetOffsetPx,
+            )
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+                this.alpha = launchSharedControlAlpha
+            }
             .clip(shape)
-            .background(tintColor.copy(alpha = containerAlpha))
+            .nowPlayingTransparentGlass(
+                contentColor = tintColor,
+                opacity = if (prominent) 0.08f else if (pressed) 0.10f else 0f,
+                highlight = if (prominent) 0.025f else if (pressed) 0.035f else 0f,
+            )
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
@@ -3369,6 +3861,370 @@ private fun TransportGlyph(
 }
 
 @Composable
+fun NowPlayingBottomControls(
+    onOpenOutput: () -> Unit,
+    shuffleEnabled: Boolean,
+    repeatMode: Int,
+    lyricsOpen: Boolean,
+    lyricsEnabled: Boolean,
+    queueOpen: Boolean,
+    transportEnabled: Boolean,
+    tintColor: Color,
+    surfaceColor: Color,
+    onToggleShuffle: () -> Unit,
+    onCycleRepeat: () -> Unit,
+    onToggleLyrics: () -> Unit,
+    onToggleQueue: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 6.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        BottomGlyph(
+            icon = Icons.Rounded.DevicesOther,
+            contentDescription = stringResource(R.string.now_playing_output_title),
+            onClick = com.music.orb.ui.components.OrbHaptics.transportClick(onOpenOutput),
+            tintColor = tintColor,
+            surfaceColor = surfaceColor,
+            compact = false,
+        )
+
+        NowPlayingCenterControls(
+            shuffleEnabled = shuffleEnabled,
+            repeatMode = repeatMode,
+            lyricsOpen = lyricsOpen,
+            lyricsEnabled = lyricsEnabled,
+            transportEnabled = transportEnabled,
+            tintColor = tintColor,
+            surfaceColor = surfaceColor,
+            onToggleShuffle = onToggleShuffle,
+            onCycleRepeat = onCycleRepeat,
+            onToggleLyrics = onToggleLyrics,
+        )
+
+        BottomGlyph(
+            icon = Icons.AutoMirrored.Rounded.QueueMusic,
+            contentDescription = stringResource(R.string.now_playing_queue_title),
+            onClick = com.music.orb.ui.components.OrbHaptics.transportClick(onToggleQueue),
+            highlighted = queueOpen,
+            tintColor = tintColor,
+            surfaceColor = surfaceColor,
+            compact = false,
+        )
+    }
+}
+
+/** Shared three-button cluster: identical controls in Now Playing and Orb Lock. */
+@Composable
+fun NowPlayingCenterControls(
+    shuffleEnabled: Boolean,
+    repeatMode: Int,
+    lyricsOpen: Boolean,
+    lyricsEnabled: Boolean,
+    transportEnabled: Boolean,
+    tintColor: Color,
+    surfaceColor: Color,
+    onToggleShuffle: () -> Unit,
+    onCycleRepeat: () -> Unit,
+    onToggleLyrics: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        SegmentedPlaybackOptions(
+            shuffleEnabled = shuffleEnabled,
+            repeatMode = repeatMode,
+            lyricsOpen = lyricsOpen,
+            lyricsEnabled = lyricsEnabled,
+            enabled = transportEnabled,
+            tintColor = tintColor,
+            surfaceColor = surfaceColor,
+            onToggleShuffle = onToggleShuffle,
+            onCycleRepeat = onCycleRepeat,
+            onToggleLyrics = onToggleLyrics,
+        )
+    }
+}
+
+@Composable
+private fun SegmentedPlaybackOptions(
+    shuffleEnabled: Boolean,
+    repeatMode: Int,
+    lyricsOpen: Boolean,
+    lyricsEnabled: Boolean,
+    enabled: Boolean,
+    tintColor: Color,
+    surfaceColor: Color,
+    onToggleShuffle: () -> Unit,
+    onCycleRepeat: () -> Unit,
+    onToggleLyrics: () -> Unit,
+) {
+    val repeatEnabled = repeatMode != Player.REPEAT_MODE_OFF
+
+    // The resting state reads as one physical rounded rectangle. A selected
+    // option peels away from that shared object, becomes circular and opens a
+    // small spring gap on either side. Adjacent inactive options remain fused.
+    val gapShuffleRepeat by animateDpAsState(
+        targetValue = if (shuffleEnabled || repeatEnabled) 6.dp else 0.dp,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMediumLow,
+        ),
+        label = "shuffleRepeatBoundaryGap",
+    )
+    val gapRepeatLyrics by animateDpAsState(
+        targetValue = if (repeatEnabled || lyricsOpen) 6.dp else 0.dp,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMediumLow,
+        ),
+        label = "repeatLyricsBoundaryGap",
+    )
+
+    Row(
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        SegmentedBottomGlyph(
+            icon = OrbIcons.Shuffle,
+            contentDescription = if (shuffleEnabled) "Shuffle on" else "Shuffle off",
+            onClick = com.music.orb.ui.components.OrbHaptics.transportClick(onToggleShuffle),
+            enabled = enabled,
+            highlighted = shuffleEnabled,
+            tintColor = tintColor,
+            surfaceColor = surfaceColor,
+            leftAttached = false,
+            rightAttached = !shuffleEnabled && !repeatEnabled,
+        )
+        Spacer(Modifier.width(gapShuffleRepeat))
+        SegmentedBottomGlyph(
+            icon = OrbIcons.Repeat,
+            repeatOne = repeatMode == Player.REPEAT_MODE_ONE,
+            contentDescription = when (repeatMode) {
+                Player.REPEAT_MODE_ONE -> "Repeat one"
+                Player.REPEAT_MODE_ALL -> "Repeat all"
+                else -> "Repeat off"
+            },
+            onClick = com.music.orb.ui.components.OrbHaptics.transportClick(onCycleRepeat),
+            enabled = enabled,
+            highlighted = repeatEnabled,
+            tintColor = tintColor,
+            surfaceColor = surfaceColor,
+            leftAttached = !shuffleEnabled && !repeatEnabled,
+            rightAttached = !repeatEnabled && !lyricsOpen,
+        )
+        Spacer(Modifier.width(gapRepeatLyrics))
+        SegmentedBottomGlyph(
+            icon = OrbIcons.Lyrics,
+            contentDescription = if (lyricsOpen) "Close lyrics" else "Open lyrics",
+            onClick = com.music.orb.ui.components.OrbHaptics.transportClick(onToggleLyrics),
+            enabled = lyricsEnabled,
+            highlighted = lyricsOpen,
+            tintColor = tintColor,
+            surfaceColor = surfaceColor,
+            leftAttached = !repeatEnabled && !lyricsOpen,
+            rightAttached = false,
+        )
+    }
+}
+
+@Composable
+private fun SegmentedBottomGlyph(
+    icon: ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    enabled: Boolean,
+    highlighted: Boolean,
+    tintColor: Color,
+    surfaceColor: Color,
+    leftAttached: Boolean,
+    rightAttached: Boolean,
+    repeatOne: Boolean = false,
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed && enabled) 0.90f else 1f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMediumLow,
+        ),
+        label = "segmentedBottomGlyphScale",
+    )
+    val width by animateDpAsState(
+        targetValue = 42.dp, // Selected glyph remains circular at 42 x 42dp.
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMediumLow,
+        ),
+        label = "segmentedBottomGlyphWidth",
+    )
+    val outerCorner = 12.dp
+    val innerCorner = 0.dp
+    val corner by animateDpAsState(
+        targetValue = if (highlighted) 20.dp else outerCorner,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMediumLow,
+        ),
+        label = "segmentedBottomGlyphCorner",
+    )
+    val shape = if (highlighted) {
+        CircleShape
+    } else {
+        RoundedCornerShape(
+            topStart = if (leftAttached) innerCorner else corner,
+            bottomStart = if (leftAttached) innerCorner else corner,
+            topEnd = if (rightAttached) innerCorner else corner,
+            bottomEnd = if (rightAttached) innerCorner else corner,
+        )
+    }
+
+    Box(
+        modifier = Modifier
+            .width(width)
+            .height(42.dp) // Match the 42dp Cast and Queue controls in Now Playing.
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+                alpha = if (enabled) 1f else 0.38f
+            }
+            .clip(shape)
+            .nowPlayingTransparentGlass(
+                contentColor = tintColor,
+                opacity = if (highlighted) 0.13f else 0.08f,
+                highlight = if (highlighted) 0.045f else 0.025f,
+            )
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                enabled = enabled,
+                onClick = onClick,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        // Only the seams between still-attached pieces are drawn. Because the
+        // pieces share the same glass recipe and have square inner corners, the
+        // three idle controls read as one rounded segmented button.
+        if (!highlighted && leftAttached) {
+            Box(
+                Modifier
+                    .align(Alignment.CenterStart)
+                    .width(0.6.dp)
+                    .height(18.dp)
+                    .background(tintColor.copy(alpha = 0.18f)),
+            )
+        }
+
+        if (repeatOne) {
+            // Draw the loop at a useful size, then typeset the numeral separately.
+            // Baking the 1 into the tiny vector made it collapse into a dash at
+            // phone density.
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = contentDescription,
+                    tint = tintColor.copy(alpha = if (enabled) 1f else 0.30f),
+                    modifier = Modifier.size(25.dp),
+                )
+                Text(
+                    text = "1",
+                    color = tintColor.copy(alpha = if (enabled) 1f else 0.30f),
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontSize = 8.sp,
+                        lineHeight = 8.sp,
+                        fontWeight = FontWeight.Bold,
+                    ),
+                )
+            }
+        } else {
+            Icon(
+                imageVector = icon,
+                contentDescription = contentDescription,
+                tint = tintColor.copy(
+                    alpha = when {
+                        !enabled -> 0.30f
+                        highlighted -> 1f
+                        else -> 0.82f
+                    },
+                ),
+                modifier = Modifier.size(if (icon == OrbIcons.Repeat) 24.dp else 21.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun LabeledBottomButton(
+    icon: ImageVector,
+    label: String,
+    contentDescription: String,
+    onClick: () -> Unit,
+    tintColor: Color,
+    surfaceColor: Color,
+    highlighted: Boolean = false,
+    width: Dp,
+    modifier: Modifier = Modifier,
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.93f else 1f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMediumLow,
+        ),
+        label = "now-playing-labeled-bottom-scale",
+    )
+    val corner by animateDpAsState(
+        targetValue = if (highlighted) 20.dp else 13.dp,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioNoBouncy,
+            stiffness = Spring.StiffnessMediumLow,
+        ),
+        label = "now-playing-labeled-bottom-corner",
+    )
+
+    Row(
+        modifier = modifier
+            .width(width)
+            .height(40.dp)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .clip(RoundedCornerShape(corner))
+            .nowPlayingTransparentGlass(
+                contentColor = tintColor,
+                opacity = if (highlighted) 0.13f else 0.08f,
+                highlight = if (highlighted) 0.045f else 0.025f,
+            )
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = com.music.orb.ui.components.OrbHaptics.transportClick(onClick),
+            )
+            .padding(horizontal = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = tintColor.copy(alpha = if (highlighted) 1f else 0.88f),
+            modifier = Modifier.size(17.dp),
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = label,
+            color = tintColor.copy(alpha = 0.90f),
+            style = MaterialTheme.typography.labelMedium.copy(fontSize = 11.sp),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
 private fun BottomGlyph(
     icon: ImageVector,
     contentDescription: String,
@@ -3376,11 +4232,15 @@ private fun BottomGlyph(
     enabled: Boolean = true,
     highlighted: Boolean = false,
     tintColor: Color = Color.White,
+    surfaceColor: Color,
+    compact: Boolean = false,
 ) {
     if (!OrbFlavorUi.expressive) {
+        val touchSize = if (compact) 36.dp else 44.dp
+        val glyphSize = if (compact) 20.dp else 26.dp
         Box(
             modifier = Modifier
-                .size(44.dp)
+                .size(touchSize)
                 .clip(CircleShape)
                 .background(
                     if (highlighted) tintColor.copy(alpha = 0.20f) else Color.Transparent,
@@ -3403,7 +4263,7 @@ private fun BottomGlyph(
                         else -> 0.75f
                     },
                 ),
-                modifier = Modifier.size(26.dp),
+                modifier = Modifier.size(glyphSize),
             )
         }
         return
@@ -3419,52 +4279,104 @@ private fun BottomGlyph(
         ),
         label = "expressiveBottomGlyphScale",
     )
-    val corner by animateDpAsState(
-        targetValue = if (highlighted) 21.dp else 10.dp,
+    val restingWidth = if (compact) 40.dp else 54.dp
+    val buttonHeight = if (compact) 40.dp else 42.dp
+    val buttonWidth by animateDpAsState(
+        targetValue = if (highlighted) buttonHeight else restingWidth,
         animationSpec = spring(
-            dampingRatio = Spring.DampingRatioNoBouncy,
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMediumLow,
+        ),
+        label = "expressiveBottomGlyphWidth",
+    )
+    val glyphSize = if (compact) 20.dp else 23.dp
+    val corner by animateDpAsState(
+        targetValue = if (highlighted) buttonHeight / 2f else if (compact) 9.dp else 10.dp,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
             stiffness = Spring.StiffnessMediumLow,
         ),
         label = "expressiveBottomGlyphCorner",
     )
-    val container by animateColorAsState(
-        targetValue = tintColor.copy(
-            alpha = when {
-                !enabled -> 0.035f
-                highlighted -> 0.19f
-                else -> 0.065f
-            },
-        ),
-        label = "expressiveBottomGlyphContainer",
-    )
-
-    // State changes only the geometry of the corners, never the footprint.
+    // The visual shrinks into a circle, but its layout slot stays 54dp wide.
+    // Otherwise SpaceBetween reallocates the missing width and shifts the
+    // entire middle segmented control when the queue opens.
     Box(
-        modifier = Modifier
-            .size(width = 54.dp, height = 42.dp)
-            .graphicsLayer { scaleX = scale; scaleY = scale }
-            .clip(RoundedCornerShape(corner))
-            .background(container)
-            .clickable(
-                interactionSource = interactionSource,
-                indication = null,
-                enabled = enabled,
-                onClick = onClick,
-            ),
+        modifier = Modifier.size(width = restingWidth, height = buttonHeight),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = contentDescription,
-            tint = tintColor.copy(
-                alpha = when {
-                    !enabled -> 0.30f
-                    highlighted -> 1f
-                    else -> 0.80f
-                },
-            ),
-            modifier = Modifier.size(23.dp),
-        )
+        Box(
+            modifier = Modifier
+                .size(width = buttonWidth, height = buttonHeight)
+                .graphicsLayer { scaleX = scale; scaleY = scale }
+                .clip(RoundedCornerShape(corner))
+                .nowPlayingTransparentGlass(
+                    contentColor = tintColor,
+                    opacity = if (highlighted) 0.13f else 0.08f,
+                    highlight = if (highlighted) 0.045f else 0.025f,
+                )
+                .clickable(
+                    interactionSource = interactionSource,
+                    indication = null,
+                    enabled = enabled,
+                    onClick = onClick,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = contentDescription,
+                tint = tintColor.copy(
+                    alpha = when {
+                        !enabled -> 0.30f
+                        highlighted -> 1f
+                        else -> 0.80f
+                    },
+                ),
+                modifier = Modifier.size(glyphSize),
+            )
+        }
+    }
+}
+
+@Composable
+private fun HeartBurstOverlay(
+    trigger: Int,
+    tint: Color,
+    modifier: Modifier = Modifier,
+) {
+    val burst = remember { Animatable(0f) }
+    LaunchedEffect(trigger) {
+        if (trigger <= 0) return@LaunchedEffect
+        burst.snapTo(0f)
+        burst.animateTo(1f, tween(520, easing = FastOutSlowInEasing))
+    }
+    val progress = burst.value
+    if (progress <= 0f || progress >= 1f) return
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        Canvas(Modifier.fillMaxSize()) {
+            val center = center
+            val ringRadius = size.minDimension * (0.16f + 0.34f * progress)
+            drawCircle(
+                color = tint.copy(alpha = (1f - progress) * 0.18f),
+                radius = ringRadius,
+                center = center,
+            )
+            val particleRadius = size.minDimension * 0.055f
+            repeat(6) { index ->
+                val angle = (Math.PI * 2.0 * index / 6.0) - Math.PI / 2.0
+                val travel = size.minDimension * (0.10f + 0.22f * progress)
+                val offset = Offset(
+                    x = kotlin.math.cos(angle).toFloat() * travel,
+                    y = kotlin.math.sin(angle).toFloat() * travel,
+                )
+                drawCircle(
+                    color = tint.copy(alpha = (1f - progress) * 0.95f),
+                    radius = particleRadius * (1f - 0.32f * progress),
+                    center = center + offset,
+                )
+            }
+        }
     }
 }
 
@@ -3709,11 +4621,14 @@ private fun InlineQueue(
     currentIndex: Int,
     autoplayEnabled: Boolean,
     shuffleEnabled: Boolean,
+    editable: Boolean = true,
+    allowShuffledDrag: Boolean = false,
     onJumpTo: (Int) -> Unit,
     onRemove: (Int) -> Unit,
     onMove: (Int, Int) -> Unit,
     onClear: () -> Unit,
     contentColor: Color,
+    surfaceColor: Color,
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -3766,7 +4681,7 @@ private fun InlineQueue(
                 color = contentColor.copy(alpha = 0.75f),
                 modifier = Modifier
                     .clip(RoundedCornerShape(percent = 50))
-                    .clickable(onClick = onClear)
+                    .clickable(enabled = editable, onClick = onClear)
                     .padding(horizontal = 8.dp, vertical = 4.dp),
             )
         }
@@ -3791,12 +4706,14 @@ private fun InlineQueue(
                     isCurrent = index == currentIndex,
                     onClick = { onJumpTo(index) },
                     onRemove = { onRemove(index) },
-                    draggable = !shuffleEnabled && index >= firstMovable,
+                    removable = editable,
+                    draggable = editable && (!shuffleEnabled || allowShuffledDrag) && index >= firstMovable,
                     dragging = dragging,
                     onDragStart = { manualDrag.onDragStart(key) },
                     onDrag = manualDrag::onDrag,
                     onDragEnd = manualDrag::onDragEnd,
                     contentColor = contentColor,
+                    surfaceColor = surfaceColor,
                     modifier = Modifier
                         .zIndex(if (dragging) 1f else 0f)
                         .graphicsLayer { translationY = if (dragging) manualDrag.dragOffset else 0f }
@@ -3812,7 +4729,7 @@ private fun InlineQueue(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Icon(
-                            BitChordIcons.Infinity,
+                            OrbIcons.Infinity,
                             contentDescription = null,
                             tint = contentColor.copy(alpha = 0.75f),
                             modifier = Modifier.size(18.dp),
@@ -3849,12 +4766,14 @@ private fun InlineQueue(
                     isCurrent = at == currentIndex,
                     onClick = { onJumpTo(at) },
                     onRemove = { onRemove(at) },
-                    draggable = !shuffleEnabled,
+                    removable = editable,
+                    draggable = editable && (!shuffleEnabled || allowShuffledDrag),
                     dragging = dragging,
                     onDragStart = { autoplayDrag.onDragStart(key) },
                     onDrag = autoplayDrag::onDrag,
                     onDragEnd = autoplayDrag::onDragEnd,
                     contentColor = contentColor,
+                    surfaceColor = surfaceColor,
                     modifier = Modifier
                         .zIndex(if (dragging) 1f else 0f)
                         .graphicsLayer { translationY = if (dragging) autoplayDrag.dragOffset else 0f }
@@ -3938,11 +4857,13 @@ private fun InlineQueueRow(
     onRemove: () -> Unit,
     modifier: Modifier = Modifier,
     draggable: Boolean = false,
+    removable: Boolean = true,
     dragging: Boolean = false,
     onDragStart: () -> Unit = {},
     onDrag: (Float) -> Unit = {},
     onDragEnd: () -> Unit = {},
     contentColor: Color,
+    surfaceColor: Color,
 ) {
     Row(
         modifier = modifier
@@ -3993,6 +4914,7 @@ private fun InlineQueueRow(
                 color = if (isCurrent) contentColor else contentColor.copy(alpha = 0.92f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+                badgePageColor = surfaceColor,
             )
             Text(
                 text = song.artist,
@@ -4024,7 +4946,7 @@ private fun InlineQueueRow(
             )
             Spacer(Modifier.width(10.dp))
         }
-        Box(
+        if(removable) Box(
             modifier = Modifier
                 .size(32.dp)
                 .clip(CircleShape)
@@ -4115,6 +5037,7 @@ private fun LosslessOrStats(
     activeMaximum: Boolean,
     trackDurationMs: Long,
     contentColor: Color,
+    badgePageColor: Color,
     modifier: Modifier = Modifier,
 ) {
     // Nerd stats are diagnostics; quality badges must not depend on that toggle.
@@ -4139,6 +5062,8 @@ private fun LosslessOrStats(
     }
     val isHiQuality = if (rendererHasCodec) trackStats?.isHiQuality == true else badgeQuality.isHiQuality
     val automixEnabled by AppSettings.automixEnabled.collectAsStateWithLifecycle()
+    val internetAvailable by AppSettings.internetAvailable.collectAsStateWithLifecycle()
+    val automixOffline = automixEnabled && !internetAvailable
     // Playback state is authoritative here. NerdStats is diagnostic and can be
     // replaced/re-keyed at handoff; the two-deck engine knows exactly when both
     // tracks are audibly participating in the mix.
@@ -4151,10 +5076,12 @@ private fun LosslessOrStats(
             animated = false,
             showMark = false,
             contentColor = contentColor,
+            pageColor = badgePageColor,
             modifier = modifier,
         )
-        showNerdStats && (albumSequential || trackStats != null || automixStats != null || showQualitySearch) -> NerdStatsLine(
+        showNerdStats && (albumSequential || automixOffline || trackStats != null || automixStats != null || showQualitySearch) -> NerdStatsLine(
             albumSequential = albumSequential,
+            automixOffline = automixOffline,
             nerdStats = trackStats,
             automixStats = automixStats,
             qualityStatus = if (showQualitySearch) stringResource(R.string.now_playing_upgrading_quality) else null,
@@ -4172,6 +5099,7 @@ private fun LosslessOrStats(
             animated = false,
             showMark = false,
             contentColor = contentColor,
+            pageColor = badgePageColor,
             modifier = modifier,
         )
         isLossless -> LosslessLabel(
@@ -4180,18 +5108,24 @@ private fun LosslessOrStats(
             ),
             animated = true,
             contentColor = contentColor,
+            pageColor = badgePageColor,
             modifier = modifier,
         )
-        isHiQuality -> HiQualityWordmark(
-            color = contentColor.copy(alpha = 0.62f),
-            iconWidth = 21.dp,
-            iconHeight = 13.dp,
-            style = MaterialTheme.typography.labelMedium.copy(
-                fontWeight = FontWeight.SemiBold,
-                fontSize = (MaterialTheme.typography.labelMedium.fontSize.value + 1).sp,
-            ),
-            modifier = modifier,
-        )
+        isHiQuality -> Box(
+            modifier = modifier
+                .padding(horizontal = 2.dp, vertical = 1.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            HiQualityWordmark(
+                color = contentColor.copy(alpha = 0.86f),
+                iconWidth = 21.dp,
+                iconHeight = 13.dp,
+                style = MaterialTheme.typography.labelMedium.copy(
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = (MaterialTheme.typography.labelMedium.fontSize.value + 1).sp,
+                ),
+            )
+        }
         else -> {}
     }
 }
@@ -4199,6 +5133,7 @@ private fun LosslessOrStats(
 @Composable
 private fun NerdStatsLine(
     albumSequential: Boolean,
+    automixOffline: Boolean,
     nerdStats: NerdStats.Snapshot?,
     automixStats: NerdStats.AutomixSnapshot?,
     qualityStatus: String?,
@@ -4260,7 +5195,10 @@ private fun NerdStatsLine(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         NerdMarqueeLine(text = audioLine, color = contentColor.copy(alpha = 0.76f))
-        if (albumSequential) {
+        if (automixOffline) {
+            NerdMarqueeLine(text = stringResource(R.string.nerd_offline_automix_status), color = contentColor.copy(alpha = 0.82f))
+            NerdMarqueeLine(text = stringResource(R.string.nerd_offline_automix_unavailable), color = contentColor.copy(alpha = 0.72f))
+        } else if (albumSequential) {
             NerdMarqueeLine(text = stringResource(R.string.nerd_original_album_order), color = contentColor.copy(alpha = 0.82f))
         } else {
             NerdMarqueeLine(text = pairStatusLine, color = contentColor.copy(alpha = 0.82f))
@@ -4468,26 +5406,23 @@ private fun LosslessLabel(
     animated: Boolean,
     showMark: Boolean = true,
     contentColor: Color,
+    pageColor: Color,
     modifier: Modifier = Modifier,
 ) {
-    if (animated && showMark) {
-        ShimmerLosslessWordmark(
-            text = text,
-            contentColor = contentColor,
-            modifier = modifier,
-        )
-        return
-    }
-
-    Row(
-        modifier = modifier,
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically,
+    Box(
+        modifier = modifier
+            .padding(horizontal = 2.dp, vertical = 1.dp),
+        contentAlignment = Alignment.Center,
     ) {
-        if (showMark) {
+        if (animated && showMark) {
+            ShimmerLosslessWordmark(
+                text = text,
+                contentColor = contentColor,
+            )
+        } else if (showMark) {
             LosslessWordmark(
                 text = text,
-                color = contentColor.copy(alpha = if (animated) 0.70f else 0.45f),
+                color = contentColor.copy(alpha = 0.86f),
                 iconWidth = 21.dp,
                 iconHeight = 13.dp,
                 style = MaterialTheme.typography.labelMedium.copy(
@@ -4499,9 +5434,10 @@ private fun LosslessLabel(
             Text(
                 text = text,
                 style = MaterialTheme.typography.labelMedium.copy(
+                    fontWeight = FontWeight.SemiBold,
                     fontSize = (MaterialTheme.typography.labelMedium.fontSize.value + 1).sp,
                 ),
-                color = contentColor.copy(alpha = 0.45f),
+                color = contentColor.copy(alpha = 0.86f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )

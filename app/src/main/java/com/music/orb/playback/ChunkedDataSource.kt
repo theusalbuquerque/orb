@@ -9,6 +9,7 @@ import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.TransferListener
 import com.music.orb.data.innertube.StreamResolver
+import com.music.orb.data.settings.AppSettings
 import java.io.InterruptedIOException
 
 /**
@@ -54,6 +55,13 @@ class ChunkedDataSource(
 
     /** Set when the request can't be improved on, and is simply forwarded. */
     private var passthrough = false
+    /**
+     * When a bounded cellular range is rescued by reopening the same signed URL
+     * as an open-ended request, keep honoring the caller's original byte budget.
+     * Without this guard a 384 KiB queue warm could silently turn into a whole-track
+     * fetch just because googlevideo rejected the synthetic bounded range.
+     */
+    private var passthroughRemaining = C.LENGTH_UNSET.toLong()
 
     override fun addTransferListener(transferListener: TransferListener) {
         upstream.addTransferListener(transferListener)
@@ -80,6 +88,7 @@ class ChunkedDataSource(
         if (!isGoogleVideo || dataSpec.length != C.LENGTH_UNSET.toLong() || total == null) {
             passthrough = true
             chunkOpen = true
+            passthroughRemaining = dataSpec.length
             // Reported, not just thrown. Nothing but googlevideo carries `clen`,
             // so every module stream comes through this branch — and this was
             // the one open in the app whose refusal was neither logged nor
@@ -87,8 +96,20 @@ class ChunkedDataSource(
             // ExoPlaybackException with not one line naming the server that
             // produced it or the status it produced.
             try {
-                return upstream.open(dataSpec)
+                val opened = upstream.open(dataSpec)
+                if (passthroughRemaining == C.LENGTH_UNSET.toLong()) {
+                    passthroughRemaining = opened
+                }
+                return if (dataSpec.length != C.LENGTH_UNSET.toLong()) dataSpec.length else opened
             } catch (e: Exception) {
+                // googlevideo can accept the signed URL but reject an app-synthesised
+                // *bounded* range on either Wi-Fi or cellular. Before poisoning the carrier,
+                // retry the exact same URL from the exact same position as an open-ended range.
+                // OkHttp will send `bytes=<position>-`, which is closer to the stock player's
+                // request shape and is a reliability fallback when the fast ranged path is refused.
+                if (tryOpenEndedRangeRescue(dataSpec, dataSpec.length, e)) {
+                    return dataSpec.length
+                }
                 if (e !is InterruptedIOException) {
                     // `host` is null exactly when the URL was too broken to
                     // parse, which is the case most in need of naming — so fall
@@ -110,7 +131,12 @@ class ChunkedDataSource(
     }
 
     private fun openChunk() {
-        val length = minOf(chunkBytes, bytesRemaining)
+        val effectiveChunkBytes = if (AppSettings.meteredConnection.value == true) {
+            minOf(chunkBytes, METERED_CHUNK_BYTES)
+        } else {
+            chunkBytes
+        }
+        val length = minOf(effectiveChunkBytes, bytesRemaining)
         val spec = requireNotNull(baseSpec).buildUpon()
             .setPosition(position)
             .setLength(length)
@@ -118,6 +144,14 @@ class ChunkedDataSource(
         try {
             upstream.open(spec)
         } catch (e: Exception) {
+            // A bounded range refusal is not yet proof that the signed carrier is dead.
+            // Some googlevideo sessions reject `bytes=a-b` while continuing to serve
+            // `bytes=a-`, on Wi-Fi as well as cellular. Fall back in-place before escalating
+            // the URL to StreamResolver, so playback can keep its buffer and position.
+            if (tryOpenEndedRangeRescue(spec, bytesRemaining, e)) {
+                chunkRemaining = 0L
+                return
+            }
             // Which client minted the URL is the first thing worth knowing when
             // a range is refused, and it isn't recoverable from anywhere else by
             // the time this surfaces as a playback error. A cancelled read-ahead
@@ -153,7 +187,7 @@ class ChunkedDataSource(
     }
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
-        if (passthrough) return upstream.read(buffer, offset, length)
+        if (passthrough) return readPassthrough(buffer, offset, length)
         if (bytesRemaining == 0L) return C.RESULT_END_OF_INPUT
 
         // A range that ends early is re-opened for the part that didn't
@@ -164,6 +198,7 @@ class ChunkedDataSource(
             if (chunkRemaining == 0L) {
                 closeChunk()
                 openChunk()
+                if (passthrough) return readPassthrough(buffer, offset, length)
             }
             val read = upstream.read(buffer, offset, minOf(length.toLong(), chunkRemaining).toInt())
             if (read != C.RESULT_END_OF_INPUT) {
@@ -175,6 +210,65 @@ class ChunkedDataSource(
             chunkRemaining = 0L
         }
         return C.RESULT_END_OF_INPUT
+    }
+
+    private fun readPassthrough(buffer: ByteArray, offset: Int, length: Int): Int {
+        if (passthroughRemaining == 0L) return C.RESULT_END_OF_INPUT
+        val allowed = if (passthroughRemaining == C.LENGTH_UNSET.toLong()) {
+            length
+        } else {
+            minOf(length.toLong(), passthroughRemaining).toInt()
+        }
+        if (allowed <= 0) return C.RESULT_END_OF_INPUT
+        val read = upstream.read(buffer, offset, allowed)
+        if (read > 0 && passthroughRemaining != C.LENGTH_UNSET.toLong()) {
+            passthroughRemaining = (passthroughRemaining - read).coerceAtLeast(0L)
+        }
+        return read
+    }
+
+    /**
+     * Compatibility escape for googlevideo's inconsistent bounded Range handling.
+     * A successful rescue deliberately does not call [report]: the carrier itself
+     * is usable, only the synthetic `a-b` request was refused. This intentionally
+     * applies on Wi-Fi too; the same refusal pattern is visible there, and making
+     * recovery depend on the network type turns an identical valid carrier into
+     * a spinner on one connection and a playing stream on another.
+     */
+    private fun tryOpenEndedRangeRescue(
+        failedSpec: DataSpec,
+        remainingBudget: Long,
+        failure: Exception,
+    ): Boolean {
+        if (failure !is HttpDataSource.InvalidResponseCodeException || failure.responseCode != 403) return false
+        if (failedSpec.uri.host?.endsWith("googlevideo.com", ignoreCase = true) != true) return false
+        if (failedSpec.length == C.LENGTH_UNSET.toLong()) return false
+
+        runCatching { upstream.close() }
+        val rescueSpec = failedSpec.buildUpon()
+            .setPosition(failedSpec.position)
+            .setLength(C.LENGTH_UNSET.toLong())
+            .build()
+        return try {
+            upstream.open(rescueSpec)
+            passthrough = true
+            chunkOpen = true
+            passthroughRemaining = remainingBudget
+            TrackLog.w(
+                TAG,
+                "bounded range at ${failedSpec.position} refused; " +
+                    "continuing same carrier with open-ended range",
+            )
+            true
+        } catch (rescueError: Exception) {
+            if (rescueError !is InterruptedIOException) {
+                TrackLog.w(
+                    TAG,
+                    "open-ended range rescue also failed for ${failedSpec.uri.host}: ${rescueError.message}",
+                )
+            }
+            false
+        }
     }
 
     private fun closeChunk() {
@@ -193,10 +287,18 @@ class ChunkedDataSource(
         baseSpec = null
         bytesRemaining = 0L
         chunkRemaining = 0L
+        passthroughRemaining = C.LENGTH_UNSET.toLong()
+        passthrough = false
     }
 
     private companion object {
-        const val TAG = "BitChord"
+        const val TAG = "Orb"
+
+        /**
+         * Smaller cellular ranges reduce first-response cost and avoid googlevideo
+         * sessions that accept modest byte ranges but reject 2 MiB requests.
+         */
+        const val METERED_CHUNK_BYTES = 512L * 1024L
 
         /** Enough to ride out a truncated range, not enough to hang on a dead one. */
         const val MAX_EMPTY_RANGES = 3

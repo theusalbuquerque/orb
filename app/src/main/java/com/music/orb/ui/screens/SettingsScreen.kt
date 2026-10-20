@@ -1,10 +1,13 @@
 package com.music.orb.ui.screens
+import com.music.orb.ui.components.OrbGlassButton
 
 import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import android.provider.Settings as AndroidSettings
 import android.content.pm.PackageManager
 import android.media.audiofx.AudioEffect
 import android.os.Build
@@ -16,19 +19,42 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import android.widget.Toast
+import com.music.orb.ui.components.orbOverlayGlassBaseColor
+import com.music.orb.ui.components.orbGlassSurface
+import com.music.orb.ui.components.orbBadgeGlassSurface
 import com.music.orb.data.billing.BillingApi
+import com.music.orb.data.billing.BillingException
+import com.music.orb.data.billing.PremiumCheckout
+import com.music.orb.data.billing.PremiumPriceLocalization
+import kotlinx.coroutines.CancellationException
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.ui.res.painterResource
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.windowInsetsBottomHeight
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -54,35 +80,43 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.DevicesOther
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.GraphicEq
+import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.MotionPhotosOff
+import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.MusicOff
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PlaylistPlay
 import androidx.compose.material.icons.rounded.ScreenRotation
 import androidx.compose.material.icons.rounded.SignalCellularAlt
 import androidx.compose.material.icons.rounded.Storage
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Vibration
 import androidx.compose.material.icons.rounded.SurroundSound
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.Waves
 import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material.icons.rounded.SystemUpdate
-import androidx.compose.material3.AlertDialog
+import com.music.orb.ui.components.OrbConfirmationDialog as AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import com.music.orb.ui.components.OrbGlassIconButton as IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
+import com.music.orb.ui.components.OrbModalBottomSheet as ModalBottomSheet
+import com.music.orb.ui.components.OrbSheetMotionContent
+import com.music.orb.ui.components.rememberOrbSheetMotionViewport
+import com.music.orb.ui.components.orbSheetMotionViewport
+import com.music.orb.ui.components.orbSheetProgressiveItem
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import com.music.orb.ui.components.ExpressiveSwitch as Switch
 import androidx.compose.material3.SwitchDefaults
-import androidx.compose.material3.TextButton
+import com.music.orb.ui.components.OrbGlassTextButton as TextButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -132,11 +166,15 @@ import com.music.orb.ui.components.thumbnailBorder
 import com.music.orb.ui.components.TimedExperimentalNotice
 import com.music.orb.ui.components.FeedbackSheet
 import com.music.orb.ui.flavor.OrbFlavorUi
+import com.music.orb.ui.icons.OrbIcons
 import com.music.orb.data.model.Account
 import com.music.orb.BuildConfig
 import com.music.orb.R
 import com.music.orb.data.settings.AppSettings
+import com.music.orb.download.OfflineDownloadQuality
 import com.music.orb.data.settings.AutomixVersion
+import com.music.orb.data.settings.PremiumLaunch
+import com.music.orb.data.settings.OrbAppLanguage
 import com.music.orb.data.sources.SourceKind
 import com.music.orb.data.sources.SourceRegistry
 import com.music.orb.data.settings.AudioQuality
@@ -151,8 +189,57 @@ import com.music.orb.playback.AudioCache
 import com.music.orb.playback.AudioOutputStatus
 import com.music.orb.playback.DolbyAtmos
 import com.music.orb.ui.components.OrbHaptics
+import com.music.orb.ui.components.orbExpressiveGlassContentColor
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
+
+/** Localized, actionable billing diagnostics; no raw Mercado Pago payloads or credentials. */
+private fun premiumBillingErrorText(context: android.content.Context, exception: Exception): String {
+    if (exception !is BillingException) return context.getString(R.string.premium_billing_error)
+    val messageId = when (exception.code) {
+        "MP_CREDENTIALS_REJECTED" -> R.string.premium_billing_credentials_rejected
+        "MP_REQUEST_REJECTED" -> R.string.premium_billing_request_rejected
+        "MP_RATE_LIMITED" -> R.string.premium_billing_rate_limited
+        "MP_CHECKOUT_LINK_MISSING" -> R.string.premium_billing_link_missing
+        "MP_INVALID_RESPONSE" -> R.string.premium_billing_invalid_response
+        "MP_UNAVAILABLE", "NETWORK_ERROR" -> R.string.premium_billing_service_unavailable
+        else -> when (exception.status) {
+            401 -> R.string.premium_billing_sign_in
+            409 -> R.string.premium_billing_already_active
+            502, 503, 504 -> R.string.premium_billing_service_unavailable
+            else -> R.string.premium_billing_error
+        }
+    }
+    val base = context.getString(messageId)
+    val providerCode = exception.providerCode?.takeIf { code ->
+        code != "unknown" && code.matches(Regex("[A-Za-z0-9_.-]{1,64}"))
+    }
+    return if (providerCode != null && exception.code == "MP_REQUEST_REJECTED")
+        "$base ($providerCode)" else base
+}
+
+@Composable
+internal fun rememberPremiumReleaseReached(): Boolean {
+    fun hasReachedPremiumRelease(): Boolean = PremiumLaunch.isPublicLaunchTime()
+
+    var premiumReleaseReached by remember { mutableStateOf(hasReachedPremiumRelease()) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            // Re-evaluate the user's current time zone, including changes while
+            // Settings remains open. Initial state avoids a post-launch card flash.
+            val releaseMillis = LocalDate.of(2026, 11, 1)
+                .atTime(LocalTime.of(8, 0))
+                .atZone(ZoneId.systemDefault())
+                .toInstant()
+                .toEpochMilli()
+            val remainingMillis = releaseMillis - System.currentTimeMillis()
+            premiumReleaseReached = remainingMillis <= 0L
+            delay(if (remainingMillis > 0L) remainingMillis.coerceAtMost(60_000L) else 60_000L)
+        }
+    }
+    return premiumReleaseReached
+}
 
 private val LocalSettingsEdgeScrollState = staticCompositionLocalOf<ScrollState?> { null }
 
@@ -172,12 +259,12 @@ private fun settingsVerticalEdgeModifier(): Modifier {
         (if (OrbFlavorUi.expressive) 86.dp else 78.dp).toPx()
     }
     val minDistancePx = with(density) { 78.dp.toPx() }
-    var itemTopPx by remember { mutableFloatStateOf(Float.NaN) }
+    var itemContentTopPx by remember { mutableFloatStateOf(Float.NaN) }
     var itemHeightPx by remember { mutableFloatStateOf(0f) }
 
     val edgeState = remember(scrollState, topEdgePx, minDistancePx, view) {
         derivedStateOf {
-            val top = itemTopPx
+            val top = itemContentTopPx - scrollState.value
             val height = itemHeightPx
             val bottom = view.height.toFloat()
             if (!top.isFinite() || height <= 0f || bottom <= 0f) {
@@ -206,7 +293,7 @@ private fun settingsVerticalEdgeModifier(): Modifier {
 
     return Modifier
         .onGloballyPositioned { coordinates ->
-            itemTopPx = coordinates.positionInRoot().y
+            itemContentTopPx = coordinates.positionInRoot().y + scrollState.value
             itemHeightPx = coordinates.size.height.toFloat()
         }
         .graphicsLayer {
@@ -225,40 +312,40 @@ private fun settingsVerticalEdgeModifier(): Modifier {
 fun SettingsScreen(
     onSources: () -> Unit,
     onLyricsSources: () -> Unit,
+    onOrbLockSettings: () -> Unit,
     account: Account? = null,
     contentPadding: PaddingValues,
     modifier: Modifier = Modifier,
     scrollState: ScrollState? = null,
+    highlightPremium: Boolean = false,
 ) {
     val context = LocalContext.current
     val effectiveScrollState = scrollState ?: rememberScrollState()
     val scope = rememberCoroutineScope()
 
-    val crossfade by AppSettings.crossfadeSeconds.collectAsStateWithLifecycle()
+    val autoplay by AppSettings.autoplay.collectAsStateWithLifecycle()
     val automix by AppSettings.automixEnabled.collectAsStateWithLifecycle()
     val automixVersion by AppSettings.automixVersion.collectAsStateWithLifecycle()
     val automix25Available by AppSettings.automix25Available.collectAsStateWithLifecycle()
-    val skipSilence by AppSettings.skipSilence.collectAsStateWithLifecycle()
     val spatialAudio by AppSettings.spatialAudio.collectAsStateWithLifecycle()
     val atmosSupported by DolbyAtmos.supported.collectAsStateWithLifecycle()
     val atmosEnabled by DolbyAtmos.enabledOnDevice.collectAsStateWithLifecycle()
     val atmosStatusReadable by DolbyAtmos.statusReadable.collectAsStateWithLifecycle()
     val nerdStats by AppSettings.showNerdStats.collectAsStateWithLifecycle()
     val hapticFeedback by AppSettings.hapticFeedback.collectAsStateWithLifecycle()
+    val touchTransferEnabled by AppSettings.touchTransferEnabled.collectAsStateWithLifecycle()
     val setHapticFeedback: (Boolean) -> Unit = { enabled ->
         // Let the setting confirm itself: when enabling, persist first so the
         // haptic is permitted; when disabling, pulse before removing permission.
-        if (!enabled) OrbHaptics.perform(context, OrbHaptics.Kind.TOGGLE)
+        if (!enabled) OrbHaptics.performToggleBeforeDisabling(context)
         AppSettings.setHapticFeedback(enabled)
         if (enabled) OrbHaptics.perform(context, OrbHaptics.Kind.TOGGLE)
     }
-    val prioritizeAlbumVersions by AppSettings.prioritizeAlbumVersions.collectAsStateWithLifecycle()
     val hideStatusBarNowPlaying by AppSettings.hideStatusBarNowPlaying.collectAsStateWithLifecycle()
     val keepScreenOnNowPlaying by AppSettings.keepScreenOnNowPlaying.collectAsStateWithLifecycle()
     val allowScreenRotation by AppSettings.allowScreenRotation.collectAsStateWithLifecycle()
     val isPhoneLayout = LocalConfiguration.current.smallestScreenWidthDp < 600
     val animatedCanvas by AppSettings.animatedCanvas.collectAsStateWithLifecycle()
-    val syncedLyrics by AppSettings.syncedLyrics.collectAsStateWithLifecycle()
     val lyricsSources by AppSettings.lyricsSources.collectAsStateWithLifecycle()
     val outputPcmMode by AppSettings.outputPcmMode.collectAsStateWithLifecycle()
     val preferUsbDac by AppSettings.preferUsbDac.collectAsStateWithLifecycle()
@@ -266,39 +353,88 @@ fun SettingsScreen(
     val theme by AppSettings.themeMode.collectAsStateWithLifecycle()
     val homeAuraEnabled by AppSettings.homeAuraEnabled.collectAsStateWithLifecycle()
     val cacheLimitBytes by AppSettings.audioCacheLimitBytes.collectAsStateWithLifecycle()
+    val downloadQuality by AppSettings.downloadQuality.collectAsStateWithLifecycle()
+    val downloadAllowLowerQuality by AppSettings.downloadAllowLowerQuality.collectAsStateWithLifecycle()
+    val useDownloadsWhileOnline by AppSettings.useDownloadsWhileOnline.collectAsStateWithLifecycle()
     val betaUpdatesEnabled by AppSettings.betaUpdatesEnabled.collectAsStateWithLifecycle()
     val isOwnerAccount by AppSettings.isOwnerAccount.collectAsStateWithLifecycle()
+    val premiumEarlyOfferAccess by AppSettings.premiumEarlyOfferAccess.collectAsStateWithLifecycle()
     val premiumEntitled by AppSettings.premiumEntitled.collectAsStateWithLifecycle()
-    var premiumReleaseReached by remember { mutableStateOf(false) }
+    val ownerPremiumTestSubscribed by AppSettings.ownerPremiumTestSubscribed.collectAsStateWithLifecycle()
+    val premiumSubscriptionVisible = if (isOwnerAccount) ownerPremiumTestSubscribed else premiumEntitled
+    val continuePlaybackAfterRecentRemoval by AppSettings.continuePlaybackAfterRecentRemoval.collectAsStateWithLifecycle()
+    val serverPremiumCardEnabled by AppSettings.serverPremiumCardEnabled.collectAsStateWithLifecycle()
+    val premiumReleaseReached = rememberPremiumReleaseReached()
 
+    // The invited account sees the same offer as public-launch users, but
+    // remains locked until the backend confirms a paid subscription.
+    val premiumOfferVisible = isOwnerAccount || premiumEarlyOfferAccess || premiumReleaseReached
+    val showPremiumCard = premiumOfferVisible
+    val premiumFeaturesLocked = premiumOfferVisible && !premiumEntitled && !isOwnerAccount
+
+    // Removed controls must not leave invisible settings enabled for existing users.
     LaunchedEffect(Unit) {
-        val releaseInstant = LocalDate.of(2026, 11, 1)
-            .atTime(LocalTime.of(8, 0))
-            .atZone(ZoneId.systemDefault())
-            .toInstant()
-        while (true) {
-            val remainingMillis = releaseInstant.toEpochMilli() - System.currentTimeMillis()
-            if (remainingMillis <= 0L) {
-                premiumReleaseReached = true
-                break
-            }
-            delay(remainingMillis.coerceAtMost(60_000L))
-        }
+        if (AppSettings.prioritizeAlbumVersions.value) AppSettings.setPrioritizeAlbumVersions(false)
+        if (AppSettings.skipSilence.value) AppSettings.setSkipSilence(false)
+        if (!AppSettings.syncedLyrics.value) AppSettings.setSyncedLyrics(true)
     }
-
-    val showPremiumCard = isOwnerAccount || premiumReleaseReached
 
     var showJoinBetaDialog by remember { mutableStateOf(false) }
     var showLeaveBetaDialog by remember { mutableStateOf(false) }
     var showAutomixNotice by rememberSaveable { mutableStateOf(false) }
     var showDonationSheet by rememberSaveable { mutableStateOf(false) }
     var showPremiumSheet by rememberSaveable { mutableStateOf(false) }
+    var showDownloadSettings by rememberSaveable { mutableStateOf(false) }
+    var showAppLanguageSheet by rememberSaveable { mutableStateOf(false) }
+    var showCachePage by rememberSaveable { mutableStateOf(false) }
+    BackHandler(enabled = showCachePage) { showCachePage = false }
+    LaunchedEffect(showCachePage) {
+        if (showCachePage) effectiveScrollState.scrollTo(0)
+    }
+    var showCancelPremiumDialog by rememberSaveable { mutableStateOf(false) }
+    var cancelPremiumBusy by remember { mutableStateOf(false) }
+    var cancelPremiumError by remember { mutableStateOf<String?>(null) }
+
+    fun cancelPremiumSubscription() {
+        if (cancelPremiumBusy) return
+        cancelPremiumBusy = true
+        cancelPremiumError = null
+        scope.launch {
+            try {
+                if (isOwnerAccount) {
+                    // Revoke the server-backed complimentary subscription record.
+                    // Owner developer entitlement remains independent of billing.
+                    withContext(Dispatchers.IO) { BillingApi.ownerZeroCancel() }
+                } else {
+                    // Cancellation stops renewal, not the already paid entitlement.
+                    // Premium may correctly remain true until paidUntil expires.
+                    withContext(Dispatchers.IO) { BillingApi.cancelSubscription() }
+                }
+                showCancelPremiumDialog = false
+                Toast.makeText(
+                    context,
+                    if (isOwnerAccount) R.string.premium_demo_cancel_success else R.string.premium_cancel_success,
+                    Toast.LENGTH_LONG,
+                ).show()
+            } catch (exception: CancellationException) {
+                throw exception
+            } catch (exception: Exception) {
+                cancelPremiumError = premiumBillingErrorText(context, exception)
+            } finally {
+                cancelPremiumBusy = false
+            }
+        }
+    }
     var premiumMonthlyPrice by remember { mutableStateOf<Double?>(null) }
     var checkingForUpdates by remember { mutableStateOf(false) }
 
-    LaunchedEffect(showPremiumCard) {
-        if (!showPremiumCard) return@LaunchedEffect
-        premiumMonthlyPrice = withContext(Dispatchers.IO) { BillingApi.fetchMonthlyPrice() }
+    // The main activity already refreshes account entitlements on a controlled
+    // cadence. Opening Settings must never request it a second time just to
+    // display a card: the cached, account-scoped StateFlow is immediate.
+    LaunchedEffect(showPremiumCard, isOwnerAccount) {
+        if (showPremiumCard && !isOwnerAccount && premiumMonthlyPrice == null) {
+            premiumMonthlyPrice = withContext(Dispatchers.IO) { BillingApi.fetchMonthlyPrice() }
+        }
     }
 
 
@@ -391,12 +527,22 @@ fun SettingsScreen(
             .verticalScroll(effectiveScrollState)
             .padding(contentPadding),
     ) {
+        if (showCachePage) {
+            CacheSettingsPage(onBack = { showCachePage = false })
+        } else {
         if (showPremiumCard) {
-            PremiumOrbCard(onClick = { showPremiumSheet = true })
+            PremiumOrbCard(
+                premiumEntitled = premiumSubscriptionVisible,
+                ownerDemoCanceled = isOwnerAccount && !ownerPremiumTestSubscribed,
+                highlight = highlightPremium,
+                onClick = { showPremiumSheet = true },
+            )
         }
-        SupportOrbCard(
-            onClick = { showDonationSheet = true },
-        )
+        if (!premiumOfferVisible) {
+            SupportOrbCard(
+                onClick = { showDonationSheet = true },
+            )
+        }
 
         SettingsGroup(header = stringResource(R.string.settings_header_playback)) {
             SettingsRow(
@@ -406,20 +552,6 @@ fun SettingsScreen(
                 onClick = onSources,
             )
             RowDivider()
-            if (!automix) {
-                SliderRow(
-                    icon = Icons.Rounded.Waves,
-                    title = stringResource(R.string.settings_crossfade),
-                    subtitle = stringResource(R.string.settings_crossfade_subtitle),
-                    value = if (crossfade == 0) "Off" else "${crossfade}s",
-                    sliderValue = crossfade.toFloat(),
-                    onSliderValue = { AppSettings.setCrossfadeSeconds(it.roundToInt()) },
-                    valueRange = 0f..12f,
-                    steps = 11,
-                    enabled = true,
-                )
-                RowDivider()
-            }
             SettingsRow(
                 icon = Icons.Rounded.AutoAwesome,
                 title = stringResource(R.string.settings_automix),
@@ -458,12 +590,10 @@ fun SettingsScreen(
             )
             if (automix25Available) {
                 RowDivider()
-                SettingsRow(
+                SettingsSegmentedField(
                     icon = Icons.Rounded.Tune,
                     title = stringResource(R.string.settings_automix_version),
                     subtitle = stringResource(R.string.settings_automix_25_premium_preview),
-                )
-                SegmentedControl(
                     options = listOf(
                         stringResource(R.string.settings_automix_20),
                         stringResource(R.string.settings_automix_25),
@@ -474,47 +604,84 @@ fun SettingsScreen(
                             if (index == 1) AutomixVersion.V2_5 else AutomixVersion.V2_0,
                         )
                     },
-                    modifier = Modifier.padding(
-                        start = ROW_INSET,
-                        end = ROW_INSET,
-                        bottom = 14.dp,
-                    ),
+                )
+            }
+            if (premiumFeaturesLocked && !automix25Available) {
+                RowDivider()
+                PremiumLockedSettingsRow(
+                    icon = Icons.Rounded.AutoAwesome,
+                    title = stringResource(R.string.premium_automix_locked_title),
+                    subtitle = stringResource(R.string.premium_automix_locked_subtitle),
                 )
             }
             RowDivider()
             SettingsRow(
-                icon = Icons.Rounded.PlaylistPlay,
-                title = stringResource(R.string.settings_prioritize_album_versions),
-                subtitle = stringResource(R.string.settings_prioritize_album_versions_subtitle),
+                icon = OrbIcons.Infinity,
+                title = stringResource(R.string.settings_autoplay),
+                subtitle = stringResource(R.string.settings_autoplay_subtitle),
                 trailing = {
                     Switch(
-                        checked = prioritizeAlbumVersions,
-                        onCheckedChange = AppSettings::setPrioritizeAlbumVersions,
+                        checked = autoplay,
+                        onCheckedChange = AppSettings::setAutoplay,
                         colors = SwitchDefaults.colors(
                             checkedTrackColor = MaterialTheme.colorScheme.primary,
                             checkedBorderColor = MaterialTheme.colorScheme.primary,
                         ),
                     )
                 },
-                onClick = { AppSettings.setPrioritizeAlbumVersions(!prioritizeAlbumVersions) },
+                onClick = { AppSettings.setAutoplay(!autoplay) },
             )
-            RowDivider()
-            SettingsRow(
-                icon = Icons.AutoMirrored.Rounded.VolumeOff,
-                title = stringResource(R.string.settings_skip_silence),
-                subtitle = stringResource(R.string.settings_skip_silence_subtitle),
-                trailing = {
-                    Switch(
-                        checked = skipSilence,
-                        onCheckedChange = AppSettings::setSkipSilence,
-                        colors = SwitchDefaults.colors(
-                            checkedTrackColor = MaterialTheme.colorScheme.primary,
-                            checkedBorderColor = MaterialTheme.colorScheme.primary,
-                        ),
-                    )
-                },
-                onClick = { AppSettings.setSkipSilence(!skipSilence) },
-            )
+            if (premiumEntitled || isOwnerAccount) {
+                RowDivider()
+                SettingsRow(
+                    icon = Icons.Rounded.MusicNote,
+                    title = stringResource(R.string.settings_continue_playback_recents),
+                    subtitle = stringResource(R.string.settings_continue_playback_recents_subtitle),
+                    trailing = {
+                        Switch(
+                            checked = continuePlaybackAfterRecentRemoval,
+                            onCheckedChange = AppSettings::setContinuePlaybackAfterRecentRemoval,
+                            colors = SwitchDefaults.colors(
+                                checkedTrackColor = MaterialTheme.colorScheme.primary,
+                                checkedBorderColor = MaterialTheme.colorScheme.primary,
+                            ),
+                        )
+                    },
+                    onClick = {
+                        AppSettings.setContinuePlaybackAfterRecentRemoval(!continuePlaybackAfterRecentRemoval)
+                    },
+                )
+                RowDivider()
+                SettingsRow(
+                    icon = Icons.Rounded.DevicesOther,
+                    title = stringResource(R.string.settings_touch_transfer),
+                    subtitle = stringResource(R.string.settings_touch_transfer_subtitle),
+                    trailing = {
+                        Switch(
+                            checked = touchTransferEnabled,
+                            onCheckedChange = AppSettings::setTouchTransferEnabled,
+                            colors = SwitchDefaults.colors(
+                                checkedTrackColor = MaterialTheme.colorScheme.primary,
+                                checkedBorderColor = MaterialTheme.colorScheme.primary,
+                            ),
+                        )
+                    },
+                    onClick = { AppSettings.setTouchTransferEnabled(!touchTransferEnabled) },
+                )
+            } else if (premiumFeaturesLocked) {
+                RowDivider()
+                PremiumLockedSettingsRow(
+                    icon = Icons.Rounded.MusicNote,
+                    title = stringResource(R.string.settings_continue_playback_recents),
+                    subtitle = stringResource(R.string.settings_continue_playback_recents_subtitle),
+                )
+                RowDivider()
+                PremiumLockedSettingsRow(
+                    icon = Icons.Rounded.DevicesOther,
+                    title = stringResource(R.string.settings_touch_transfer),
+                    subtitle = stringResource(R.string.settings_touch_transfer_subtitle),
+                )
+            }
             RowDivider()
             SettingsRow(
                 icon = Icons.Rounded.SurroundSound,
@@ -565,7 +732,7 @@ fun SettingsScreen(
                 onClick = if (atmosSupported) ({ openAtmosSettings(context) }) else null,
             )
             RowDivider()
-            SettingsRow(
+            SettingsSegmentedField(
                 icon = Icons.Rounded.GraphicEq,
                 title = stringResource(R.string.settings_output_precision),
                 subtitle = buildString {
@@ -575,13 +742,9 @@ fun SettingsScreen(
                     append(" · ")
                     append(AudioOutputStatus.encodingLabel(outputStatus))
                 },
-                onClick = null,
-            )
-            SegmentedControl(
                 options = OutputPcmMode.entries.map { it.label },
                 selectedIndex = OutputPcmMode.entries.indexOf(outputPcmMode),
                 onSelect = { AppSettings.setOutputPcmMode(OutputPcmMode.entries[it]) },
-                modifier = Modifier.padding(start = 58.dp, end = 16.dp, bottom = 14.dp),
             )
             RowDivider()
             SettingsRow(
@@ -630,6 +793,30 @@ fun SettingsScreen(
                 },
                 onClick = { AppSettings.setHomeAuraEnabled(!homeAuraEnabled) },
             )
+            if (premiumOfferVisible || premiumEntitled) {
+                RowDivider()
+                if (premiumFeaturesLocked) {
+                    PremiumLockedSettingsRow(
+                        icon = Icons.Rounded.DevicesOther,
+                        title = stringResource(R.string.settings_orb_lockscreen),
+                        subtitle = stringResource(R.string.settings_orb_lockscreen_subtitle),
+                    )
+                } else {
+                    SettingsRow(
+                        icon = Icons.Rounded.DevicesOther,
+                        title = stringResource(R.string.settings_orb_lockscreen),
+                        subtitle = stringResource(R.string.settings_orb_lockscreen_subtitle),
+                        onClick = onOrbLockSettings,
+                        trailing = {
+                            Icon(
+                                Icons.Rounded.ChevronRight,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        },
+                    )
+                }
+            }
             RowDivider()
             SettingsRow(
                 icon = Icons.Rounded.Animation,
@@ -650,7 +837,7 @@ fun SettingsScreen(
             RowDivider()
             SettingsRow(
                 icon = Icons.Rounded.Tune,
-                title = stringResource(R.string.settings_hide_status_bar_now_playing),
+                title = stringResource(R.string.settings_display_hide_status_bar),
                 subtitle = stringResource(R.string.settings_hide_status_bar_now_playing_subtitle),
                 trailing = {
                     Switch(
@@ -703,10 +890,43 @@ fun SettingsScreen(
         }
 
         val cacheLimitMb = (cacheLimitBytes / (1024 * 1024)).toInt()
+        val selectedDownloadQuality = when (downloadQuality) {
+            "MEDIUM" -> stringResource(R.string.orb_download_quality_medium)
+            "MAXIMUM" -> stringResource(R.string.orb_download_quality_maximum)
+            else -> stringResource(R.string.orb_download_quality_high)
+        }
         SettingsGroup(header = stringResource(R.string.settings_header_storage)) {
+            SettingsRow(
+                icon = Icons.Rounded.Language,
+                title = stringResource(R.string.orb_language_settings_title),
+                subtitle = if (com.music.orb.data.settings.OrbAppLanguage.choice(context).isEmpty()) {
+                    stringResource(R.string.orb_language_auto_description,
+                        com.music.orb.data.settings.OrbAppLanguage.labelFor(
+                            com.music.orb.data.settings.OrbAppLanguage.deviceTag()))
+                } else {
+                    com.music.orb.data.settings.OrbAppLanguage.labelFor(
+                        com.music.orb.data.settings.OrbAppLanguage.choice(context))
+                },
+                trailing = {
+                    Icon(Icons.Rounded.ChevronRight, contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                },
+                onClick = { showAppLanguageSheet = true },
+            )
+            RowDivider()
+            SettingsRow(
+                icon = Icons.Rounded.Download,
+                title = stringResource(R.string.settings_download_preferences),
+                // Preserve the selected quality below the title, without a
+                // trailing value that squeezes long translations vertically.
+                subtitle = stringResource(R.string.settings_downloads_subtitle) +
+                    "\n" + selectedDownloadQuality,
+                onClick = { showDownloadSettings = true },
+            )
+            RowDivider()
             SliderRow(
                 icon = Icons.Rounded.Storage,
-                title = stringResource(R.string.settings_cache_limit),
+                title = stringResource(R.string.settings_storage_limit),
                 subtitle = if (cacheLimitMb > CACHE_WARNING_MB) {
                     stringResource(
                         R.string.settings_cache_limit_subtitle_large,
@@ -724,22 +944,14 @@ fun SettingsScreen(
             RowDivider()
             SettingsRow(
                 icon = Icons.Rounded.DeleteSweep,
-                title = stringResource(R.string.settings_clear_song_cache),
-                subtitle = stringResource(R.string.settings_clear_song_cache_subtitle),
-                onClick = {
-                    AudioCache.clear {
-                        Toast.makeText(
-                            context,
-                            context.getString(R.string.settings_song_cache_cleared),
-                            Toast.LENGTH_SHORT,
-                        ).show()
-                    }
-                },
+                title = stringResource(R.string.settings_cache_page_title),
+                subtitle = stringResource(R.string.settings_cache_page_subtitle),
+                onClick = { showCachePage = true },
             )
             RowDivider()
             SettingsRow(
                 icon = Icons.Rounded.GraphicEq,
-                title = stringResource(R.string.settings_nerd_stats),
+                title = stringResource(R.string.settings_nerd_stats_short),
                 subtitle = stringResource(R.string.settings_nerd_stats_subtitle),
                 trailing = {
                     Switch(
@@ -762,6 +974,7 @@ fun SettingsScreen(
                     Switch(
                         checked = hapticFeedback,
                         onCheckedChange = setHapticFeedback,
+                        hapticOnChange = false,
                         colors = SwitchDefaults.colors(
                             checkedTrackColor = MaterialTheme.colorScheme.primary,
                             checkedBorderColor = MaterialTheme.colorScheme.primary,
@@ -772,32 +985,27 @@ fun SettingsScreen(
             )
             RowDivider()
             SettingsRow(
-                icon = Icons.AutoMirrored.Rounded.Notes,
-                title = stringResource(R.string.settings_synced_lyrics),
-                subtitle = stringResource(R.string.settings_synced_lyrics_subtitle),
-                trailing = {
-                    Switch(
-                        checked = syncedLyrics,
-                        onCheckedChange = AppSettings::setSyncedLyrics,
-                        colors = SwitchDefaults.colors(
-                            checkedTrackColor = MaterialTheme.colorScheme.primary,
-                            checkedBorderColor = MaterialTheme.colorScheme.primary,
-                        ),
-                    )
-                },
-                onClick = { AppSettings.setSyncedLyrics(!syncedLyrics) },
-            )
-            if (syncedLyrics) {
-                RowDivider()
-                SettingsRow(
-                    icon = Icons.Rounded.Language,
-                    title = stringResource(R.string.settings_lyrics_sources),
+                icon = Icons.Rounded.Language,
+                title = stringResource(R.string.settings_lyrics_origin),
                     subtitle = when {
                         lyricsSources.isEmpty() -> stringResource(R.string.settings_lyrics_empty)
                         lyricsSources.size <= 4 -> lyricsSources.sortedBy { it.ordinal }.joinToString(", ") { it.label }
                         else -> stringResource(R.string.settings_lyrics_sources_count, lyricsSources.size)
                     },
                     onClick = onLyricsSources,
+            )
+            RowDivider()
+            if (!premiumEntitled && !isOwnerAccount) {
+                PremiumLockedSettingsRow(
+                    icon = Icons.AutoMirrored.Rounded.Notes,
+                    title = stringResource(R.string.premium_feature_offline_lyrics),
+                    subtitle = stringResource(R.string.premium_offline_lyrics_subtitle),
+                )
+            } else {
+                SettingsRow(
+                    icon = Icons.AutoMirrored.Rounded.Notes,
+                    title = stringResource(R.string.premium_feature_offline_lyrics),
+                    subtitle = stringResource(R.string.premium_offline_lyrics_subtitle),
                 )
             }
         }
@@ -848,26 +1056,261 @@ fun SettingsScreen(
         }
 
         OrbAppFooter(account = account)
+        }
     }
     }
 
+
+    if (showDownloadSettings) {
+        AlertDialog(
+            onDismissRequest = { showDownloadSettings = false },
+            modifier = Modifier.orbGlassSurface(orbOverlayGlassBaseColor(), cornerRadius = 28.dp),
+            containerColor = Color.Transparent,
+            tonalElevation = 0.dp,
+            shape = RoundedCornerShape(28.dp),
+            title = { Text(stringResource(R.string.settings_download_preferences)) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(
+                        OfflineDownloadQuality.MEDIUM to R.string.orb_download_quality_medium,
+                        OfflineDownloadQuality.HIGH to R.string.orb_download_quality_high,
+                        OfflineDownloadQuality.MAXIMUM to R.string.orb_download_quality_maximum,
+                    ).forEach { (quality, labelId) ->
+                        val locked = quality == OfflineDownloadQuality.MAXIMUM && !premiumEntitled
+                        val selected = quality.name == downloadQuality
+                        val shape = RoundedCornerShape(18.dp)
+                        Row(
+                            modifier = Modifier.fillMaxWidth()
+                                .clip(shape)
+                                .background(
+                                    if (selected) MaterialTheme.colorScheme.secondaryContainer
+                                    else MaterialTheme.colorScheme.surfaceContainerHigh,
+                                )
+                                .clickable(enabled = !locked) { AppSettings.setDownloadQuality(quality.name) }
+                                .padding(horizontal = 14.dp, vertical = 13.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                stringResource(labelId),
+                                style = MaterialTheme.typography.titleSmall,
+                                modifier = Modifier.weight(1f),
+                            )
+                            if (locked) {
+                                Icon(Icons.Rounded.Lock, contentDescription = stringResource(R.string.orb_download_quality_premium))
+                            } else if (selected) {
+                                Icon(Icons.Rounded.Check, contentDescription = null)
+                            }
+                        }
+                    }
+                    if (downloadQuality != OfflineDownloadQuality.MEDIUM.name) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(18.dp))
+                                .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                                .clickable {
+                                    AppSettings.setDownloadAllowLowerQuality(!downloadAllowLowerQuality)
+                                }
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = stringResource(
+                                        if (downloadQuality == OfflineDownloadQuality.MAXIMUM.name)
+                                            R.string.settings_download_fallback_high_title
+                                        else R.string.settings_download_fallback_lower_title,
+                                    ),
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                                Text(
+                                    text = stringResource(
+                                        if (downloadQuality == OfflineDownloadQuality.MAXIMUM.name)
+                                            R.string.settings_download_fallback_high_summary
+                                        else R.string.settings_download_fallback_lower_summary,
+                                    ),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Switch(
+                                checked = downloadAllowLowerQuality,
+                                onCheckedChange = AppSettings::setDownloadAllowLowerQuality,
+                            )
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth()
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                            .clickable { AppSettings.setUseDownloadsWhileOnline(!useDownloadsWhileOnline) }
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(stringResource(R.string.download_prefer_offline_online_title),
+                                style = MaterialTheme.typography.titleSmall)
+                            Text(stringResource(R.string.download_prefer_offline_online_summary),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Switch(checked = useDownloadsWhileOnline,
+                            onCheckedChange = AppSettings::setUseDownloadsWhileOnline)
+                    }
+                    Text(
+                        text = if (downloadQuality == OfflineDownloadQuality.MAXIMUM.name) {
+                            stringResource(R.string.settings_download_patient_lossless_summary)
+                        } else {
+                            stringResource(R.string.settings_download_strict_quality_summary)
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showDownloadSettings = false }) {
+                    Text(stringResource(R.string.settings_download_done))
+                }
+            },
+        )
+    }
+
+    if (showAppLanguageSheet) {
+        OrbAppLanguageSheet(onDismiss = { showAppLanguageSheet = false })
+    }
 
     if (showPremiumSheet) {
-        ModalBottomSheet(onDismissRequest = { showPremiumSheet = false }) {
-            PremiumSheetContent(
-                ownerPreview = isOwnerAccount,
-                premiumEntitled = premiumEntitled,
-                monthlyPrice = premiumMonthlyPrice,
-                onDismiss = { showPremiumSheet = false },
-            )
+        com.music.orb.ui.components.RegisterSheetBackdrop()
+        val sheetGlassColor = orbOverlayGlassBaseColor()
+        ModalBottomSheet(
+            floatingTitle = stringResource(R.string.premium_sheet_title),
+            onDismissRequest = { showPremiumSheet = false },
+            containerColor = Color.Transparent,
+            shape = RoundedCornerShape(topStart = 36.dp, topEnd = 36.dp),
+            // Paint the gesture-navigation inset as part of the same glass.
+            navigationBarInsetInContent = true,
+            dragHandle = null,
+        ) {
+            com.music.orb.ui.components.OrbGlassSheetSurface(
+                pageColor = sheetGlassColor,
+                cornerRadius = 36.dp,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(
+                        min = LocalConfiguration.current.screenHeightDp.dp * 0.70f,
+                        max = LocalConfiguration.current.screenHeightDp.dp * 0.84f,
+                    ),
+            ) {
+                val premiumScroll = rememberScrollState()
+                val premiumMotion = rememberOrbSheetMotionViewport(premiumScroll)
+                Column(
+                    Modifier.weight(1f, fill = false)
+                        .orbSheetMotionViewport(premiumMotion)
+                        .verticalScroll(premiumScroll),
+                ) {
+                    OrbSheetMotionContent(premiumMotion) {
+                    PremiumBillingSheet(
+                    accountKey = account?.email,
+                    premiumEntitled = premiumEntitled,
+                    monthlyPrice = premiumMonthlyPrice,
+                    onRequestCancellation = {
+                        // Dismiss the bottom sheet in this composition BEFORE
+                        // opening an independent, opaque confirmation dialog.
+                        showPremiumSheet = false
+                        cancelPremiumError = null
+                        showCancelPremiumDialog = true
+                    },
+                    onDismiss = { showPremiumSheet = false },
+                    onDonate = {
+                        showPremiumSheet = false
+                        showDonationSheet = true
+                    },
+                    )
+                    }
+                }
+
+            }
         }
     }
 
+    if (showCancelPremiumDialog && !showPremiumSheet) {
+        com.music.orb.ui.components.RegisterSheetBackdrop()
+        AlertDialog(
+            onDismissRequest = {
+                if (!cancelPremiumBusy) {
+                    showCancelPremiumDialog = false
+                    cancelPremiumError = null
+                }
+            },
+            // Use the same frosted dialog material and activity blur as other Orb popups.
+            modifier = Modifier.orbGlassSurface(
+                orbOverlayGlassBaseColor(), cornerRadius = 28.dp,
+                manageDialogBackdrop = false,
+            ),
+            containerColor = Color.Transparent,
+            tonalElevation = 0.dp,
+            shape = RoundedCornerShape(28.dp),
+            title = { Text(stringResource(R.string.premium_cancel_subscription_confirm_title)) },
+            text = {
+                Column {
+                    Text(stringResource(
+                        if (isOwnerAccount) R.string.premium_demo_cancel_message
+                        else R.string.premium_cancel_subscription_confirm_message,
+                    ))
+                    cancelPremiumError?.let {
+                        Spacer(Modifier.height(20.dp))
+                        Text(it, color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !cancelPremiumBusy,
+                    onClick = ::cancelPremiumSubscription,
+                ) {
+                    if (cancelPremiumBusy) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    Text(stringResource(R.string.premium_cancel_subscription_confirm_action))
+                }
+            },
+            dismissButton = {
+                TextButton(enabled = !cancelPremiumBusy, onClick = {
+                    showCancelPremiumDialog = false
+                    cancelPremiumError = null
+                }) { Text(stringResource(R.string.source_editor_cancel)) }
+            },
+        )
+    }
+
     if (showDonationSheet) {
+        com.music.orb.ui.components.RegisterSheetBackdrop()
+        val sheetGlassColor = orbOverlayGlassBaseColor()
         ModalBottomSheet(
+            floatingTitle = stringResource(R.string.orb_sheet_donation),
             onDismissRequest = { showDonationSheet = false },
+            containerColor = Color.Transparent,
+            shape = RoundedCornerShape(topStart = 36.dp, topEnd = 36.dp),
+            navigationBarInsetInContent = true,
+            dragHandle = null,
         ) {
-            DonationSheetContent()
+            // A tall currency list must scroll *inside* a partial sheet. Without
+            // a height cap its verticalScroll child can occupy the whole screen.
+            com.music.orb.ui.components.OrbGlassSheetSurface(
+                pageColor = sheetGlassColor,
+                cornerRadius = 36.dp,
+                modifier = Modifier.heightIn(max = LocalConfiguration.current.screenHeightDp.dp * 0.76f),
+            ) {
+                DonationSheetContent(modifier = Modifier.weight(1f, fill = false))
+
+            }
         }
     }
 
@@ -897,6 +1340,10 @@ fun SettingsScreen(
     if (showJoinBetaDialog) {
         AlertDialog(
             onDismissRequest = { showJoinBetaDialog = false },
+            modifier = Modifier.orbGlassSurface(orbOverlayGlassBaseColor(), cornerRadius = 28.dp),
+            containerColor = Color.Transparent,
+            tonalElevation = 0.dp,
+            shape = RoundedCornerShape(28.dp),
             title = { Text(stringResource(R.string.beta_updates_join_confirm_title)) },
             text = { Text(stringResource(R.string.beta_updates_join_confirm_message)) },
             dismissButton = {
@@ -920,6 +1367,10 @@ fun SettingsScreen(
     if (showLeaveBetaDialog) {
         AlertDialog(
             onDismissRequest = { showLeaveBetaDialog = false },
+            modifier = Modifier.orbGlassSurface(orbOverlayGlassBaseColor(), cornerRadius = 28.dp),
+            containerColor = Color.Transparent,
+            tonalElevation = 0.dp,
+            shape = RoundedCornerShape(28.dp),
             title = { Text(stringResource(R.string.beta_updates_leave_title)) },
             text = { Text(stringResource(R.string.beta_updates_leave_message)) },
             dismissButton = {
@@ -944,16 +1395,43 @@ fun SettingsScreen(
 
 @Composable
 private fun PremiumOrbCard(
+    premiumEntitled: Boolean,
+    ownerDemoCanceled: Boolean = false,
+    highlight: Boolean = false,
     onClick: () -> Unit,
 ) {
     val shape = if (OrbFlavorUi.expressive) RoundedCornerShape(28.dp) else GroupShape
+    val launchHighlight = remember { Animatable(0f) }
+    LaunchedEffect(highlight) {
+        if (highlight) {
+            launchHighlight.snapTo(1f)
+            launchHighlight.animateTo(0f, animationSpec = tween(durationMillis = 3600))
+        } else {
+            launchHighlight.snapTo(0f)
+        }
+    }
+    // The card is frosted glass, not the raw tertiaryContainer. Resolve the
+    // foreground against the final glass tone so dark dynamic palettes never
+    // produce brown-on-brown / low-contrast Premium copy.
+    val premiumContentColor = orbExpressiveGlassContentColor(
+        MaterialTheme.colorScheme.tertiaryContainer,
+    )
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .then(settingsVerticalEdgeModifier())
             .padding(start = GROUP_INSET, top = 18.dp, end = GROUP_INSET)
             .clip(shape)
-            .background(MaterialTheme.colorScheme.tertiaryContainer)
+            .orbGlassSurface(
+                pageColor = MaterialTheme.colorScheme.tertiaryContainer,
+                cornerRadius = 28.dp,
+                manageDialogBackdrop = false,
+            )
+            .border(
+                width = (1f + launchHighlight.value * 2f).dp,
+                color = MaterialTheme.colorScheme.tertiary.copy(alpha = launchHighlight.value),
+                shape = shape,
+            )
             .clickable(onClick = onClick)
             .padding(horizontal = 18.dp, vertical = 18.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -975,67 +1453,325 @@ private fun PremiumOrbCard(
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(
-                text = stringResource(R.string.premium_card_title),
+                text = stringResource(
+                    if (premiumEntitled) R.string.premium_card_subscribed_title else R.string.premium_card_title,
+                ),
                 style = MaterialTheme.typography.titleLarge,
-                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                color = premiumContentColor,
             )
-            Spacer(Modifier.height(3.dp))
-            Text(
-                text = stringResource(R.string.premium_card_subtitle),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.78f),
-            )
+            if (!premiumEntitled) {
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    text = stringResource(
+                        if (ownerDemoCanceled) R.string.premium_demo_canceled
+                        else R.string.premium_card_subtitle,
+                    ),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = premiumContentColor.copy(alpha = 0.78f),
+                )
+            }
         }
         Spacer(Modifier.width(8.dp))
         Icon(
             imageVector = Icons.Rounded.ChevronRight,
             contentDescription = null,
-            tint = MaterialTheme.colorScheme.onTertiaryContainer,
+            tint = premiumContentColor,
         )
     }
 }
 
 @Composable
-private fun PremiumSheetContent(
-    ownerPreview: Boolean,
+private fun PremiumBillingSheet(
+    accountKey: String?,
     premiumEntitled: Boolean,
     monthlyPrice: Double?,
+    onRequestCancellation: () -> Unit,
     onDismiss: () -> Unit,
+    onDonate: () -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    // Cached entitlement is already account-scoped by AppSettings. Never blank
+    // the subscription controls while waiting for a redundant network lookup.
+    val entitlementReady by AppSettings.serverControlReady.collectAsStateWithLifecycle()
+    val isOwner by AppSettings.isOwnerAccount.collectAsStateWithLifecycle()
+    val demoSubscribed by AppSettings.ownerPremiumTestSubscribed.collectAsStateWithLifecycle()
+    var ready by remember(accountKey) { mutableStateOf(!isOwner && (premiumEntitled || entitlementReady)) }
+    val subscribedInBilling = if (isOwner) ready && demoSubscribed else premiumEntitled
+    LaunchedEffect(accountKey, entitlementReady, premiumEntitled, isOwner) {
+        if (premiumEntitled || isOwner || entitlementReady) ready = true
+    }
+    var busy by remember(accountKey) { mutableStateOf(false) }
+    var error by remember(accountKey) { mutableStateOf<String?>(null) }
+    var checkout by remember(accountKey) { mutableStateOf<PremiumCheckout?>(null) }
+
+    // The chosen region (not merely the language or the phone's network) decides
+    // which currency and monthly-period translation to display. BRL remains
+    // the real charge currency until the backend/checkout supports local charges.
+    val pricingTag = OrbAppLanguage.effectiveTag(context)
+    val localCurrency = PremiumPriceLocalization.localCurrency(pricingTag)
+    var exchangeQuote by remember(accountKey, pricingTag) {
+        mutableStateOf<PremiumPriceLocalization.FxQuote?>(null)
+    }
+    LaunchedEffect(accountKey, pricingTag, isOwner, monthlyPrice != null || checkout != null) {
+        if (localCurrency != "BRL" &&
+            (monthlyPrice != null || checkout != null) && !isOwner) {
+            exchangeQuote = withContext(Dispatchers.IO) {
+                PremiumPriceLocalization.quote(pricingTag)
+            }
+        }
+    }
+
+    // Operations suspend on IO; keep every button disabled until verified status arrives.
+    suspend fun refresh() {
+        withContext(Dispatchers.IO) { BillingApi.refreshSubscription() }
+        ready = true
+        if (checkout?.requiresConfirmation == false && AppSettings.premiumEntitled.value) onDismiss()
+    }
+
+    fun runBilling(showError: Boolean = true, action: suspend () -> Unit) {
+        if (busy) return
+        busy = true
+        if (showError) error = null
+        scope.launch {
+            try {
+                action()
+            } catch (exception: CancellationException) {
+                throw exception
+            } catch (exception: Exception) {
+                if (showError) {
+                    error = premiumBillingErrorText(context, exception)
+                }
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    LifecycleResumeEffect(accountKey) {
+        // Owner state comes from Orb's authenticated backend, NOT a fabricated
+        // local purchase. Refresh once on sheet entry and when returning from
+        // the Mercado Pago card-verification page. Never poll continuously.
+        if (isOwner) {
+            runBilling(showError = checkout != null) {
+                val active = withContext(Dispatchers.IO) { BillingApi.ownerZeroStatus() }
+                ready = true
+                if (active && checkout != null) {
+                    Toast.makeText(context, R.string.premium_demo_subscribe_success, Toast.LENGTH_LONG).show()
+                    onDismiss()
+                }
+            }
+        } else if (!ready || checkout != null) {
+            runBilling(showError = checkout != null) { refresh() }
+        }
+        onPauseOrDispose { }
+    }
+
+    val pending = checkout
+    if (pending == null) {
+        PremiumSheetContent(
+            premiumEntitled = subscribedInBilling,
+            monthlyPrice = if (isOwner) 0.0 else monthlyPrice,
+            demoMode = isOwner,
+            pricingTag = pricingTag,
+            exchangeQuote = exchangeQuote,
+            busy = busy,
+            ready = ready,
+            error = error,
+            onAction = {
+                if (subscribedInBilling) {
+                    onRequestCancellation()
+                } else if (isOwner) {
+                    runBilling { checkout = withContext(Dispatchers.IO) { BillingApi.ownerZeroCheckout() } }
+                } else {
+                    runBilling { checkout = withContext(Dispatchers.IO) { BillingApi.checkout() } }
+                }
+            },
+            onRetry = { runBilling { refresh() } },
+            onDonate = onDonate,
+        )
+    } else {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 20.dp)) {
+            Text(
+                stringResource(if (isOwner) R.string.premium_demo_payment_title else R.string.premium_payment_title),
+                style = MaterialTheme.typography.headlineSmall,
+            )
+            Spacer(Modifier.height(16.dp))
+            Text(stringResource(R.string.premium_payment_total), style = MaterialTheme.typography.titleMedium)
+            val converted = exchangeQuote?.takeIf { it.currencyCode != "BRL" }
+            val chargedBrl = PremiumPriceLocalization.formatBrl(pending.amount)
+            Text(
+                if (converted != null) PremiumPriceLocalization.format(
+                    pending.amount * converted.unitsPerBrl,
+                    converted.currencyCode,
+                    pricingTag,
+                ) else chargedBrl,
+                style = MaterialTheme.typography.headlineLarge,
+            )
+            if (converted != null) {
+                Text(
+                    PremiumPriceLocalization.localizedString(context, R.string.premium_price_approximate),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    PremiumPriceLocalization.localizedString(context, R.string.premium_price_actual_brl, chargedBrl),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                PremiumFxAttribution()
+            }
+            Spacer(Modifier.height(12.dp))
+            Text(stringResource(
+                if (isOwner) R.string.premium_demo_payment_notice
+                else if (pending.requiresConfirmation) R.string.premium_payment_zero_notice
+                else R.string.premium_payment_provider_notice,
+            ))
+            Spacer(Modifier.height(20.dp))
+            if (error != null) {
+                Text(error.orEmpty(), color = MaterialTheme.colorScheme.error)
+                Spacer(Modifier.height(12.dp))
+            }
+            OrbGlassButton(
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+                onClick = {
+                    if (pending.requiresConfirmation) {
+                        runBilling {
+                            val active = withContext(Dispatchers.IO) { BillingApi.confirm(pending) }
+                            check(active)
+                            Toast.makeText(context, R.string.premium_payment_success, Toast.LENGTH_LONG).show()
+                            onDismiss()
+                        }
+                    } else {
+                        runBilling {
+                            val uri = android.net.Uri.parse(requireNotNull(pending.url))
+                            check(uri.scheme == "https")
+                            context.startActivity(Intent(Intent.ACTION_VIEW, uri))
+                        }
+                    }
+                },
+            ) {
+                if (busy) {
+                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(stringResource(if (pending.requiresConfirmation) R.string.premium_payment_confirm else R.string.premium_payment_continue))
+            }
+            if (!pending.requiresConfirmation) {
+                Spacer(Modifier.height(12.dp))
+                TextButton(enabled = !busy, onClick = {
+                    runBilling {
+                        if (isOwner) {
+                            if (withContext(Dispatchers.IO) { BillingApi.ownerZeroStatus() }) onDismiss()
+                            else error = context.getString(R.string.premium_payment_pending)
+                        } else {
+                            refresh()
+                            if (AppSettings.premiumEntitled.value) onDismiss()
+                            else error = context.getString(R.string.premium_payment_pending)
+                        }
+                    }
+                }, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.premium_payment_check))
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            TextButton(enabled = !busy, onClick = { checkout = null }, modifier = Modifier.fillMaxWidth()) {
+                Text(stringResource(R.string.premium_payment_back))
+            }
+        }
+    }
+
+
+}
+
+@Composable
+private fun PremiumSheetContent(
+    premiumEntitled: Boolean,
+    monthlyPrice: Double?,
+    demoMode: Boolean,
+    pricingTag: String,
+    exchangeQuote: PremiumPriceLocalization.FxQuote?,
+    busy: Boolean,
+    ready: Boolean,
+    error: String?,
+    onAction: () -> Unit,
+    onRetry: () -> Unit,
+    onDonate: () -> Unit,
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 24.dp, vertical = 20.dp),
     ) {
+        // Title already floats above the glass via floatingTitle.
+        val context = LocalContext.current
+        val localQuote = exchangeQuote?.takeIf { it.currencyCode != "BRL" && !demoMode }
+        val monthlyAmount = monthlyPrice?.let { brl ->
+            if (localQuote != null) {
+                PremiumPriceLocalization.format(
+                    brl * localQuote.unitsPerBrl,
+                    localQuote.currencyCode,
+                    pricingTag,
+                )
+            } else PremiumPriceLocalization.formatBrl(brl)
+        }
         Text(
-            text = stringResource(R.string.premium_sheet_title),
+            text = if (monthlyAmount != null) {
+                PremiumPriceLocalization.monthlyText(context, monthlyAmount)
+            } else {
+                PremiumPriceLocalization.localizedString(context, R.string.premium_price_unavailable)
+            },
             style = MaterialTheme.typography.headlineSmall,
             color = MaterialTheme.colorScheme.onSurface,
         )
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = monthlyPrice?.let { price ->
-                java.text.NumberFormat.getCurrencyInstance(java.util.Locale("pt", "BR")).format(price) + " / mês"
-            } ?: stringResource(R.string.premium_monthly_price),
-            style = MaterialTheme.typography.headlineSmall,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
-        Spacer(Modifier.height(4.dp))
-        Text(
-            text = stringResource(R.string.premium_sheet_subtitle),
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        if (localQuote != null && monthlyPrice != null) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                PremiumPriceLocalization.localizedString(context, R.string.premium_price_approximate),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                PremiumPriceLocalization.localizedString(
+                    context,
+                    R.string.premium_price_actual_brl,
+                    PremiumPriceLocalization.formatBrl(monthlyPrice),
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            PremiumFxAttribution()
+        }
+        if (demoMode) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                stringResource(R.string.premium_demo_badge),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.secondary,
+            )
+            if (!premiumEntitled) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    stringResource(R.string.premium_demo_canceled),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
         Spacer(Modifier.height(18.dp))
         listOf(
             R.string.premium_feature_automix,
+            R.string.premium_feature_switch,
             R.string.premium_feature_lossless,
             R.string.premium_feature_offline_lyrics,
+            R.string.premium_feature_orb_lock,
             R.string.premium_feature_more,
         ).forEach { resource ->
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .orbSheetProgressiveItem()
                     .padding(vertical = 7.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -1052,21 +1788,32 @@ private fun PremiumSheetContent(
                 )
             }
         }
-        Spacer(Modifier.height(16.dp))
-        Text(
-            text = if (ownerPreview) {
-                "Prévia antecipada do desenvolvedor."
-            } else {
-                "Os planos Premium estarão disponíveis a partir de 1º de novembro de 2026."
-            },
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.height(16.dp))
-        androidx.compose.material3.Button(
-            onClick = onDismiss,
+        Spacer(Modifier.height(18.dp))
+        if (error != null) {
+            Text(
+                text = error,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Spacer(Modifier.height(12.dp))
+            OrbGlassButton(
+                onClick = onRetry,
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(stringResource(R.string.premium_billing_retry))
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+        OrbGlassButton(
+            onClick = onAction,
+            enabled = ready && !busy,
             modifier = Modifier.fillMaxWidth(),
         ) {
+            if (busy || !ready && error == null) {
+                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(8.dp))
+            }
             Text(
                 stringResource(
                     if (premiumEntitled) {
@@ -1077,14 +1824,18 @@ private fun PremiumSheetContent(
                 ),
             )
         }
-        Spacer(Modifier.height(8.dp))
-        TextButton(
-            onClick = onDismiss,
-            modifier = Modifier.align(Alignment.End),
+        Spacer(Modifier.height(18.dp))
+        androidx.compose.material3.TextButton(
+            onClick = onDonate,
+            modifier = Modifier.align(Alignment.CenterHorizontally),
+            colors = androidx.compose.material3.ButtonDefaults.textButtonColors(
+                containerColor = Color.Transparent,
+                contentColor = MaterialTheme.colorScheme.primary,
+            ),
         ) {
-            Text(stringResource(android.R.string.cancel))
+            Text(stringResource(R.string.premium_donation_link))
         }
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(20.dp))
     }
 }
 
@@ -1099,7 +1850,11 @@ private fun SupportOrbCard(
             .then(settingsVerticalEdgeModifier())
             .padding(start = GROUP_INSET, top = 18.dp, end = GROUP_INSET)
             .clip(shape)
-            .background(MaterialTheme.colorScheme.primaryContainer)
+            .orbGlassSurface(
+                pageColor = MaterialTheme.colorScheme.secondaryContainer,
+                cornerRadius = 28.dp,
+                manageDialogBackdrop = false,
+            )
             .clickable(onClick = onClick)
             .padding(horizontal = 18.dp, vertical = 18.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1108,13 +1863,13 @@ private fun SupportOrbCard(
             modifier = Modifier
                 .size(48.dp)
                 .clip(RoundedCornerShape(16.dp))
-                .background(MaterialTheme.colorScheme.primary),
+                .background(MaterialTheme.colorScheme.secondary),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
                 imageVector = Icons.Rounded.Favorite,
                 contentDescription = null,
-                tint = MaterialTheme.colorScheme.onPrimary,
+                tint = MaterialTheme.colorScheme.onSecondary,
                 modifier = Modifier.size(26.dp),
             )
         }
@@ -1123,20 +1878,20 @@ private fun SupportOrbCard(
             Text(
                 text = stringResource(R.string.donation_card_title),
                 style = MaterialTheme.typography.titleLarge,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
             )
             Spacer(Modifier.height(3.dp))
             Text(
                 text = stringResource(R.string.donation_card_subtitle),
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.78f),
+                color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.78f),
             )
         }
         Spacer(Modifier.width(8.dp))
         Icon(
             imageVector = Icons.Rounded.ChevronRight,
             contentDescription = null,
-            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+            tint = MaterialTheme.colorScheme.onSecondaryContainer,
         )
     }
 }
@@ -1156,7 +1911,8 @@ private data class DonationMethod(
 )
 
 @Composable
-private fun DonationSheetContent() {
+private fun DonationSheetContent(modifier: Modifier = Modifier) {
+    val premiumReleaseReached = rememberPremiumReleaseReached()
     val context = LocalContext.current
     val copiedMessage = stringResource(R.string.donation_copied)
     val ownerName = BuildConfig.DONATION_RECIPIENT
@@ -1226,19 +1982,18 @@ private fun DonationSheetContent() {
 
     val selectedMethod = selectedMethodIndex?.let { methods.getOrNull(it) }
 
+    val donationScroll = rememberScrollState()
+    val donationMotion = rememberOrbSheetMotionViewport(donationScroll)
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
-            .verticalScroll(rememberScrollState())
-            .padding(start = 18.dp, end = 18.dp, bottom = 34.dp),
+            .orbSheetMotionViewport(donationMotion)
+            .verticalScroll(donationScroll)
+            .padding(start = 18.dp, end = 18.dp, bottom = 20.dp),
     ) {
+        OrbSheetMotionContent(donationMotion) {
         if (selectedMethod == null) {
-            Text(
-                text = stringResource(R.string.donation_sheet_title),
-                style = MaterialTheme.typography.headlineSmall,
-                color = MaterialTheme.colorScheme.onBackground,
-            )
-            Spacer(Modifier.height(8.dp))
+            // Avoid repeating the floating donation heading inside the panel.
             Text(
                 text = stringResource(if (methods.isEmpty()) R.string.donation_not_configured else R.string.donation_sheet_body),
                 style = MaterialTheme.typography.bodyLarge,
@@ -1254,7 +2009,9 @@ private fun DonationSheetContent() {
                     .padding(16.dp),
             ) {
                 Text(
-                    text = stringResource(R.string.donation_notice),
+                    text = stringResource(
+                        if (premiumReleaseReached) R.string.donation_notice_after_launch else R.string.donation_notice,
+                    ),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onTertiaryContainer,
                 )
@@ -1364,6 +2121,7 @@ private fun DonationSheetContent() {
                 modifier = Modifier.fillMaxWidth(),
             )
         }
+        }
     }
 }
 
@@ -1375,8 +2133,13 @@ private fun DonationCurrencyCard(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .orbSheetProgressiveItem()
             .clip(RoundedCornerShape(22.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+            .orbGlassSurface(
+                pageColor = orbOverlayGlassBaseColor(),
+                cornerRadius = 22.dp,
+                manageDialogBackdrop = false,
+            )
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1452,12 +2215,17 @@ private fun DonationMethodCard(
             }
         }
 
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(20.dp))
         fields.forEachIndexed { index, field ->
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(14.dp))
+                    .orbGlassSurface(
+                        pageColor = orbOverlayGlassBaseColor(),
+                        cornerRadius = 14.dp,
+                        manageDialogBackdrop = false,
+                    )
                     .clickable { onCopyField(field) }
                     .padding(horizontal = 10.dp, vertical = 9.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1510,55 +2278,16 @@ private fun ThemeSettingsRow(
     selectedIndex: Int,
     onSelect: (Int) -> Unit,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .then(settingsVerticalEdgeModifier())
-            .heightIn(min = if (OrbFlavorUi.expressive) 68.dp else 58.dp)
-            .padding(horizontal = ROW_INSET, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        if (OrbFlavorUi.expressive) {
-            Box(
-                modifier = Modifier
-                    .size(42.dp)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(MaterialTheme.colorScheme.primaryContainer),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Brightness4,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                    modifier = Modifier.size(23.dp),
-                )
-            }
-            Spacer(Modifier.width(12.dp))
-        } else {
-            Icon(
-                imageVector = Icons.Rounded.Brightness4,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onBackground,
-                modifier = Modifier.size(ICON_SIZE),
-            )
-            Spacer(Modifier.width(ICON_GAP))
-        }
-
-        Text(
-            text = stringResource(R.string.settings_theme),
-            style = if (OrbFlavorUi.expressive) MaterialTheme.typography.titleMedium else MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onBackground,
-            maxLines = 1,
-            modifier = Modifier.widthIn(max = 70.dp),
-        )
-        Spacer(Modifier.width(8.dp))
-        SegmentedControl(
-            options = labels,
-            selectedIndex = selectedIndex,
-            onSelect = onSelect,
-            modifier = Modifier.weight(1f),
-        )
-    }
+    // Reuse the same full-width layout as the Automix and PCM selectors.
+    // Keeping the title and control on separate rows prevents squeezed labels
+    // and keeps every segment aligned with the card's horizontal insets.
+    SettingsSegmentedField(
+        icon = Icons.Rounded.Brightness4,
+        title = stringResource(R.string.settings_theme),
+        options = labels,
+        selectedIndex = selectedIndex,
+        onSelect = onSelect,
+    )
 }
 
 @Composable
@@ -1612,7 +2341,6 @@ internal fun OrbAppFooter(
             color = MaterialTheme.colorScheme.primary,
             modifier = Modifier
                 .padding(top = 8.dp)
-                .clip(RoundedCornerShape(10.dp))
                 .clickable { feedbackOpen = true }
                 .padding(horizontal = 10.dp, vertical = 5.dp),
         )
@@ -1681,12 +2409,16 @@ internal fun AccountCard(
             .fillMaxWidth()
             .padding(horizontal = GROUP_INSET)
             .clip(shape)
-            .background(
+            .then(
                 if (OrbFlavorUi.expressive) {
-                    MaterialTheme.colorScheme.surfaceContainerHigh
+                    Modifier.orbGlassSurface(
+                        pageColor = orbOverlayGlassBaseColor(),
+                        cornerRadius = 28.dp,
+                        manageDialogBackdrop = false,
+                    )
                 } else {
-                    MaterialTheme.colorScheme.surfaceVariant
-                },
+                    Modifier.background(MaterialTheme.colorScheme.surfaceVariant)
+                }
             )
             .clickable(onClick = if (signedIn) onSignedInClick else onSignIn)
             .padding(
@@ -1760,7 +2492,7 @@ private fun QualitySheet(
     selected: AudioQuality,
     onSelect: (AudioQuality) -> Unit,
 ) {
-    val haptics = LocalHapticFeedback.current
+    val tactileContext = LocalContext.current
     Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
         Row(
             modifier = Modifier.padding(start = 22.dp, end = 22.dp, bottom = 14.dp),
@@ -1810,14 +2542,21 @@ private fun QualitySheet(
                     .clip(RoundedCornerShape(if (OrbFlavorUi.expressive) 22.dp else 0.dp))
                     .then(
                         if (OrbFlavorUi.expressive) {
-                            Modifier.background(
-                                if (chosen) MaterialTheme.colorScheme.primaryContainer
-                                else MaterialTheme.colorScheme.surfaceContainerLow,
+                            Modifier.orbGlassSurface(
+                                pageColor = if (chosen) {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                } else {
+                                    orbOverlayGlassBaseColor()
+                                },
+                                cornerRadius = 22.dp,
+                                drawRim = chosen,
+                                overlayStrength = chosen,
+                                manageDialogBackdrop = false,
                             )
                         } else Modifier
                     )
                     .clickable {
-                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        com.music.orb.ui.components.OrbHaptics.perform(tactileContext, com.music.orb.ui.components.OrbHaptics.Kind.TOGGLE)
                         onSelect(quality)
                     }
                     .padding(horizontal = 22.dp, vertical = if (OrbFlavorUi.expressive) 16.dp else 14.dp),
@@ -1839,7 +2578,7 @@ private fun QualitySheet(
                     Spacer(Modifier.width(12.dp))
                     Icon(
                         Icons.Rounded.Check,
-                        contentDescription = "Selected",
+                        contentDescription = stringResource(R.string.orb_l10n_selected),
                         tint = if (OrbFlavorUi.expressive) {
                             MaterialTheme.colorScheme.onPrimaryContainer
                         } else {
@@ -1881,23 +2620,27 @@ internal fun SettingsGroup(
                 start = GROUP_INSET + 4.dp,
                 end = GROUP_INSET,
                 top = if (OrbFlavorUi.expressive) 30.dp else 26.dp,
-                bottom = if (OrbFlavorUi.expressive) 10.dp else 8.dp,
+                bottom = if (OrbFlavorUi.expressive) 14.dp else 12.dp,
             ),
         )
     } else {
-        Spacer(Modifier.height(if (OrbFlavorUi.expressive) 30.dp else 26.dp))
+        Spacer(Modifier.height(if (OrbFlavorUi.expressive) 26.dp else 24.dp))
     }
     val groupShape = if (OrbFlavorUi.expressive) RoundedCornerShape(24.dp) else GroupShape
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = GROUP_INSET)
-            .clip(groupShape)
-            .background(
+            .then(
                 if (OrbFlavorUi.expressive) {
-                    MaterialTheme.colorScheme.surfaceContainer
+                    // Expressive rows own their glass. Do not leave the old
+                    // rounded group container behind them: stacking both layers
+                    // is what produced the visible double mould in Settings.
+                    Modifier
                 } else {
-                    MaterialTheme.colorScheme.surfaceVariant
+                    Modifier
+                        .clip(groupShape)
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
                 },
             ),
     ) {
@@ -1921,15 +2664,41 @@ internal fun SettingsGroup(
 
 @Composable
 internal fun RowDivider() {
-    HorizontalDivider(
-        modifier = Modifier.padding(
-            start = if (OrbFlavorUi.expressive) 82.dp else TEXT_INSET,
-        ),
-        thickness = 0.5.dp,
-        color = if (OrbFlavorUi.expressive) {
-            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)
-        } else {
-            MaterialTheme.colorScheme.outline
+    if (OrbFlavorUi.expressive) {
+        // Separate glass cards instead of drawing the legacy divider through
+        // the former shared group container.
+        Spacer(Modifier.height(10.dp))
+    } else {
+        HorizontalDivider(
+            modifier = Modifier
+                .then(settingsVerticalEdgeModifier())
+                .padding(start = TEXT_INSET),
+            thickness = 0.5.dp,
+            color = MaterialTheme.colorScheme.outline,
+        )
+    }
+}
+
+/** Premium controls remain discoverable but cannot receive touch input on free accounts. */
+@Composable
+internal fun PremiumLockedSettingsRow(
+    icon: ImageVector,
+    title: String,
+    subtitle: String? = null,
+) {
+    SettingsRow(
+        icon = icon,
+        title = title,
+        subtitle = subtitle,
+        badge = stringResource(R.string.premium_locked_badge),
+        enabled = false,
+        onClick = null,
+        trailing = {
+            Icon(
+                Icons.Rounded.Lock,
+                contentDescription = stringResource(R.string.premium_locked_accessibility),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         },
     )
 }
@@ -1952,7 +2721,24 @@ internal fun SettingsRow(
         modifier = Modifier
             .fillMaxWidth()
             .then(settingsVerticalEdgeModifier())
-            .then(if (onClick != null && enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .then(
+                if (OrbFlavorUi.expressive) {
+                    // Every settings field uses one glass surface, clickable or
+                    // not. This prevents non-interactive rows from falling back
+                    // to the old flat group material.
+                    Modifier
+                        .clip(RoundedCornerShape(18.dp))
+                        .orbGlassSurface(
+                            pageColor = orbOverlayGlassBaseColor(),
+                            cornerRadius = 18.dp,
+                            manageDialogBackdrop = false,
+                        )
+                } else Modifier
+            )
+            .then(
+                if (onClick != null && enabled) Modifier.clickable(onClick = onClick)
+                else Modifier
+            )
             .alpha(if (enabled) 1f else 0.45f)
             .heightIn(min = if (OrbFlavorUi.expressive) 68.dp else 52.dp)
             .padding(
@@ -1970,7 +2756,10 @@ internal fun SettingsRow(
                         if (iconHasOwnBackground) {
                             Modifier
                         } else {
-                            Modifier.background(MaterialTheme.colorScheme.primaryContainer)
+                            Modifier.orbBadgeGlassSurface(
+                                pageColor = MaterialTheme.colorScheme.primaryContainer,
+                                cornerRadius = 14.dp,
+                            )
                         },
                     ),
                 contentAlignment = Alignment.Center,
@@ -2008,8 +2797,10 @@ internal fun SettingsRow(
                     text = title,
                     style = if (OrbFlavorUi.expressive) MaterialTheme.typography.titleMedium else MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onBackground,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                    modifier = if (badge != null) Modifier.weight(1f, fill = false) else Modifier,
+                    softWrap = true,
+                    maxLines = Int.MAX_VALUE,
+                    overflow = TextOverflow.Clip,
                 )
                 if (badge != null) {
                     Spacer(Modifier.width(8.dp))
@@ -2023,7 +2814,16 @@ internal fun SettingsRow(
                     text = subtitle,
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 5,
+                    softWrap = true,
+                    maxLines = Int.MAX_VALUE,
+                )
+            }
+            if (value != null && value.length > 23 && trailing == null) {
+                Text(
+                    text = value,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    softWrap = true,
                 )
             }
         }
@@ -2031,12 +2831,12 @@ internal fun SettingsRow(
         if (trailing != null) {
             trailing()
         } else if (value != null || onClick != null) {
-            if (value != null) {
+            if (value != null && value.length <= 23) {
                 Text(
                     text = value,
-                    style = MaterialTheme.typography.bodyLarge,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
+                    maxLines = 2,
                 )
                 Spacer(Modifier.width(4.dp))
             }
@@ -2046,14 +2846,90 @@ internal fun SettingsRow(
 }
 
 @Composable
+internal fun SettingsSegmentedField(
+    icon: ImageVector,
+    title: String,
+    subtitle: String? = null,
+    options: List<String>,
+    selectedIndex: Int,
+    onSelect: (Int) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(settingsVerticalEdgeModifier())
+            .clip(RoundedCornerShape(18.dp))
+            .orbGlassSurface(
+                pageColor = orbOverlayGlassBaseColor(),
+                cornerRadius = 18.dp,
+                manageDialogBackdrop = false,
+            )
+            .padding(horizontal = ROW_INSET, vertical = 12.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .orbBadgeGlassSurface(
+                        pageColor = MaterialTheme.colorScheme.primaryContainer,
+                        cornerRadius = 14.dp,
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.size(23.dp),
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    softWrap = true,
+                    maxLines = Int.MAX_VALUE,
+                    overflow = TextOverflow.Clip,
+                )
+                if (subtitle != null) {
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 5,
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        // Full card width, independently of icon/title length.
+        SegmentedControl(
+            options = options,
+            selectedIndex = selectedIndex,
+            onSelect = onSelect,
+            edgeMotion = false,
+            embedded = true,
+        )
+    }
+}
+
+@Composable
 internal fun Badge(text: String) {
+    val glassColor = orbOverlayGlassBaseColor()
+    val contentColor = com.music.orb.ui.components.orbExpressiveGlassContentColor(glassColor)
     Text(
         text = text.uppercase(),
         style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.primary,
+        color = contentColor,
         modifier = Modifier
             .clip(RoundedCornerShape(if (OrbFlavorUi.expressive) 10.dp else 5.dp))
-            .background(MaterialTheme.colorScheme.primary.copy(alpha = if (OrbFlavorUi.expressive) 0.20f else 0.16f))
+            .orbBadgeGlassSurface(
+                pageColor = glassColor,
+                cornerRadius = if (OrbFlavorUi.expressive) 10.dp else 5.dp,
+            )
             .padding(horizontal = 6.dp, vertical = 2.dp),
     )
 }
@@ -2089,6 +2965,17 @@ internal fun SliderRow(
     Column(
         Modifier
             .then(settingsVerticalEdgeModifier())
+            .then(
+                if (OrbFlavorUi.expressive) {
+                    Modifier
+                        .clip(RoundedCornerShape(18.dp))
+                        .orbGlassSurface(
+                            pageColor = orbOverlayGlassBaseColor(),
+                            cornerRadius = 18.dp,
+                            manageDialogBackdrop = false,
+                        )
+                } else Modifier
+            )
             .alpha(if (enabled) 1f else 0.52f)
             .padding(
             start = ROW_INSET,
@@ -2164,8 +3051,23 @@ internal fun SliderRow(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-internal fun DestructiveRow(label: String, onClick: () -> Unit) {
+internal fun DestructiveRow(
+    label: String,
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+    onLongClick: (() -> Unit)? = null,
+) {
+    val interaction = if (onLongClick != null) {
+        Modifier.combinedClickable(
+            enabled = enabled,
+            onClick = onClick,
+            onLongClick = onLongClick,
+        )
+    } else {
+        Modifier.clickable(enabled = enabled, onClick = onClick)
+    }
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -2174,78 +3076,146 @@ internal fun DestructiveRow(label: String, onClick: () -> Unit) {
                     Modifier
                         .padding(8.dp)
                         .clip(RoundedCornerShape(18.dp))
-                        .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                        .orbGlassSurface(
+                            pageColor = MaterialTheme.colorScheme.errorContainer,
+                            cornerRadius = 18.dp,
+                            manageDialogBackdrop = false,
+                        )
                 } else Modifier
             )
-            .clickable(onClick = onClick)
+            .then(interaction)
             .padding(vertical = if (OrbFlavorUi.expressive) 13.dp else 15.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             text = label,
             style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.primary,
+            color = MaterialTheme.colorScheme.primary.copy(alpha = if (enabled) 1f else 0.38f),
         )
     }
 }
 
 @Composable
-private fun SegmentedControl(
+internal fun SegmentedControl(
     options: List<String>,
     selectedIndex: Int,
     onSelect: (Int) -> Unit,
     modifier: Modifier = Modifier,
+    edgeMotion: Boolean = true,
+    embedded: Boolean = false,
+    enabledIndices: Set<Int>? = null,
 ) {
-    val haptics = LocalHapticFeedback.current
-    Row(
+    val tactileContext = LocalContext.current
+    val outerShape = RoundedCornerShape(if (OrbFlavorUi.expressive) 18.dp else 10.dp)
+    val innerShape = RoundedCornerShape(if (OrbFlavorUi.expressive) 15.dp else 8.dp)
+    val spacing = if (OrbFlavorUi.expressive) 2.dp else 1.dp
+    val outerPadding = if (OrbFlavorUi.expressive) 3.dp else 2.dp
+    val segmentHeight = if (OrbFlavorUi.expressive) 44.dp else 38.dp
+
+    BoxWithConstraints(
         modifier = modifier
+            .then(if (edgeMotion) settingsVerticalEdgeModifier() else Modifier)
             .fillMaxWidth()
-            .clip(RoundedCornerShape(if (OrbFlavorUi.expressive) 18.dp else 10.dp))
-            .background(if (OrbFlavorUi.expressive) MaterialTheme.colorScheme.surfaceContainerHighest else MaterialTheme.colorScheme.outline)
-            .padding(if (OrbFlavorUi.expressive) 3.dp else 2.dp),
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
+            .clip(outerShape)
+            .then(
+                if (embedded) {
+                    Modifier.background(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.45f))
+                } else if (OrbFlavorUi.expressive) {
+                    Modifier.orbGlassSurface(
+                        pageColor = orbOverlayGlassBaseColor(),
+                        cornerRadius = 18.dp,
+                        manageDialogBackdrop = false,
+                    )
+                } else {
+                    Modifier.background(MaterialTheme.colorScheme.outlineVariant)
+                }
+            )
+            .padding(outerPadding)
+            // An explicit height is essential: with heightIn(min=...) the
+            // fillMaxHeight() selection pill could measure to zero and vanish.
+            .height(segmentHeight),
     ) {
-        options.forEachIndexed { index, label ->
-            val chosen = index == selectedIndex
-            val pill by animateColorAsState(
-                targetValue = if (chosen) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    Color.Transparent
-                },
-                animationSpec = tween(160),
-                label = "segmentPill",
-            )
-            val labelColor by animateColorAsState(
-                targetValue = if (chosen) {
-                    MaterialTheme.colorScheme.onPrimary
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
-                animationSpec = tween(160),
-                label = "segmentLabel",
-            )
+        val optionCount = options.size.coerceAtLeast(1)
+        val segmentWidth = (maxWidth - spacing * (optionCount - 1)) / optionCount
+        val selectedOffset by animateDpAsState(
+            targetValue = (segmentWidth + spacing) * selectedIndex.coerceIn(0, optionCount - 1),
+            animationSpec = spring(
+                dampingRatio = Spring.DampingRatioMediumBouncy,
+                stiffness = Spring.StiffnessLow,
+            ),
+            label = "segmentOffset",
+        )
+        // The background selection and labels share exactly the same height.
+        Box(Modifier.fillMaxWidth().height(segmentHeight)) {
             Box(
                 modifier = Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(if (OrbFlavorUi.expressive) 15.dp else 8.dp))
-                    .background(pill)
-                    .clickable {
-                        if (!chosen) {
-                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            onSelect(index)
-                        }
-                    }
-                    .padding(vertical = 9.dp),
-                contentAlignment = Alignment.Center,
+                    .offset(x = selectedOffset)
+                    .width(segmentWidth)
+                    .height(segmentHeight)
+                    .clip(innerShape)
+                    .background(MaterialTheme.colorScheme.tertiary)
+            )
+            Row(
+                modifier = Modifier.matchParentSize(),
+                horizontalArrangement = Arrangement.spacedBy(spacing),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    text = label,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = labelColor,
-                    maxLines = 1,
-                )
+                options.forEachIndexed { index, label ->
+                    val enabledOption = enabledIndices == null || index in enabledIndices
+                    val chosen = index == selectedIndex
+                    val labelColor by animateColorAsState(
+                        targetValue = if (chosen) {
+                            MaterialTheme.colorScheme.onTertiary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        animationSpec = tween(160),
+                        label = "segmentLabel",
+                    )
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .clip(innerShape)
+                            .clickable(enabled = enabledOption) {
+                                if (!chosen) {
+                                    OrbHaptics.perform(tactileContext, OrbHaptics.Kind.TOGGLE)
+                                    onSelect(index)
+                                }
+                            }
+                            .padding(horizontal = 4.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = label,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = labelColor.copy(alpha = if (enabledOption) 1f else 0.38f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                }
             }
         }
     }
+}
+
+
+
+
+/** Attribution required by the exchange-rate provider; only shown for FX quotes. */
+@Composable
+private fun PremiumFxAttribution() {
+    val context = LocalContext.current
+    Text(
+        text = "Rates By Exchange Rate API",
+        modifier = Modifier.clickable {
+            context.startActivity(
+                Intent(Intent.ACTION_VIEW, Uri.parse("https://www.exchangerate-api.com")),
+            )
+        }.padding(top = 4.dp),
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }

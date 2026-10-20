@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="spotify_session_note">Importa tus listas y canciones favoritas de Spotify. Los favoritos de Orb no cambian Spotify. Tu sesión se cifra en este dispositivo y, cuando la sincronización está disponible, se guarda protegida en tu cuenta de Orb para tus otros dispositivos.</string>
+    <string name="spotify_connect">Vincular Spotify</string>
+    <string name="spotify_connection_error">No se pudo conectar con Spotify. Inténtalo de nuevo.</string>
+    <string name="spotify_retry">Intentar de nuevo</string>
+    <string name="spotify_liked_songs">Canciones que te gustan</string>
+    <string name="spotify_loading">Cargando Spotify…</string>
+    <string name="spotify_connected">Spotify vinculado</string>
+    <string name="spotify_library_sync_note">Vincula tu biblioteca de Spotify.</string>
+    <string name="spotify_disconnect">Desvincular</string>
+    <string name="spotify_login">Iniciar sesión en Spotify</string>
+    <string name="spotify_login_action">Entrar</string>
+    <string name="spotify_no_playable_tracks">No se encontraron canciones reproducibles para esta playlist de Spotify.</string>
+    <string name="spotify_from_section">De Spotify</string>
+</resources>

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="rooms_duration_title">Durée du salon</string>
+    <string name="rooms_duration_24h">24 heures</string>
+    <string name="rooms_duration_3d">3 jours</string>
+    <string name="rooms_duration_5d">5 jours</string>
+    <string name="rooms_duration_7d">7 jours</string>
+    <string name="rooms_duration_15d">15 jours</string>
+    <string name="rooms_duration_indefinite">Indéterminée</string>
+    <string name="rooms_duration_no_expiry">Sans expiration · Orb Premium</string>
+    <string name="rooms_duration_expired">Salon expiré</string>
+    <string name="rooms_duration_remaining_days">Temps restant : %1$d j %2$d h</string>
+    <string name="rooms_duration_remaining_hours">Temps restant : %1$d h %2$d min</string>
+    <string name="rooms_error_premium_only">La durée indéterminée nécessite Orb Premium.</string>
+</resources>

@@ -56,12 +56,21 @@
     <string name="audio_source_jiosaavn_detail">Fuente adicional de compatibilidad. Oculta de la lista estándar de fuentes.</string>
     <string name="audio_source_youtube">YouTube Music</string>
     <string name="audio_source_youtube_detail">Fuente de compatibilidad de catálogo completo con Opus. Es el respaldo final de reproducción.</string>
+    <string name="audio_quality_maximum_name">Máxima</string>
+    <string name="audio_quality_wifi_maximum_detail">Lossless / Hi-Res Lossless en Wi-Fi, cuando esté disponible. Si no, utiliza Alta.</string>
+    <string name="audio_quality_cellular_maximum_detail">Lossless / Hi-Res Lossless en datos móviles, cuando esté disponible. Requiere Orb Premium.</string>
+    <string name="audio_quality_maximum_premium_locked">La calidad Máxima en datos móviles requiere Orb Premium. Alta sigue disponible.</string>
     <string name="audio_quality_low_name">Baja</string>
     <string name="audio_quality_medium_name">Media</string>
     <string name="audio_quality_high_name">Alta</string>
     <string name="audio_quality_low_detail">Hasta unos 64 kbps · menor uso de datos</string>
     <string name="audio_quality_medium_detail">Hasta unos 128 kbps · equilibrio para uso diario</string>
     <string name="audio_quality_high_detail">AAC/MP4 hasta unos 320 kbps · prioriza Hi-Q Audio cuando está disponible</string>
+    <string name="audio_quality_low_cellular_detail">Hasta ~64 kbps · ahorro máximo en el plan de datos móviles</string>
+    <string name="audio_quality_medium_cellular_detail">Hasta ~128 kbps · reproducción fluida y uso moderado de datos móviles</string>
+    <string name="audio_quality_wifi_high_detail">Lossless y Hi-Res Lossless (FLAC hasta 24-bit / 192 kHz) en Wi-Fi</string>
+    <string name="audio_quality_cellular_high_free">Límite de ~320 kbps AAC/Opus · suscríbete a Orb Premium para audio Lossless en datos móviles</string>
+    <string name="audio_quality_cellular_high_premium">Lossless FLAC hasta 24-bit / 48 kHz sin compresión en Datos Móviles</string>
     <string name="audio_source_tidal_hifi">Orb HiFi API</string>
     <string name="audio_source_tidal_hifi_detail">Fuente Lossless/Hi-Res integrada, con respaldo automático entre endpoints compatibles.</string>
 </resources>

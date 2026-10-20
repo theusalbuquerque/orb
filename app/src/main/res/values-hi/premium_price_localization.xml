@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="premium_price_unavailable">मासिक मूल्य उपलब्ध नहीं है</string>
+    <string name="premium_price_approximate">अनुमानित रूपांतरण; बैंक अलग विनिमय दर या शुल्क लगा सकता है।</string>
+    <string name="premium_price_actual_brl">BRL में शुल्क: %1$s</string>
+</resources>

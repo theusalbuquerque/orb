@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_audio_sources">Audio y fuentes</string>
+    <string name="settings_download_preferences">Preferencias de descarga</string>
+    <string name="settings_storage_limit">Límite de almacenamiento</string>
+    <string name="settings_cache_page_title">Caché</string>
+    <string name="settings_cache_page_subtitle">Gestiona la caché de música, portadas y aplicación</string>
+    <string name="settings_cache_page_description">Borra los archivos temporales sin eliminar tus descargas, cuenta ni preferencias.</string>
+    <string name="settings_cache_back">Volver a ajustes</string>
+    <string name="settings_clear_covers_cache">Borrar caché de portadas</string>
+    <string name="settings_clear_app_cache">Borrar caché de la app</string>
+    <string name="settings_clear_app_cache_subtitle">Elimina otros archivos temporales sin borrar las cachés de música ni portadas</string>
+    <string name="settings_clear_cache_confirm">¿Borrar estos archivos temporales? Las descargas y preferencias se conservarán.</string>
+    <string name="settings_clear_cache_cancel">Cancelar</string>
+    <string name="settings_clear_cache_confirm_action">Borrar caché</string>
+    <string name="settings_clear_cache_success">Caché borrada</string>
+    <string name="settings_clear_cache_failed">No se pudieron borrar algunos archivos temporales</string>
+    <string name="settings_lyrics_origin">Origen de las letras</string>
+    <string name="settings_nerd_stats_short">Estadísticas para nerds</string>
+    <string name="settings_display_hide_status_bar">Ocultar barra de estado</string>
+</resources>

@@ -33,4 +33,5 @@
     <string name="donation_details_hint">Toca cualquier campo para copiarlo o copia todos los datos de una vez.</string>
     <string name="donation_back">Volver</string>
     <string name="donation_not_configured">Las formas de contribuir no están disponibles por el momento.</string>
+    <string name="donation_notice_after_launch">Tu contribución es opcional y no forma parte de Orb Premium. Al donar, entiendes que no tendrás acceso a ninguna función exclusiva de Orb Premium.</string>
 </resources>

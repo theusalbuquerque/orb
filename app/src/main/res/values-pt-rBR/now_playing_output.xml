@@ -1,0 +1,14 @@
+<resources>
+    <string name="now_playing_output_title">Saída de áudio</string>
+    <string name="now_playing_output_subtitle">Escolha onde o Orb deve reproduzir este áudio.</string>
+    <string name="now_playing_output_this_device">Este telefone</string>
+    <string name="now_playing_output_connected">Reproduzindo aqui</string>
+    <string name="now_playing_output_cast">Dispositivo Cast</string>
+    <string name="now_playing_output_bluetooth">Áudio Bluetooth</string>
+    <string name="now_playing_output_local">Este dispositivo</string>
+    <string name="now_playing_output_short_title">Saída</string>
+    <string name="now_playing_output_phone_subtitle">Áudio do telefone</string>
+    <string name="now_playing_output_cast_title">Cast</string>
+    <string name="now_playing_output_cast_subtitle">Escolha um dispositivo Cast</string>
+    <string name="now_playing_output_cast_multi_subtitle">Selecione um ou mais pontos Cast quando o grupo de dispositivos for compatível.</string>
+</resources>

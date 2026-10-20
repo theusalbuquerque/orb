@@ -2,7 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
-namespace bitchord::smart {
+namespace orb::smart {
 namespace { constexpr double PI=3.14159265358979323846;
 void fft(std::vector<std::complex<double>>& a){ size_t n=a.size(); for(size_t i=1,j=0;i<n;i++){ size_t bit=n>>1; for(;j&bit;bit>>=1) j^=bit; j^=bit; if(i<j) std::swap(a[i],a[j]); }
  for(size_t len=2;len<=n;len<<=1){ double ang=-2*PI/len; std::complex<double> wl(std::cos(ang),std::sin(ang)); for(size_t i=0;i<n;i+=len){ std::complex<double>w(1); for(size_t j=0;j<len/2;j++){ auto u=a[i+j],v=a[i+j+len/2]*w;a[i+j]=u+v;a[i+j+len/2]=u-v;w*=wl; } } } }

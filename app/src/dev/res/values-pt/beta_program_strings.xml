@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="beta_updates_header">Atualizações</string>
+    <string name="beta_updates_join_title">Participar do Programa Beta</string>
+    <string name="beta_updates_join_subtitle_off">Receba versões de testes antes da versão estável.</string>
+    <string name="beta_updates_join_subtitle_beta">Você receberá notificações quando novas versões estiverem disponíveis.</string>
+    <string name="beta_updates_join_subtitle_stable_auto">Você receberá notificações quando novas versões estiverem disponíveis.</string>
+    <string name="beta_updates_footer">O Orb usa o mesmo aplicativo para Stable e Beta. Apenas o canal selecionado nas Releases do GitHub é verificado, e o Android sempre pede sua confirmação antes de instalar.</string>
+    <string name="update_channel_notification_permission_required">As notificações do Android estão desativadas. O Orb continuará mostrando atualizações prontas dentro do app quando você abri-lo.</string>
+    <string name="beta_updates_leave_title">Sair do programa Beta?</string>
+    <string name="beta_updates_leave_message">O Orb deixará de procurar pre-releases e passará para o canal estável. A versão estável compatível mais recente será baixada automaticamente quando estiver disponível, e o Android pedirá sua confirmação para instalar. Os dados do aplicativo serão mantidos.</string>
+    <string name="beta_updates_leave_cancel">Cancelar</string>
+    <string name="beta_updates_leave_confirm">Sair do Beta</string>
+    <string name="beta_updates_left_beta_to_stable">Canal estável ativado. O Orb baixará automaticamente a próxima versão estável compatível.</string>
+    <string name="beta_updates_channel_name">Atualizações do Orb</string>
+    <string name="beta_updates_channel_description">Atualizações do Orb baixadas e prontas para instalar</string>
+    <string name="beta_updates_notification_title_beta">Orb Beta pronto para instalar</string>
+    <string name="beta_updates_notification_title_stable">Orb estável pronto para instalar</string>
+    <string name="beta_updates_notification_body">%1$s foi baixado. Toque para confirmar a instalação.</string>
+    <string name="update_manual_title">Buscar atualizações agora</string>
+    <string name="update_manual_checking">Buscando atualizações…</string>
+    <string name="update_manual_up_to_date">Você já está usando a versão mais recente.</string>
+    <string name="update_manual_no_release">Nenhuma versão mais recente foi encontrada.</string>
+    <string name="update_manual_downloaded">%1$s foi baixada e está pronta para instalar.</string>
+    <string name="update_manual_failed">Não foi possível buscar atualizações. Tente novamente mais tarde.</string>
+</resources>

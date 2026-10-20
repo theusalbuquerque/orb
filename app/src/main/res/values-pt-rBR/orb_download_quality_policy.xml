@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_download_fallback_lower_title">Permitir download em qualidade inferior</string>
+    <string name="settings_download_fallback_lower_summary">Se a qualidade escolhida estiver indisponível, tentar uma menor. Desativado: não reduzir a qualidade.</string>
+    <string name="settings_download_strict_quality_summary">O Orb busca a qualidade selecionada e não a reduz sem autorização.</string>
+</resources>

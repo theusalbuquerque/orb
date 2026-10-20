@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="switch_incomplete_retry">La transferencia no se completó. Inténtalo de nuevo en unos segundos.</string>
+</resources>

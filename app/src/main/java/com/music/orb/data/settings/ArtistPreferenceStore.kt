@@ -59,6 +59,22 @@ object ArtistPreferenceStore {
         if (preference == ArtistPreference.NEUTRAL) current.remove(key)
         else current[key] = preference
         persist(accountKey, current)
+        AccountSettingsSync.notifyAccountPreferenceChanged()
+    }
+
+    @Synchronized
+    fun accountSyncSnapshot(accountKey: String?): Map<String, String> =
+        load(accountKey).mapValues { it.value.name }
+
+    @Synchronized
+    fun applyAccountSyncSnapshot(accountKey: String?, values: Map<String, String>) {
+        if (!::prefs.isInitialized || accountKey.isNullOrBlank()) return
+        val decoded = values.mapNotNull { (key, raw) ->
+            runCatching { ArtistPreference.valueOf(raw) }.getOrNull()
+                ?.takeIf { it != ArtistPreference.NEUTRAL }
+                ?.let { key to it }
+        }.toMap()
+        persist(accountKey, decoded)
     }
 
     fun artistKey(value: String): String = Normalizer.normalize(value, Normalizer.Form.NFKC)

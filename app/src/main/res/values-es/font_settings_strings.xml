@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_fonts">Fuentes</string>
+    <string name="settings_font_orb_default">Predeterminada</string>
+</resources>

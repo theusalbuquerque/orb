@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_download_fallback_high_title">Baixar em qualidade Alta se Lossless não estiver disponível</string>
+    <string name="settings_download_fallback_high_summary">Somente após esgotar a busca por Lossless/Hi-Res Lossless. Com esta opção desativada, o Orb não baixa AAC no lugar de Lossless.</string>
+    <string name="settings_download_patient_lossless_summary">O Orb busca Lossless/Hi-Res Lossless por mais tempo, conferindo gravação, artista, álbum e duração, mesmo sem reproduzir antes.</string>
+</resources>

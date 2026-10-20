@@ -1,0 +1,4 @@
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+<item><shape android:shape="rectangle"><solid android:color="@color/orb_launcher_background"/></shape></item>
+<item android:drawable="@drawable/orb_logo_foreground"/>
+</layer-list>

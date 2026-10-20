@@ -64,8 +64,8 @@ internal object ManualQueuePins {
 
 
 /**
- * Compatibility shim for Orb call sites retained around BitChord v1.5 playback.
- * BitChord v1.5 has no opening-set launch gate: playback begins normally and
+ * Compatibility shim for Orb call sites retained around Orb v1.5 playback.
+ * Orb v1.5 has no opening-set launch gate: playback begins normally and
  * Automix plans only the current A -> B transition.
  */
 internal object AutomixQueueLaunch {
@@ -204,6 +204,7 @@ fun MediaItem.toSong() = Song(
     sourcePlaylistId = mediaMetadata.extras?.getString(EXTRA_SOURCE_PLAYLIST_ID),
     sourcePlaylistTitle = mediaMetadata.extras?.getString(EXTRA_SOURCE_PLAYLIST_TITLE),
     sourcePlaylistArtworkUrl = mediaMetadata.extras?.getString(EXTRA_SOURCE_PLAYLIST_ARTWORK),
+    preserveAlbumRelease = mediaMetadata.extras?.getBoolean(EXTRA_PRESERVE_ALBUM_RELEASE) == true,
 )
 
 /** @see Song.fromAutoplay */
@@ -234,6 +235,8 @@ private const val EXTRA_QUEUE_PINNED = "orb.queuePinned"
 /** Album identity carried into the player so playback can preserve album continuity. */
 private const val EXTRA_ALBUM_ID = "orb.albumId"
 private const val EXTRA_ALBUM_NAME = "orb.albumName"
+/** Exact release was explicitly selected from an album page. */
+private const val EXTRA_PRESERVE_ALBUM_RELEASE = "orb.preserveAlbumRelease"
 
 /** Local-only playlist source context used by Stats; never sent as audio/social data. */
 private const val EXTRA_SOURCE_PLAYLIST_ID = "orb.sourcePlaylistId"
@@ -401,7 +404,8 @@ fun Song.toMediaItem(albumSequential: Boolean = false): MediaItem {
                 // Sized here rather than left as stored: this is what the lock
                 // screen, the notification and Android Auto draw, all of them
                 // large, and none of them go back for a better copy later.
-                .setArtworkUri(artworkAt(NOTIFICATION_ART_PX)?.toUri())
+                .setArtworkUri((com.music.orb.download.Downloads.offlineArtworkUri(videoId)
+                    ?: artworkAt(NOTIFICATION_ART_PX))?.toUri())
                 // System media surfaces (One UI's Now Bar, Android Auto, Assistant)
                 // classify a session by its media type; untyped sessions get treated
                 // as generic audio and lose the music-specific card.
@@ -427,7 +431,7 @@ fun Song.toMediaItem(albumSequential: Boolean = false): MediaItem {
                     if (
                         fromAutoplay || queuePinned || localUri != null ||
                         durationText != null || isExplicit || releaseYear != null || albumId != null ||
-                        albumName != null || albumSequential || sourcePlaylistId != null ||
+                        albumName != null || preserveAlbumRelease || albumSequential || sourcePlaylistId != null ||
                         sourcePlaylistTitle != null || sourcePlaylistArtworkUrl != null
                     ) {
                         setExtras(
@@ -436,6 +440,7 @@ fun Song.toMediaItem(albumSequential: Boolean = false): MediaItem {
                                 EXTRA_QUEUE_PINNED to queuePinned,
                                 EXTRA_ALBUM_ID to albumId,
                                 EXTRA_ALBUM_NAME to albumName,
+                                EXTRA_PRESERVE_ALBUM_RELEASE to preserveAlbumRelease,
                                 EXTRA_SOURCE_PLAYLIST_ID to sourcePlaylistId,
                                 EXTRA_SOURCE_PLAYLIST_TITLE to sourcePlaylistTitle,
                                 EXTRA_SOURCE_PLAYLIST_ARTWORK to sourcePlaylistArtworkUrl,
@@ -522,14 +527,6 @@ fun mediaIdIn(uri: Uri): String? = if (uri.authority == "source") {
     uri.getQueryParameter("v")
 }
 
-private fun List<Song>.isOrderedAlbumQueue(): Boolean {
-    if (size < 2) return false
-    val ids = map { it.albumId?.trim().orEmpty() }
-    // Album pages stamp their own browse id onto every row before play. Requiring
-    // that explicit shared id avoids mistaking a playlist containing several
-    // songs from one album for an authored album session.
-    return ids.all { it.isNotEmpty() } && ids.distinct().size == 1
-}
 
 fun MediaController.playSongs(songs: List<Song>, startIndex: Int) {
     if (songs.isEmpty()) return

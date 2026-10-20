@@ -12,6 +12,8 @@ import com.music.orb.data.social.NowPlayingReactionChange
 import com.music.orb.data.social.NowPlayingReactionType
 import com.music.orb.data.social.OrbProfile
 import com.music.orb.data.social.SocialRepository
+import com.music.orb.data.social.CommunityStatsRepository
+import com.music.orb.data.social.CommunityRankEntry
 import com.music.orb.data.social.reachedListenThreshold
 import com.music.orb.data.social.reachedSocialFeedThreshold
 import com.music.orb.data.social.reactionSessionKey
@@ -61,7 +63,6 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.ZonedDateTime
-import java.time.temporal.TemporalAdjusters
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -76,6 +77,8 @@ enum class UsernameSetupError {
     TAKEN,
     SAVE_FAILED,
 }
+
+enum class PersonalMediaRanking { SONGS, ALBUMS }
 
 enum class StatsPeriod {
     WEEK,
@@ -270,6 +273,218 @@ class FriendsViewModel : ViewModel() {
     private val _statsPeriod = MutableStateFlow(StatsPeriod.WEEK)
     val statsPeriod: StateFlow<StatsPeriod> = _statsPeriod.asStateFlow()
 
+    private val _communityRankings = MutableStateFlow<List<CommunityRankEntry>>(emptyList())
+    val communityRankings: StateFlow<List<CommunityRankEntry>> = _communityRankings.asStateFlow()
+    private val _communityLoading = MutableStateFlow(false)
+    val communityLoading: StateFlow<Boolean> = _communityLoading.asStateFlow()
+    private val _communityGenres = MutableStateFlow<List<Pair<String, Float>>>(emptyList())
+    val communityGenres: StateFlow<List<Pair<String, Float>>> = _communityGenres.asStateFlow()
+    private val _communityLanguages = MutableStateFlow<List<Pair<String, Float>>>(emptyList())
+    val communityLanguages: StateFlow<List<Pair<String, Float>>> = _communityLanguages.asStateFlow()
+    private val _communityLoadFailed = MutableStateFlow(false)
+    val communityLoadFailed: StateFlow<Boolean> = _communityLoadFailed.asStateFlow()
+    private data class CommunitySnapshot(
+        val entries: List<CommunityRankEntry>,
+        val genres: List<Pair<String, Float>> = emptyList(),
+        val languages: List<Pair<String, Float>> = emptyList(),
+        val previousPlays: Map<String, Long>? = null,
+    )
+    private val communityCache = mutableMapOf<StatsPeriod, CommunitySnapshot>()
+    private val _communityPreviousPlays = MutableStateFlow<Map<String, Long>?>(null)
+    val communityPreviousPlays: StateFlow<Map<String, Long>?> = _communityPreviousPlays.asStateFlow()
+    private var communityJob: Job? = null
+    private var communityLoadingPeriod: StatsPeriod? = null
+
+    private fun showCommunitySnapshot(period: StatsPeriod) {
+        val cached = communityCache[period] ?: return
+        _communityRankings.value = cached.entries
+        _communityGenres.value = cached.genres
+        _communityLanguages.value = cached.languages
+        _communityPreviousPlays.value = cached.previousPlays
+    }
+
+    /** Re-entry updates in the background; switching Geral/Pessoal never invalidates data. */
+    fun loadCommunityRankings(period: StatsPeriod = _statsPeriod.value, force: Boolean = false) {
+        showCommunitySnapshot(period)
+        if (!force && communityCache.containsKey(period)) return
+        if (!force && communityJob?.isActive == true && communityLoadingPeriod == period) return
+        communityJob?.cancel()
+        communityLoadingPeriod = period
+        communityJob = viewModelScope.launch {
+            _communityLoading.value = true
+            _communityLoadFailed.value = false
+            val days = when (period) {
+                StatsPeriod.WEEK -> 7
+                StatsPeriod.MONTH -> 30
+                StatsPeriod.QUARTER -> 90
+                StatsPeriod.SEMESTER -> 182
+                StatsPeriod.YEAR -> 365
+            }
+            try {
+                // Fetch historical comparison concurrently, never gate the first paint.
+                val previousJob = async(Dispatchers.IO) {
+                    runCatching { CommunityStatsRepository.previousRankings(days) }.getOrNull()
+                }
+                val rows = CommunityStatsRepository.rankings(days)
+                val sanitized = rows.filterNot { it.hasUnknownArtistLabel() }
+                val languageRows = rows.filter { it.category == "language" && it.plays > 0L }
+                val totalLanguages = languageRows.sumOf { it.plays.toDouble() }
+                val languages = languageRows.sortedByDescending { it.plays }.take(5).map { entry ->
+                    languageDisplayName(entry.title) to
+                        if (totalLanguages > 0.0) (entry.plays / totalLanguages * 100.0).toFloat() else 0f
+                }
+                // Publish immediately, while artwork/genres continue as non-blocking enrichment.
+                val priorSnapshot = communityCache[period]
+                var snapshot = CommunitySnapshot(
+                    entries = sanitized,
+                    genres = priorSnapshot?.genres.orEmpty(),
+                    languages = languages.ifEmpty { priorSnapshot?.languages.orEmpty() },
+                    previousPlays = priorSnapshot?.previousPlays,
+                )
+                communityCache[period] = snapshot
+                if (_statsPeriod.value == period) showCommunitySnapshot(period)
+
+                val previous = previousJob.await()?.associate { entry ->
+                    communityRankKey(entry.category, entry.title, entry.subtitle) to entry.plays
+                }
+                snapshot = snapshot.copy(previousPlays = previous ?: priorSnapshot?.previousPlays)
+                communityCache[period] = snapshot
+                if (_statsPeriod.value == period) showCommunitySnapshot(period)
+
+                // Portrait metadata and genre lookups must not delay displaying rankings.
+                val portraitJob = async {
+                    val gate = Semaphore(4)
+                    sanitized.map { entry ->
+                        async(Dispatchers.IO) {
+                            if (entry.category in setOf("artist", "rated_artist")) {
+                                val portrait = gate.withPermit {
+                                    runCatching { ArtistArtworkRepository.resolve(entry.title) }.getOrNull()
+                                }
+                                entry.copy(artworkUrl = portrait ?: entry.artworkUrl)
+                            } else entry
+                        }
+                    }.awaitAll()
+                }
+                val genresJob = async {
+                    val gate = Semaphore(3)
+                    val topArtists = sanitized.filter { it.category == "artist" }.take(8)
+                    val tags = topArtists.map { entry ->
+                        async(Dispatchers.IO) {
+                            entry to gate.withPermit {
+                                runCatching { normalizeOrbGenres(ArtistArtworkRepository.resolveGenres(entry.title)) }
+                                    .getOrDefault(emptyList())
+                            }
+                        }
+                    }.awaitAll()
+                    val scores = linkedMapOf<String, Double>()
+                    val labels = mutableMapOf<String, String>()
+                    tags.forEach { (artist, genres) ->
+                        genres.forEach { genre ->
+                            val key = genre.lowercase(Locale.ROOT)
+                            labels[key] = genre
+                            scores[key] = scores.getOrDefault(key, 0.0) + artist.plays.toDouble() / genres.size
+                        }
+                    }
+                    val total = scores.values.sum()
+                    scores.entries.sortedByDescending { it.value }.take(5).map { (key, weight) ->
+                        labels.getValue(key) to if (total > 0.0) (weight / total * 100).toFloat() else 0f
+                    }
+                }
+                // Keep incremental updates even if one optional provider fails.
+                val portraits = portraitJob.await()
+                snapshot = snapshot.copy(entries = portraits)
+                communityCache[period] = snapshot
+                if (_statsPeriod.value == period) showCommunitySnapshot(period)
+                val genres = genresJob.await()
+                snapshot = snapshot.copy(genres = genres.ifEmpty { priorSnapshot?.genres.orEmpty() })
+                communityCache[period] = snapshot
+                if (_statsPeriod.value == period) showCommunitySnapshot(period)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                _communityLoadFailed.value = true
+                // Never clear the last good snapshot because a refresh failed.
+            } finally {
+                if (communityLoadingPeriod == period) {
+                    communityLoadingPeriod = null
+                    _communityLoading.value = false
+                }
+            }
+        }
+    }
+
+    private val personalPreviousRankCache = mutableMapOf<Pair<StatsPeriod, PersonalMediaRanking?>, Map<String, Int>>()
+
+    /** Positions are compared with the matching immediately preceding listening window. */
+    fun personalPreviousRankingPositions(
+        kind: PersonalMediaRanking?,
+        period: StatsPeriod = _statsPeriod.value,
+    ): Map<String, Int> {
+        val key = period to kind
+        personalPreviousRankCache[key]?.let { return it }
+        val window = statsWindow(period, ZonedDateTime.now())
+        val previousRows = activityCache.filter { row ->
+            row.reachedListenThreshold() &&
+                row.startedInstant()?.let { it >= window.previousStart && it < window.previousEnd } == true
+        }
+        val leaders = when (kind) {
+            PersonalMediaRanking.SONGS -> rankListeningTracks(previousRows, limit = 2000)
+                .map { communityRankKey("song", it.title, it.subtitle) }
+            PersonalMediaRanking.ALBUMS -> rankListeningAlbums(previousRows, limit = 2000)
+                .map { communityRankKey("album", it.title, it.subtitle) }
+            null -> rankListeningArtists(previousRows, limit = 2000)
+                .map { communityRankKey("artist", it.title, null) }
+        }
+        return leaders.withIndex().associate { (index, rankKey) -> rankKey to index + 1 }
+            .also { personalPreviousRankCache[key] = it }
+    }
+
+    private val _personalGenreBreakdown = MutableStateFlow<List<Pair<String, Float>>>(emptyList())
+    val personalGenreBreakdown: StateFlow<List<Pair<String, Float>>> = _personalGenreBreakdown.asStateFlow()
+    private val _personalLanguageBreakdown = MutableStateFlow<List<Pair<String, Float>>>(emptyList())
+    val personalLanguageBreakdown: StateFlow<List<Pair<String, Float>>> = _personalLanguageBreakdown.asStateFlow()
+
+    fun personalTopArtists(period: StatsPeriod = _statsPeriod.value): List<StatsLeader> =
+        artistLeadersForPeriod(period).take(5)
+
+    /** Rankings are derived from the same listening rows and ≥30% threshold as personal Stats. */
+    fun personalMediaRanking(type: PersonalMediaRanking, period: StatsPeriod = _statsPeriod.value): List<StatsLeader> {
+        val window = statsWindow(period, ZonedDateTime.now())
+        val rows = activityCache.filter { row ->
+            row.reachedListenThreshold() &&
+                row.startedInstant()?.let { it >= window.currentStart && it < window.currentEnd } == true
+        }
+        val ranking = when (type) {
+            PersonalMediaRanking.SONGS -> rankListeningTracks(rows, limit = 30)
+            PersonalMediaRanking.ALBUMS -> rankListeningAlbums(rows, limit = 30)
+        }
+        return ranking.map { ranked ->
+            StatsLeader(
+                title = ranked.title,
+                subtitle = ranked.subtitle,
+                artworkUrl = ranked.artworkUrl,
+                plays = ranked.plays,
+                listenedMs = ranked.listenedMs,
+            )
+        }
+    }
+
+    // Hour-of-day distribution of valid personal listens in the chosen period.
+    // Computed with the same 30% listening rule and timezone as the main Stats.
+    fun personalListeningHours(period: StatsPeriod = _statsPeriod.value): List<Int> {
+        val zone = ZonedDateTime.now().zone
+        val window = statsWindow(period, ZonedDateTime.now())
+        val result = IntArray(24)
+        activityCache.forEach { row ->
+            if (!row.reachedListenThreshold()) return@forEach
+            val started = row.startedInstant() ?: return@forEach
+            if (started < window.currentStart || started >= window.currentEnd) return@forEach
+            val hour = started.atZone(zone).hour
+            result[hour] = result[hour] + 1
+        }
+        return result.toList()
+    }
+
     private val _listeningStats = MutableStateFlow(ListeningStats())
     val listeningStats: StateFlow<ListeningStats> = _listeningStats.asStateFlow()
 
@@ -332,6 +547,11 @@ class FriendsViewModel : ViewModel() {
     private val statsArtistKindCache = mutableMapOf<String, ArtistKind>()
     private val rankingSnapshots = mutableMapOf<StatsPeriod, List<ArtistRankEntry>>()
     private val socialProfileCache = mutableMapOf<String, OrbProfile>()
+    private var followingStartedAt: Map<String, Instant> = emptyMap()
+    private fun afterFollowing(row: ListeningActivity): Boolean {
+        val since = followingStartedAt[row.userId] ?: return false
+        return row.startedInstant()?.let { it >= since } == true
+    }
     private var visible = false
 
     init {
@@ -360,7 +580,15 @@ class FriendsViewModel : ViewModel() {
     fun onVisible() {
         visible = true
         ensureLoaded()
+        val hadPersonalStats = statsLoadedForAccount
         ensureStatsLoaded()
+        if (hadPersonalStats && statsJob?.isActive != true) {
+            statsJob = viewModelScope.launch {
+                runCatching { loadStatsSnapshot() }
+                    .onFailure { _statsLoadFailed.value = true }
+            }
+        }
+        loadCommunityRankings(_statsPeriod.value, force = true)
         refreshReactionNotifications()
         restartRealtime()
         restartOwnStatsRealtime()
@@ -478,6 +706,14 @@ class FriendsViewModel : ViewModel() {
         // Match Home's filter feel: commit the selected pill and the already
         // persisted snapshot synchronously, before any expensive aggregation.
         _statsPeriod.value = period
+        // Avoid showing the previous period's community ranking while the next loads.
+        if (communityCache.containsKey(period)) showCommunitySnapshot(period)
+        else {
+            _communityRankings.value = emptyList()
+            _communityGenres.value = emptyList()
+            _communityLanguages.value = emptyList()
+            _communityPreviousPlays.value = null
+        }
         cachedStatsByPeriod[period]?.let { _listeningStats.value = it }
 
         if (_artistRankingOpen.value) {
@@ -880,6 +1116,7 @@ class FriendsViewModel : ViewModel() {
     fun refreshAll() {
         if (_refreshing.value) return
         viewModelScope.launch {
+            loadCommunityRankings(_statsPeriod.value, force = true)
             _refreshing.value = true
             val refreshedProfile = runCatching { SocialRepository.myProfile() }
             refreshedProfile.onSuccess { profile ->
@@ -983,6 +1220,8 @@ class FriendsViewModel : ViewModel() {
                 _followErrorToken.value += 1
                 restartRealtime()
             } else if (!wasFollowing) {
+                followingStartedAt = runCatching { SocialRepository.followingStartedAt() }
+                    .getOrDefault(followingStartedAt + (profile.id to Instant.now()))
                 socialProfileCache[profile.id] = profile
                 runCatching { SocialRepository.nowPlayingForUsers(listOf(profile.id)) }
                     .onSuccess { live ->
@@ -997,7 +1236,8 @@ class FriendsViewModel : ViewModel() {
                         userIds = listOf(profile.id),
                         since = Instant.now().minusSeconds(SOCIAL_FEED_RETENTION_SECONDS),
                     )
-                }.onSuccess { rows ->
+                }.onSuccess { received ->
+                    val rows = received.filter(::afterFollowing)
                     if (profile.id in _followingIds.value) {
                         val existingKeys = _socialFeed.value.mapTo(hashSetOf()) { it.reactionSessionKey() }
                         _socialFeed.value = (_socialFeed.value + rows)
@@ -1126,6 +1366,15 @@ class FriendsViewModel : ViewModel() {
         activityCache = emptyList()
         playlistActivityCache = emptyList()
         cachedStatsByPeriod.clear()
+        personalPreviousRankCache.clear()
+        communityJob?.cancel()
+        communityJob = null
+        communityLoadingPeriod = null
+        communityCache.clear()
+        _communityRankings.value = emptyList()
+        _communityGenres.value = emptyList()
+        _communityLanguages.value = emptyList()
+        _communityPreviousPlays.value = null
         statsArtworkCache.clear()
         statsArtistKindCache.clear()
         rankingSnapshots.clear()
@@ -1151,6 +1400,7 @@ class FriendsViewModel : ViewModel() {
         _usernameSaving.value = false
         _usernameError.value = null
         _following.value = emptyList()
+        followingStartedAt = emptyMap()
         _followingIds.value = emptySet()
         _recommendedProfiles.value = emptyList()
         _recommendationsLoading.value = false
@@ -1201,13 +1451,14 @@ class FriendsViewModel : ViewModel() {
 
     private suspend fun loadFollowingSnapshot() {
         val profiles = SocialRepository.followingProfiles()
+        followingStartedAt = SocialRepository.followingStartedAt()
         val ids = profiles.mapTo(linkedSetOf()) { it.id }
         profiles.forEach { socialProfileCache[it.id] = it }
         val live = SocialRepository.nowPlayingForUsers(ids)
         val feed = SocialRepository.recentListeningActivityForUsers(
             userIds = ids,
             since = Instant.now().minusSeconds(SOCIAL_FEED_RETENTION_SECONDS),
-        ).collapseConsecutiveSocialRepeats()
+        ).filter(::afterFollowing).collapseConsecutiveSocialRepeats()
         _following.value = profiles
         _followingIds.value = ids
         if (ids.isEmpty() && _userSearchOpen.value) {
@@ -1221,7 +1472,7 @@ class FriendsViewModel : ViewModel() {
         _loadFailed.value = false
         restartRealtime()
 
-        // Reactions are loaded for all visible four-hour feed sessions, not just
+        // Reactions are loaded for all visible six-hour feed sessions, not just
         // the one track that still happens to be in now_playing.
         val reactions = runCatching {
             SocialRepository.reactionsForListeningActivity(feed)
@@ -1239,6 +1490,7 @@ class FriendsViewModel : ViewModel() {
         val fetchedPlaylistActivity = PlaylistListeningStore.eventsSince(since.toEpochMilli())
         activityCache = fetchedActivity
         playlistActivityCache = fetchedPlaylistActivity
+        personalPreviousRankCache.clear()
 
         // Publish Stats from already-known/cached artist-credit decisions first.
         // Catalogue validation for ambiguous comma/& credits is network work and
@@ -1343,6 +1595,8 @@ class FriendsViewModel : ViewModel() {
         period: StatsPeriod,
         now: ZonedDateTime = ZonedDateTime.now(),
     ) {
+        _personalGenreBreakdown.value = emptyList()
+        _personalLanguageBreakdown.value = emptyList()
         statsArtworkJob?.cancel()
         statsArtworkJob = viewModelScope.launch { enrichStatsArtwork() }
         statsAuxiliaryJob?.cancel()
@@ -1421,6 +1675,7 @@ class FriendsViewModel : ViewModel() {
 
         if (activeUserId != accountId || _statsPeriod.value != period) return
         val languages = rankedListeningLanguages(currentRows, STATS_TASTE_COUNT)
+        _personalLanguageBreakdown.value = listeningLanguageShares(currentRows)
         _listeningStats.value = _listeningStats.value.copy(
             topLanguage = languages.firstOrNull(),
             topLanguages = languages,
@@ -1498,10 +1753,8 @@ class FriendsViewModel : ViewModel() {
     private suspend fun enrichStatsAuxiliary(period: StatsPeriod, now: ZonedDateTime) {
         val accountId = activeUserId
         val leaders = artistLeadersForPeriod(period, now).take(TOP_GENRE_ARTIST_LIMIT)
-        val topGenres = resolveRankedGenres(
-            leaders = leaders,
-            limit = STATS_TASTE_COUNT,
-        )
+        val genreShares = resolveRankedGenreShares(leaders, 4)
+        val topGenres = resolveRankedGenres(leaders, STATS_TASTE_COUNT)
 
         val window = statsWindow(period, now)
         val newFollowers = runCatching {
@@ -1513,6 +1766,7 @@ class FriendsViewModel : ViewModel() {
         // A transient catalogue outage must not overwrite a valid persistent
         // genre snapshot with an empty list. Fresh non-empty results always win.
         val effectiveGenres = topGenres.ifEmpty { current.topGenres }
+        _personalGenreBreakdown.value = genreShares
         _listeningStats.value = current.copy(
             topGenre = effectiveGenres.firstOrNull() ?: current.topGenre,
             topGenres = effectiveGenres,
@@ -1544,15 +1798,6 @@ class FriendsViewModel : ViewModel() {
             )
         }
 
-        artist?.let { leader ->
-            val artwork = resolveArtistArtwork(leader)
-            val initialKind = statsArtistKindCache[leader.title.normalizeArtistMatchKey()]
-                ?: heuristicArtistKind(leader.title)
-            applyArtistMetadata(leader.title, artwork, initialKind)
-
-            val kind = resolveArtistKind(leader.title)
-            applyArtistMetadata(leader.title, artwork, kind)
-        }
         val songArtwork = song?.takeIf { it.artworkUrl.isNullOrBlank() }?.let { leader ->
             resolveSongArtwork(leader)
         }
@@ -1579,6 +1824,18 @@ class FriendsViewModel : ViewModel() {
             },
         )
         persistStatsSnapshot(_statsPeriod.value, _listeningStats.value)
+
+        // Portrait APIs may be slower than the album/song catalogue. Keep
+        // those cards responsive instead of waiting on the artist resolver.
+        artist?.let { leader ->
+            val artwork = resolveArtistArtwork(leader)
+            val initialKind = statsArtistKindCache[leader.title.normalizeArtistMatchKey()]
+                ?: heuristicArtistKind(leader.title)
+            applyArtistMetadata(leader.title, artwork, initialKind)
+
+            val kind = resolveArtistKind(leader.title)
+            applyArtistMetadata(leader.title, artwork, kind)
+        }
     }
 
     private fun refreshHomeTopArtists(now: ZonedDateTime = ZonedDateTime.now()) {
@@ -1945,7 +2202,9 @@ class FriendsViewModel : ViewModel() {
                     ?: songs.firstOrNull()
             }
             ?.thumbnailUrl
-        statsArtworkCache[key] = artwork
+        // Never cache a negative search result: temporary catalogue failures
+        // should not leave a track cover blank for the entire session.
+        if (!artwork.isNullOrBlank()) statsArtworkCache[key] = artwork
         return artwork
     }
 
@@ -2212,8 +2471,19 @@ class FriendsViewModel : ViewModel() {
         // safety poll only catches events that the websocket/network actually dropped.
         socialFeedPollJob = viewModelScope.launch {
             while (isActive && visible) {
-                syncNowPlayingSnapshot()
-                syncSocialFeedDelta()
+                try {
+                    kotlinx.coroutines.withTimeout(12000L) {
+                        followingStartedAt = SocialRepository.followingStartedAt()
+                        syncNowPlayingSnapshot()
+                        syncSocialFeedDelta()
+                    }
+                } catch (error: kotlinx.coroutines.TimeoutCancellationException) {
+                    // A stalled request must not stop future automatic updates.
+                } catch (error: kotlinx.coroutines.CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    android.util.Log.w("OrbSocial", "Automatic feed sync failed; retrying", error)
+                }
                 delay(SOCIAL_FEED_LIVE_SYNC_MS)
             }
         }
@@ -2278,12 +2548,13 @@ class FriendsViewModel : ViewModel() {
 
     private fun removeNowPlayingForUser(userId: String) {
         // Removing now_playing only changes the label on the newest feed card.
-        // The listening_activity row remains visible for up to four hours.
+        // The listening_activity row remains visible for up to six hours.
         _nowPlaying.value = _nowPlaying.value - userId
     }
 
     private fun applyListeningActivityUpsert(item: ListeningActivity) {
         if (item.userId !in _followingIds.value) return
+        if (!afterFollowing(item)) return
         if (!item.reachedSocialFeedThreshold()) return
         val finished = runCatching { Instant.parse(item.finishedAt) }.getOrNull()
             ?: runCatching { Instant.parse(item.startedAt) }.getOrNull()
@@ -2361,6 +2632,7 @@ class FriendsViewModel : ViewModel() {
         _nowPlaying.value = _nowPlaying.value.filterValues { it.isFresh(now) }
         val cutoff = Instant.now().minusSeconds(SOCIAL_FEED_RETENTION_SECONDS)
         _socialFeed.value = _socialFeed.value.filter { row ->
+            if (!afterFollowing(row)) return@filter false
             val finished = runCatching { Instant.parse(row.finishedAt) }.getOrNull()
             val started = runCatching { Instant.parse(row.startedAt) }.getOrNull()
             (finished ?: started ?: Instant.EPOCH) >= cutoff
@@ -2517,12 +2789,12 @@ class FriendsViewModel : ViewModel() {
     private companion object {
         const val SEARCH_DEBOUNCE_MS = 320L
         const val STALE_PRUNE_INTERVAL_MS = 30_000L
-        const val SOCIAL_FEED_RETENTION_SECONDS = 4L * 60L * 60L
+        const val SOCIAL_FEED_RETENTION_SECONDS = 6L * 60L * 60L
         const val SOCIAL_FEED_LIVE_SYNC_MS = 6_000L
         const val SOCIAL_FEED_PUSH_SETTLE_MS = 300L
         const val SOCIAL_FEED_DELTA_OVERLAP_SECONDS = 8L
         const val SOCIAL_FEED_DELTA_MAX_ROWS = 80
-        const val NOTIFICATION_RETENTION_SECONDS = 6L * 60L * 60L
+        const val NOTIFICATION_RETENTION_SECONDS = 24L * 60L * 60L
         const val RANKING_POST_LOAD_REVEAL_DELAY_MS = 2_000L
         const val RANKING_MOVEMENT_RETENTION_MS = 7L * 24L * 60L * 60L * 1000L
         const val MAX_ARTIST_RANKING = 30
@@ -2821,28 +3093,20 @@ private fun rhythmBucketCount(
     now: ZonedDateTime,
 ): Int {
     val start = when (period) {
-        StatsPeriod.WEEK -> now
-            .toLocalDate()
-            .with(TemporalAdjusters.previousOrSame(java.time.DayOfWeek.MONDAY))
-            .atStartOfDay(now.zone)
-
-        StatsPeriod.MONTH -> now
-            .withDayOfMonth(1)
-            .toLocalDate()
-            .atStartOfDay(now.zone)
-
+        StatsPeriod.WEEK -> rollingWeekStart(now)
+        StatsPeriod.MONTH -> rollingMonthStart(now)
         StatsPeriod.QUARTER -> quarterStart(now)
         StatsPeriod.SEMESTER -> semesterStart(now)
         StatsPeriod.YEAR -> yearStart(now)
     }
 
     return when (period) {
-        // One visible point for each day that has actually happened this week.
-        StatsPeriod.WEEK -> now.dayOfWeek.value.coerceIn(1, 7)
+        // Week is always a rolling seven-calendar-day window (today + 6 days).
+        StatsPeriod.WEEK -> 7
 
-        // Monthly graph uses clearly readable seven-day blocks:
-        // 1–7, 8–14, 15–21, 22–28 and 29–end.
-        StatsPeriod.MONTH -> (((now.dayOfMonth - 1) / 7) + 1).coerceIn(1, 5)
+        // Month is also rolling. Its length follows the current calendar month
+        // (28/29/30/31 days) and is displayed in seven-day blocks.
+        StatsPeriod.MONTH -> ((now.toLocalDate().lengthOfMonth() + 6) / 7).coerceIn(4, 5)
 
         // Quarter is shown week-by-week from the first day of the quarter.
         StatsPeriod.QUARTER -> {
@@ -2890,8 +3154,11 @@ private fun listeningSeriesForPeriod(
             }
 
             StatsPeriod.MONTH -> {
-                val dayOffset = moment.dayOfMonth - 1
-                dayOffset / 7
+                val dayOffset = java.time.temporal.ChronoUnit.DAYS.between(
+                    startDate,
+                    moment.toLocalDate(),
+                )
+                (dayOffset / 7L).toInt()
             }
 
             StatsPeriod.QUARTER -> {
@@ -2927,21 +3194,18 @@ private fun listeningSeriesForPeriod(
 
 private fun statsWindow(period: StatsPeriod, now: ZonedDateTime): StatsWindow {
     val start = when (period) {
-        StatsPeriod.WEEK -> now
-            .toLocalDate()
-            .with(TemporalAdjusters.previousOrSame(java.time.DayOfWeek.MONDAY))
-            .atStartOfDay(now.zone)
-        StatsPeriod.MONTH -> now
-            .withDayOfMonth(1)
-            .toLocalDate()
-            .atStartOfDay(now.zone)
+        StatsPeriod.WEEK -> rollingWeekStart(now)
+        StatsPeriod.MONTH -> rollingMonthStart(now)
         StatsPeriod.QUARTER -> quarterStart(now)
         StatsPeriod.SEMESTER -> semesterStart(now)
         StatsPeriod.YEAR -> yearStart(now)
     }
     val previousStart = when (period) {
-        StatsPeriod.WEEK -> start.minusWeeks(1)
-        StatsPeriod.MONTH -> start.minusMonths(1)
+        // Compare rolling windows against the immediately preceding window of
+        // the same number of calendar days. This prevents Sunday/month-boundary
+        // resets from changing the meaning of the comparison card.
+        StatsPeriod.WEEK -> start.minusDays(7)
+        StatsPeriod.MONTH -> start.minusDays(now.toLocalDate().lengthOfMonth().toLong())
         StatsPeriod.QUARTER -> start.minusMonths(3)
         StatsPeriod.SEMESTER -> start.minusMonths(6)
         StatsPeriod.YEAR -> start.minusYears(1)
@@ -2957,6 +3221,19 @@ private fun statsWindow(period: StatsPeriod, now: ZonedDateTime): StatsWindow {
         previousStart = previousStart.toInstant(),
         previousEnd = comparablePreviousEnd,
     )
+}
+
+
+private fun rollingWeekStart(now: ZonedDateTime): ZonedDateTime =
+    now.toLocalDate()
+        .minusDays(6)
+        .atStartOfDay(now.zone)
+
+private fun rollingMonthStart(now: ZonedDateTime): ZonedDateTime {
+    val days = now.toLocalDate().lengthOfMonth()
+    return now.toLocalDate()
+        .minusDays((days - 1).toLong())
+        .atStartOfDay(now.zone)
 }
 
 private fun semesterStart(now: ZonedDateTime): ZonedDateTime {
@@ -3075,3 +3352,78 @@ private fun languageDisplayName(code: String): String =
     }.getOrDefault(code.uppercase(Locale.getDefault()))
 
 
+private fun CommunityRankEntry.hasUnknownArtistLabel(): Boolean = when (category) {
+    "artist", "rated_artist" -> title.isUnknownArtistLabel()
+    "song", "album" -> subtitle.isUnknownArtistLabel()
+    else -> false
+}
+
+private fun String?.isUnknownArtistLabel(): Boolean {
+    val clean = this?.trim().orEmpty()
+    return clean.isBlank() ||
+        clean.equals("Unknown Artist", ignoreCase = true) ||
+        clean.equals("Unknown artist", ignoreCase = true) ||
+        clean.equals("unknown artist", ignoreCase = true) ||
+        clean.equals("<unknown>", ignoreCase = true) ||
+        clean.equals("Unknown", ignoreCase = true)
+}
+
+
+/** Distribution among the canonical genres of the leading eight artists. */
+private suspend fun resolveRankedGenreShares(
+    leaders: List<StatsLeader>,
+    limit: Int,
+): List<Pair<String, Float>> {
+    if (leaders.isEmpty()) return emptyList()
+    val resolved = coroutineScope {
+        leaders.map { leader -> async {
+            leader to runCatching { ArtistArtworkRepository.resolveGenres(leader.title) }
+                .getOrDefault(emptyList()).let(::normalizeOrbGenres)
+        } }.awaitAll()
+    }
+    val weights = linkedMapOf<String, Double>()
+    val names = mutableMapOf<String, String>()
+    resolved.forEach { (leader, genres) ->
+        if (genres.isEmpty()) return@forEach
+        val perGenre = leader.plays.coerceAtLeast(0).toDouble() / genres.size
+        genres.forEach { genre ->
+            val key = genre.lowercase(Locale.ROOT)
+            names[key] = genre
+            weights[key] = weights.getOrDefault(key, 0.0) + perGenre
+        }
+    }
+    val total = weights.values.sum()
+    if (total == 0.0) return emptyList()
+    val ranked = weights.entries.sortedByDescending { it.value }
+    val leading = ranked.take(limit)
+    val other = ranked.drop(limit).sumOf { it.value }
+    return buildList {
+        leading.forEach { (key, value) -> add(names.getValue(key) to (value * 100.0 / total).toFloat()) }
+        if (other > 0.0) add("Outros" to (other * 100.0 / total).toFloat())
+    }
+}
+
+/** Each valid play contributes one vote only when its language is identifiable. */
+private fun listeningLanguageShares(rows: List<ListeningActivity>): List<Pair<String, Float>> {
+    val counts = linkedMapOf<String, Int>()
+    rows.forEach { row ->
+        val stored = row.languageCode?.lowercase(Locale.ROOT)
+            ?.takeIf { it.matches(Regex("^[a-z]{2,3}$")) && it != "und" }
+        val cached = TrackLanguageResolver.cached(row.videoId)
+        val code = if (stored == "ru" && cached != null && cached != "ru") cached else
+            stored ?: TrackLanguageResolver.knownOrMetadata(row.videoId, row.title, row.album)
+        if (code != null) counts[code] = counts.getOrDefault(code, 0) + 1
+    }
+    val sum = counts.values.sum()
+    if (sum <= 0) return emptyList()
+    val ranked = counts.entries.sortedByDescending { it.value }
+    return buildList {
+        ranked.take(4).forEach { (code, count) -> add(languageDisplayName(code) to count * 100f / sum) }
+        val other = ranked.drop(4).sumOf { it.value }
+        if (other > 0) add("Outros" to other * 100f / sum)
+    }
+}
+
+/** Canonical cross-period identity for ranking rows, independent of display casing. */
+internal fun communityRankKey(category: String, title: String, subtitle: String?): String =
+    "${category.lowercase(Locale.ROOT)}|${title.trim().lowercase(Locale.ROOT)}|${subtitle.orEmpty().trim().lowercase(Locale.ROOT)}"

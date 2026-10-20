@@ -9,7 +9,7 @@
     <string name="profile_action_block">Bloquear</string>
     <string name="profile_action_more">Más acciones</string>
     <string name="profile_privacy_header">Compartir y privacidad</string>
-    <string name="profile_privacy_footer">Estas opciones deciden quién puede ver lo que escuchas en directo. Las secciones del perfil se configuran por separado. Tu cuenta de Google sigue siendo privada.</string>
+    <string name="profile_privacy_footer">Elige individualmente quién puede ver tu actividad de escucha, favoritos, valoraciones recientes e información del perfil. Tu cuenta de Google sigue siendo privada.</string>
     
     <string name="profile_page_visibility_header">Visibilidad del perfil</string>
     <string name="profile_page_visibility_footer">Elige si cada elemento del perfil es visible para todos, solo para tus seguidores o queda oculto.</string>
@@ -53,4 +53,15 @@
     <string name="profile_photo_icon_hint">Ahora ajusta por separado el recorte que se usará en los iconos circulares de perfil en todo Orb.</string>
     <string name="profile_photo_next">Siguiente</string>
     <string name="profile_photo_apply">Usar foto</string>
-    </resources>
+        <string name="profile_delete_account">Eliminar cuenta</string>
+    <string name="profile_delete_account_error">No se pudo eliminar la cuenta. Inténtalo de nuevo.</string>
+    <string name="profile_delete_account_confirm_message">¿Eliminar tu cuenta Orb permanentemente? Se borrarán tu perfil, historial y datos vinculados. Esta acción no se puede deshacer.</string>
+    <string name="profile_delete_account_confirm_action">Eliminar definitivamente</string>
+    <string name="profile_recent_album_ratings">Valoraciones recientes</string>
+    <string name="profile_share_album_ratings">Compartir valoraciones</string>
+    <string name="profile_share_album_ratings_subtitle">Muestra tus 10 valoraciones de álbumes más recientes en tu perfil.</string>
+    <string name="profile_delete_account_hold_hint">Mantén pulsado Eliminar cuenta para continuar.</string>
+    <string name="profile_listening_visibility">Actividad de escucha</string>
+    <string name="profile_listening_visibility_subtitle">Quién puede ver lo que estás escuchando y tu actividad de escucha.</string>
+    <string name="profile_recent_ratings_visibility_subtitle">Quién puede ver tus valoraciones recientes en tu perfil.</string>
+</resources>

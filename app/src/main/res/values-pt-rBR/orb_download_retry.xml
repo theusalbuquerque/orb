@@ -1,0 +1,7 @@
+<resources>
+    <string name="orb_download_retry_quality_title">Baixar em outra qualidade?</string>
+    <string name="orb_download_retry_quality_message">O download Lossless falhou novamente. Deseja baixar em qualidade Alta (AAC)? Você também pode tentar Lossless mais uma vez.</string>
+    <string name="orb_download_retry_quality_accept">Baixar em qualidade Alta</string>
+    <string name="orb_download_retry_quality_keep">Tentar Lossless novamente</string>
+    <string name="orb_download_lossless_verify_failed">Não foi possível verificar a qualidade Lossless do arquivo baixado.</string>
+</resources>

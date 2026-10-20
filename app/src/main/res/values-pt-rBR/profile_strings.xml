@@ -22,7 +22,7 @@
     <string name="profile_edit_save_error">Não foi possível salvar o perfil. Verifique os dados e tente novamente.</string>
     <string name="profile_photo_error">Escolha uma imagem JPEG, PNG, WebP, HEIC ou HEIF de até 5 MB.</string>
     <string name="profile_privacy_header">Compartilhamento e privacidade</string>
-    <string name="profile_privacy_footer">Essas opções definem quem pode ver o que você ouve ao vivo. As seções do perfil abaixo são configuradas separadamente. Sua conta Google continua privada.</string>
+    <string name="profile_privacy_footer">Escolha individualmente quem pode ver suas audições, seus favoritos, avaliações recentes e informações do perfil. Sua conta Google continua privada.</string>
     
     <string name="profile_page_visibility_header">Visibilidade do perfil</string>
     <string name="profile_page_visibility_footer">Escolha se cada item do perfil fica visível para todos, apenas para seus seguidores ou oculto.</string>
@@ -62,8 +62,21 @@
     <string name="profile_photo_position_hint">Arraste para reposicionar e use dois dedos para ampliar. Este enquadramento será usado no seu perfil.</string>
     <string name="profile_photo_profile_preview">Página de perfil</string>
     <string name="profile_photo_icon_preview">Ícone de perfil</string>
-    <string name="profile_photo_profile_hint">Ajuste a foto diretamente em uma prévia do header real do seu perfil. Arraste para reposicionar e use dois dedos para ampliar.</string>
-    <string name="profile_photo_icon_hint">Agora ajuste separadamente o recorte que será usado nos ícones circulares de perfil em todo o Orb.</string>
+    <string name="profile_photo_profile_hint">Sua foto aparece inteira, sem corte automático. Arraste para posicionar ou use dois dedos para ampliar, se desejar.</string>
+    <string name="profile_photo_icon_hint">Ajuste o ícone circular separadamente. A foto inteira aparece até que você escolha ampliar.</string>
     <string name="profile_photo_next">Avançar</string>
     <string name="profile_photo_apply">Usar foto</string>
-    </resources>
+        <string name="profile_delete_account">Excluir conta</string>
+    <string name="profile_delete_account_error">Não foi possível excluir a conta. Tente novamente.</string>
+    <string name="profile_delete_account_confirm_message">Excluir sua conta Orb permanentemente? Seu perfil, histórico e dados vinculados serão apagados. Esta ação não pode ser desfeita.</string>
+    <string name="profile_delete_account_confirm_action">Excluir definitivamente</string>
+    <string name="profile_recent_album_ratings">Avaliações recentes</string>
+    <string name="profile_share_album_ratings">Compartilhar avaliações</string>
+    <string name="profile_share_album_ratings_subtitle">Mostre suas 10 avaliações de álbuns mais recentes no perfil.</string>
+    <string name="profile_delete_account_hold_hint">Toque e segure em Excluir conta para continuar.</string>
+    <string name="profile_listening_visibility">Audições</string>
+    <string name="profile_listening_visibility_subtitle">Quem pode ver o que você está ouvindo e sua atividade de audição.</string>
+    <string name="profile_recent_ratings_visibility_subtitle">Quem pode ver suas avaliações recentes no perfil.</string>
+    <string name="profile_photo_too_large">A foto selecionada ultrapassa 50 MB. Escolha uma imagem de até 50 MB.</string>
+    <string name="profile_photo_cannot_open">Não foi possível abrir esta foto. Escolha outra imagem.</string>
+</resources>

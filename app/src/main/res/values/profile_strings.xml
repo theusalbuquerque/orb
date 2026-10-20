@@ -22,7 +22,7 @@
     <string name="profile_edit_save_error">Couldn’t save your profile. Check the selected name and try again.</string>
     <string name="profile_photo_error">Choose a JPEG, PNG, WebP, HEIC or HEIF image up to 5 MB.</string>
     <string name="profile_privacy_header">Sharing and privacy</string>
-    <string name="profile_privacy_footer">These controls decide who can see your live listening. Profile sections below are configured separately. Your Google account remains private.</string>
+    <string name="profile_privacy_footer">Choose individually who can see your listening activity, favorites, recent ratings and profile information. Your Google account remains private.</string>
     
     <string name="profile_page_visibility_header">Profile visibility</string>
     <string name="profile_page_visibility_footer">Choose whether each profile item is visible to everyone, only to your followers, or hidden.</string>
@@ -62,8 +62,21 @@
     <string name="profile_photo_position_hint">Drag to reposition and pinch to zoom. This framing will be used on your profile.</string>
     <string name="profile_photo_profile_preview">Profile</string>
     <string name="profile_photo_icon_preview">Profile icon</string>
-    <string name="profile_photo_profile_hint">Adjust the photo directly in a preview of your real profile header. Drag to reposition and pinch to zoom.</string>
-    <string name="profile_photo_icon_hint">Now adjust the independent crop used by circular profile icons across Orb.</string>
+    <string name="profile_photo_profile_hint">Your entire photo is visible by default, without cropping. Drag to reposition or pinch to zoom if you want a closer framing.</string>
+    <string name="profile_photo_icon_hint">Position the circular profile icon separately. The full photo remains visible until you choose to zoom.</string>
     <string name="profile_photo_next">Next</string>
     <string name="profile_photo_apply">Use photo</string>
-    </resources>
+        <string name="profile_delete_account">Delete account</string>
+    <string name="profile_delete_account_error">Could not delete your account. Please try again.</string>
+    <string name="profile_delete_account_confirm_message">Permanently delete your Orb account? Your profile, history and linked data will be deleted. This action cannot be undone.</string>
+    <string name="profile_delete_account_confirm_action">Delete permanently</string>
+    <string name="profile_recent_album_ratings">Recent album ratings</string>
+    <string name="profile_share_album_ratings">Share album ratings</string>
+    <string name="profile_share_album_ratings_subtitle">Show your 10 most recent album ratings on your profile.</string>
+    <string name="profile_delete_account_hold_hint">Press and hold Delete account to continue.</string>
+    <string name="profile_listening_visibility">Listening activity</string>
+    <string name="profile_listening_visibility_subtitle">Who can see what you are listening to and your listening activity.</string>
+    <string name="profile_recent_ratings_visibility_subtitle">Who can see your recent ratings on your profile.</string>
+    <string name="profile_photo_too_large">The selected photo exceeds 50 MB. Choose an image up to 50 MB.</string>
+    <string name="profile_photo_cannot_open">Could not open this photo. Please choose another image.</string>
+</resources>

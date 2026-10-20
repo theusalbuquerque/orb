@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="album_info">Información del álbum</string>
+    <string name="album_share">Compartir álbum</string>
+    <string name="album_info_loading">Cargando información del álbum…</string>
+    <string name="album_info_unavailable">Todavía no hay una descripción disponible de este álbum.</string>
+    <string name="album_rate">Valorar álbum</string>
+    <string name="album_rating_value">Tu valoración: %1$s / 5</string>
+    <string name="album_rating_hint">Toca o desliza sobre las estrellas para valorar de 0 a 5.</string>
+    <string name="album_rating_saved">Guardada en tu cuenta. Puedes cambiar la valoración cuando quieras.</string>
+    <string name="album_rating_syncing">Guardando en tu cuenta…</string>
+    <string name="album_rating_pending">Guardada en este dispositivo. Esperando conexión para sincronizar.</string>
+    <string name="album_rating_sign_in">Inicia sesión para valorar este álbum y guardar tu nota en tu cuenta.</string>
+    <string name="album_rating_unrated">Elige tu valoración. Puedes editarla cuando quieras.</string>
+    <string name="album_rating_save">Guardar</string>
+    <string name="album_rating_cancel">Cancelar</string>
+    <string name="album_rating_local_error">No se pudo guardar en este dispositivo. Inténtalo de nuevo.</string>
+    <string name="album_rating_hold_to_save">Mantén para guardar</string>
+    <string name="collection_action_share">Compartir</string>
+</resources>

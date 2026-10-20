@@ -1,6 +1,7 @@
 package com.music.orb.ui.screens
 
 import android.content.res.Configuration
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -21,6 +22,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -29,6 +31,9 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.windowInsetsBottomHeight
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -40,6 +45,8 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
@@ -57,33 +64,51 @@ import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.Share
-import androidx.compose.material3.Button
+import androidx.compose.material.icons.rounded.Public
+import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.rounded.TrendingUp
+import androidx.compose.material.icons.rounded.ArrowUpward
+import androidx.compose.material.icons.rounded.ArrowDownward
+import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.ArrowBack
+import com.music.orb.ui.components.OrbGlassButton as Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import com.music.orb.ui.components.OrbGlassIconButton as IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import com.music.orb.ui.components.OrbModalBottomSheet as ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
+import com.music.orb.ui.components.OrbGlassOutlinedButton as OutlinedButton
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import com.music.orb.ui.components.OrbGlassTextButton as TextButton
+import com.music.orb.ui.components.ExplicitBadgeSeal
 import androidx.compose.material3.pulltorefresh.PullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.composed
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.graphics.graphicsLayer
@@ -95,6 +120,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.SolidColor
@@ -106,6 +133,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
@@ -118,6 +146,16 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
+import androidx.compose.ui.window.PopupPositionProvider
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil3.compose.AsyncImage
@@ -135,23 +173,30 @@ import java.time.format.FormatStyle
 import java.time.format.TextStyle
 import java.util.Locale
 import kotlin.math.roundToInt
+import com.music.orb.ui.components.orbOverlayGlassBaseColor
+import com.music.orb.ui.components.orbGlassSurface
+import com.music.orb.ui.components.RegisterSheetBackdrop
 import com.music.orb.R
 import com.music.orb.data.model.ROW_ART_PX
 import com.music.orb.data.settings.AppSettings
-import com.music.orb.data.model.artworkAt
 import com.music.orb.data.social.FriendNowPlaying
 import com.music.orb.data.social.ListeningActivity
 import com.music.orb.data.social.NowPlayingReaction
 import com.music.orb.data.social.NowPlayingReactionType
 import com.music.orb.data.social.OrbProfile
+import com.music.orb.data.social.CommunityRankEntry
+import com.music.orb.data.social.CommunityStatsRepository
 import com.music.orb.data.social.reactionSessionKey
 import com.music.orb.ui.FriendsViewModel
 import com.music.orb.ui.ListeningStats
 import com.music.orb.ui.FollowNotification
+import com.music.orb.ui.components.OrbBouncyPillSelector
 import com.music.orb.ui.ReactionNotification
 import com.music.orb.ui.StatsNotification
 import com.music.orb.ui.StatsLeader
 import com.music.orb.ui.StatsPeriod
+import com.music.orb.ui.communityRankKey
+import com.music.orb.ui.PersonalMediaRanking
 import com.music.orb.ui.StatsSharePalette
 import com.music.orb.ui.StatsShareStoryRenderer
 import com.music.orb.ui.ArtistKind
@@ -164,6 +209,192 @@ import com.music.orb.ui.components.PullToRefresh
 import com.music.orb.ui.components.animateScrollToCenteredItem
 import com.music.orb.ui.flavor.OrbFlavorUi
 
+private enum class StatsDestination { GENERAL, MY_NETWORK }
+
+/**
+ * The former ranking's progressive top-edge disappearance, applied to Stats cards.
+ * The first and middle portions remain fully legible. Only a card travelling out
+ * through the header shrinks/fades, so scrolling back restores it naturally.
+ */
+private fun Modifier.statsTopExit(): Modifier = composed {
+    val density = LocalDensity.current
+    val view = LocalView.current
+    val headerEdgePx = with(density) { 124.dp.toPx() }
+    val navEdgePx = with(density) { 38.dp.toPx() }
+    val fadeDistancePx = with(density) { 76.dp.toPx() }
+    var fraction by remember { mutableFloatStateOf(1f) }
+    this.onGloballyPositioned { coordinates ->
+        val bounds = coordinates.boundsInWindow()
+        val viewportBottom = view.height.toFloat() - navEdgePx
+        val top = ((bounds.bottom - headerEdgePx) / fadeDistancePx).coerceIn(0f, 1f)
+        // Reverse scrolling also has a progressive entrance at the bottom edge.
+        // Never dim a card that is comfortably within the viewport.
+        val bottom = if (viewportBottom > headerEdgePx + fadeDistancePx) {
+            ((viewportBottom - bounds.top) / fadeDistancePx).coerceIn(0f, 1f)
+        } else 1f
+        fraction = minOf(top, bottom)
+    }.graphicsLayer {
+        alpha = fraction
+        scaleX = 0.94f + 0.06f * fraction
+        scaleY = 0.94f + 0.06f * fraction
+        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0.5f, 0f)
+    }
+}
+
+/**
+ * Stats' real progressive entrance, including oversized art and typography.
+ * Each element enters only when its own bounds reach the viewport. An external
+ * registry keeps an element revealed after the containing LazyColumn item is
+ * disposed, avoiding replay/jank when the user scrolls backwards.
+ *
+ * Place this OUTSIDE the existing edge-exit modifier: entrance and scroll-edge
+ * effects are independent, and neither blocks clicks or causes remeasurement.
+ */
+private fun Modifier.statsCascadeEnter(
+    key: String,
+    index: Int,
+    revealed: MutableMap<String, Boolean>,
+): Modifier = composed {
+    val wasRevealed = revealed[key] == true
+    val progress = remember(key) { Animatable(if (wasRevealed) 1f else 0f) }
+    var enteredViewport by remember(key) { mutableStateOf(wasRevealed) }
+    val view = LocalView.current
+    val density = LocalDensity.current
+    val travelPx = with(density) { 12.dp.toPx() }
+
+    LaunchedEffect(key, enteredViewport) {
+        if (!enteredViewport || progress.value >= 1f) return@LaunchedEffect
+        // Nearby entries follow one another; offscreen entries do not wait for
+        // a large global index when first revealed by scrolling.
+        delay(if (index <= 6) index * 42L else 0L)
+        progress.animateTo(
+            1f,
+            animationSpec = spring(
+                dampingRatio = 0.86f,
+                stiffness = 510f,
+                visibilityThreshold = 0.001f,
+            ),
+        )
+        revealed[key] = true
+    }
+
+    this.onGloballyPositioned { coordinates ->
+        if (!enteredViewport) {
+            val bounds = coordinates.boundsInWindow()
+            val viewportHeight = view.height.toFloat()
+            if (viewportHeight > 0f && bounds.bottom > 0f && bounds.top < viewportHeight) {
+                enteredViewport = true
+            }
+        }
+    }.graphicsLayer {
+        val fraction = progress.value.coerceIn(0f, 1f)
+        alpha = fraction
+        translationY = travelPx * (1f - fraction)
+        scaleX = 0.985f + 0.015f * fraction
+        scaleY = 0.985f + 0.015f * fraction
+    }
+}
+
+/** Each ranking entry exits and re-enters with a scale/fade at either scroll edge. */
+private fun Modifier.statsSheetRowExit(state: LazyListState, index: Int): Modifier = composed {
+    val density = LocalDensity.current
+    val fadeDistance = with(density) { 82.dp.toPx() }
+    this.graphicsLayer {
+        val moving = state.firstVisibleItemIndex > 0 || state.firstVisibleItemScrollOffset > 0
+        val item = state.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
+        val fraction = if (!moving || item == null) 1f else {
+            val start = state.layoutInfo.viewportStartOffset.toFloat()
+            val end = state.layoutInfo.viewportEndOffset.toFloat()
+            val topFactor = ((item.offset + item.size - start) / fadeDistance).coerceIn(0f, 1f)
+            val bottomFactor = ((end - item.offset) / fadeDistance).coerceIn(0f, 1f)
+            minOf(topFactor, bottomFactor)
+        }
+        alpha = fraction
+        scaleX = 0.93f + 0.07f * fraction
+        scaleY = 0.93f + 0.07f * fraction
+        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0.5f, 0f)
+    }
+}
+
+/** Solid, high-contrast numerals over transparent Stats cards and sheets. */
+private enum class StatsMetricTone { POSITIVE, NEGATIVE, NEUTRAL }
+
+@Composable
+private fun StatsMetricPill(
+    tone: StatsMetricTone = StatsMetricTone.NEUTRAL,
+    modifier: Modifier = Modifier,
+    compact: Boolean = false,
+    content: @Composable (Color) -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val dark = colors.surface.luminance() < 0.5f
+    val ink = when (tone) {
+        StatsMetricTone.POSITIVE -> if (dark) Color(0xFFA8F0BF) else Color(0xFF176333)
+        StatsMetricTone.NEGATIVE -> if (dark) Color(0xFFFFB4AE) else Color(0xFF9B2636)
+        StatsMetricTone.NEUTRAL -> colors.onSurface
+    }
+    val background = when (tone) {
+        StatsMetricTone.NEUTRAL -> colors.surfaceContainerHighest
+        else -> lerp(colors.surfaceContainerHighest, ink, if (dark) 0.15f else 0.10f)
+    }
+    val strokeColor = when (tone) {
+        StatsMetricTone.NEUTRAL -> colors.outlineVariant
+        else -> lerp(colors.outlineVariant, ink, 0.38f)
+    }
+    // Trend indicators must remain compact, outlined and high-contrast, even
+    // over translucent Expressive Glass cards and bottom sheets.
+    val shape = RoundedCornerShape(if (compact) 10.dp else 11.dp)
+    Row(
+        modifier = modifier
+            .clip(shape)
+            .background(background)
+            .border(
+                width = 1.dp,
+                color = if (compact && tone != StatsMetricTone.NEUTRAL) {
+                    lerp(colors.outlineVariant, ink, 0.58f)
+                } else strokeColor,
+                shape = shape,
+            )
+            .padding(
+                horizontal = if (compact) 6.dp else 8.dp,
+                vertical = if (compact) 3.dp else 5.dp,
+            ),
+        horizontalArrangement = Arrangement.spacedBy(if (compact) 2.dp else 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        content(ink)
+    }
+}
+
+@Composable
+private fun StatsRankNumber(
+    position: Int,
+    modifier: Modifier = Modifier,
+    onArtwork: Boolean = false,
+) {
+    val colors = MaterialTheme.colorScheme
+    val shape = RoundedCornerShape(10.dp)
+    Box(
+        modifier = modifier
+            .size(32.dp)
+            .clip(shape)
+            .background(if (onArtwork) colors.inverseSurface else colors.surfaceContainerHighest)
+            .border(
+                1.dp,
+                if (onArtwork) colors.inverseOnSurface.copy(alpha = 0.55f) else colors.outlineVariant,
+                shape,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "$position",
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.Bold,
+            color = if (onArtwork) colors.inverseOnSurface else colors.onSurface,
+        )
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun FriendsScreen(
@@ -173,13 +404,16 @@ fun FriendsScreen(
     modifier: Modifier = Modifier,
     friendsViewModel: FriendsViewModel = viewModel(),
     onOpenProfile: (OrbProfile) -> Unit = {},
+    previewOverview: Boolean = false,
+    isBackPreview: Boolean = false,
 ) {
     val query by friendsViewModel.query.collectAsStateWithLifecycle()
     val searchResults by friendsViewModel.searchResults.collectAsStateWithLifecycle()
     val recentSearchProfiles by friendsViewModel.recentSearchProfiles.collectAsStateWithLifecycle()
     val recommendedProfiles by friendsViewModel.recommendedProfiles.collectAsStateWithLifecycle()
     val recommendationsLoading by friendsViewModel.recommendationsLoading.collectAsStateWithLifecycle()
-    val userSearchOpen by friendsViewModel.userSearchOpen.collectAsStateWithLifecycle()
+    val actualUserSearchOpen by friendsViewModel.userSearchOpen.collectAsStateWithLifecycle()
+    val userSearchOpen = !previewOverview && actualUserSearchOpen
     val searching by friendsViewModel.searching.collectAsStateWithLifecycle()
     val myProfile by friendsViewModel.myProfile.collectAsStateWithLifecycle()
     val profileChecked by friendsViewModel.profileChecked.collectAsStateWithLifecycle()
@@ -192,7 +426,8 @@ fun FriendsScreen(
     val nowPlayingReactions by friendsViewModel.nowPlayingReactions.collectAsStateWithLifecycle()
     val socialFeed by friendsViewModel.socialFeed.collectAsStateWithLifecycle()
     val newSocialFeedSessions by friendsViewModel.newSocialFeedSessions.collectAsStateWithLifecycle()
-    val notificationsOpen by friendsViewModel.notificationsOpen.collectAsStateWithLifecycle()
+    val actualNotificationsOpen by friendsViewModel.notificationsOpen.collectAsStateWithLifecycle()
+    val notificationsOpen = !previewOverview && actualNotificationsOpen
     val statsNotifications by friendsViewModel.statsNotifications.collectAsStateWithLifecycle()
     val reactionBusySessions by friendsViewModel.reactionBusySessions.collectAsStateWithLifecycle()
     val loading by friendsViewModel.loading.collectAsStateWithLifecycle()
@@ -203,11 +438,37 @@ fun FriendsScreen(
     val reactionErrorToken by friendsViewModel.reactionErrorToken.collectAsStateWithLifecycle()
     val statsPeriod by friendsViewModel.statsPeriod.collectAsStateWithLifecycle()
     val listeningStats by friendsViewModel.listeningStats.collectAsStateWithLifecycle()
+    val personalGenres by friendsViewModel.personalGenreBreakdown.collectAsStateWithLifecycle()
+    val personalLanguages by friendsViewModel.personalLanguageBreakdown.collectAsStateWithLifecycle()
+    var personalMediaRanking by rememberSaveable { mutableStateOf<PersonalMediaRanking?>(null) }
+    var communityRankingSheetCategory by rememberSaveable { mutableStateOf<String?>(null) }
+    var artistRankingSheetOpen by rememberSaveable { mutableStateOf(false) }
     val statsLoading by friendsViewModel.statsLoading.collectAsStateWithLifecycle()
     val statsLoadFailed by friendsViewModel.statsLoadFailed.collectAsStateWithLifecycle()
-    val artistRankingOpen by friendsViewModel.artistRankingOpen.collectAsStateWithLifecycle()
+    val actualArtistRankingOpen by friendsViewModel.artistRankingOpen.collectAsStateWithLifecycle()
+    // Artist rankings now open a sheet, not a replacement page.
+    val artistRankingOpen = !previewOverview && actualArtistRankingOpen && !artistRankingSheetOpen
     val artistRanking by friendsViewModel.artistRanking.collectAsStateWithLifecycle()
     val artistRankingLoading by friendsViewModel.artistRankingLoading.collectAsStateWithLifecycle()
+    val communityRankings by friendsViewModel.communityRankings.collectAsStateWithLifecycle()
+    val communityLoading by friendsViewModel.communityLoading.collectAsStateWithLifecycle()
+    val communityGenres by friendsViewModel.communityGenres.collectAsStateWithLifecycle()
+    val communityLanguages by friendsViewModel.communityLanguages.collectAsStateWithLifecycle()
+    val communityLoadFailed by friendsViewModel.communityLoadFailed.collectAsStateWithLifecycle()
+    val communityPrevious by friendsViewModel.communityPreviousPlays.collectAsStateWithLifecycle()
+    var destination by rememberSaveable { mutableStateOf(StatsDestination.GENERAL) }
+    var liveListeningOpen by rememberSaveable { mutableStateOf(false) }
+    BackHandler(enabled = liveListeningOpen && !previewOverview) {
+        liveListeningOpen = false
+    }
+
+    // Catalogue revisions are incorporated on the next page entry. Switching
+    // tabs never restarts the community fetch or blanks the current snapshot.
+    LaunchedEffect(destination, statsPeriod, userSearchOpen, notificationsOpen, artistRankingOpen) {
+        if (destination == StatsDestination.GENERAL && !userSearchOpen && !notificationsOpen && !artistRankingOpen) {
+            friendsViewModel.loadCommunityRankings(statsPeriod)
+        }
+    }
 
     val searchFocusRequester = remember { FocusRequester() }
     val searchListState = androidx.compose.foundation.lazy.rememberLazyListState()
@@ -220,6 +481,14 @@ fun FriendsScreen(
     var shareStatsPreviewOpen by remember { mutableStateOf(false) }
     var shareStatsBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
     var showTopArtistRankingHint by remember { mutableStateOf(false) }
+    // Keep the entrance cascade one-shot for each ranking open/period. Rows that
+    // leave the LazyColumn viewport are often disposed; without an external
+    // reveal registry they would replay their spring while scrolling back up,
+    // causing the jank reported on the ranking page.
+    val revealedArtistRankingRows = remember { mutableStateMapOf<String, Boolean>() }
+    // Shared between the two Stats destinations and the nested dashboard cards.
+    // Keep visible elements settled when a large dashboard LazyColumn item is recycled.
+    val revealedStatsElements = remember { mutableStateMapOf<String, Boolean>() }
     val shareStatsPalette = StatsSharePalette(
         background = MaterialTheme.colorScheme.background.toArgb(),
         surface = MaterialTheme.colorScheme.surface.toArgb(),
@@ -258,12 +527,16 @@ fun FriendsScreen(
         }
     }
 
-    LaunchedEffect(artistRankingOpen, notificationsOpen) {
+    LaunchedEffect(artistRankingOpen, notificationsOpen, statsPeriod) {
+        if (isBackPreview) return@LaunchedEffect
         // Ranking/notifications replace the LazyColumn contents while reusing the
         // same state. Jump to the new list origin immediately so stale scroll
         // offsets cannot hide the first rows during the screen transition.
         if (artistRankingOpen || notificationsOpen) listState.scrollToItem(0)
         if (artistRankingOpen || notificationsOpen) showTopArtistRankingHint = false
+        // A fresh open/period still gets the intended progressive cascade. Once
+        // a row has appeared, scrolling it out and back in never restarts it.
+        if (artistRankingOpen) revealedArtistRankingRows.clear()
     }
 
     // Discovery hint for the new clickable top-artist ranking card. FriendsScreen
@@ -289,6 +562,7 @@ fun FriendsScreen(
             refreshing = refreshing,
             onRefresh = friendsViewModel::refreshAll,
             state = pullState,
+            indicatorTopPadding = contentPadding.calculateTopPadding(),
             modifier = Modifier.fillMaxSize(),
         ) {
             LazyColumn(
@@ -487,40 +761,93 @@ fun FriendsScreen(
                                 val rowKey = "artist-ranking:${statsPeriod.name}:${entry.stableKey}"
                                 ArtistRankingEntrance(
                                     index = index,
-                                    listState = listState,
-                                    itemKey = rowKey,
                                     animationKey = "${statsPeriod.name}:$index:${entry.stableKey}",
+                                    alreadyRevealed = revealedArtistRankingRows[rowKey] == true,
+                                    onRevealed = { revealedArtistRankingRows[rowKey] = true },
                                 ) {
                                     ArtistRankingRow(
                                         entry = entry,
                                         modifier = Modifier.animateItem(),
                                     )
                                 }
-                            }                        }
+                            }
+                        }
                     }
 
                     else -> {
-                        item(key = "stats-dashboard") {
-                            Box(
-                                modifier = statsVerticalEdgeModifier(
-                                    listState = listState,
-                                    itemKey = "stats-dashboard",
-                                ),
-                            ) {
-                                StatsDashboard(
-                                    stats = listeningStats,
-                                    period = statsPeriod,
-                                    loading = statsLoading,
-                                    loadFailed = statsLoadFailed,
-                                    onPeriodSelected = friendsViewModel::setStatsPeriod,
-                                    onTopArtistClick = friendsViewModel::openArtistRanking,
-                                    showTopArtistRankingHint = showTopArtistRankingHint,
+                        if (!liveListeningOpen) {
+                            item(key = "stats-destination-selector") {
+                                StatsDestinationSelector(
+                                    modifier = Modifier.statsCascadeEnter("stats:destination-selector", 0, revealedStatsElements),
+                                    destination = destination,
+                                    onSelect = { next ->
+                                        if (destination != next) {
+                                            destination = next
+                                            scope.launch { listState.scrollToItem(0) }
+                                        }
+                                    },
                                 )
                             }
+                        }
+                        if (!liveListeningOpen && destination == StatsDestination.GENERAL) {
+                            item(key = "stats-community-dashboard") {
+                                CommunityStatsDashboard(
+                                    rankings = communityRankings,
+                                    previous = communityPrevious,
+                                    genres = communityGenres,
+                                    languages = communityLanguages,
+                                    loading = communityLoading,
+                                    failed = communityLoadFailed,
+                                    onRetry = { friendsViewModel.loadCommunityRankings(statsPeriod, force = true) },
+                                    onMore = { category -> communityRankingSheetCategory = category },
+                                    period = statsPeriod,
+                                    revealed = revealedStatsElements,
+                                )
+                            }
+                        } else {
+                        if (!liveListeningOpen) {
+                        item(key = "stats-dashboard") {
+                            StatsDashboard(
+                                stats = listeningStats,
+                                period = statsPeriod,
+                                loading = statsLoading,
+                                loadFailed = statsLoadFailed,
+                                onPeriodSelected = friendsViewModel::setStatsPeriod,
+                                onTopArtistClick = {
+                                    artistRankingSheetOpen = true
+                                    friendsViewModel.openArtistRanking()
+                                },
+                                showTopArtistRankingHint = showTopArtistRankingHint,
+                                artistPreview = remember(statsPeriod, listeningStats) {
+                                    friendsViewModel.personalTopArtists(statsPeriod)
+                                },
+                                previousArtistPositions = remember(statsPeriod, listeningStats) {
+                                    friendsViewModel.personalPreviousRankingPositions(null, statsPeriod)
+                                },
+                                genreShares = personalGenres,
+                                languageShares = personalLanguages,
+                                listeningHours = remember(statsPeriod, listeningStats) {
+                                    friendsViewModel.personalListeningHours(statsPeriod)
+                                },
+                                onMediaRanking = { personalMediaRanking = it },
+                                revealed = revealedStatsElements,
+                            )
+                        }
+
+                        item(key = "stats-live-preview") {
+                            LiveListeningOverviewCard(
+                                modifier = Modifier.statsCascadeEnter("personal:${statsPeriod.name}:live", 9, revealedStatsElements),
+                                people = following.filter { profile -> nowPlaying[profile.id]?.isFresh() == true },
+                                onOpen = {
+                                    liveListeningOpen = true
+                                    scope.launch { listState.scrollToItem(0) }
+                                },
+                            )
                         }
 
                         item(key = "stats-share-button") {
                             ShareStatsButton(
+                                modifier = Modifier.statsCascadeEnter("personal:${statsPeriod.name}:share", 10, revealedStatsElements),
                                 onClick = {
                                     if (!shareStatsPreparing) {
                                         val period = statsPeriod
@@ -548,6 +875,8 @@ fun FriendsScreen(
                             )
                         }
 
+                        } // End of personal dashboard; social activity is on its own screen.
+                        if (liveListeningOpen) {
                         if (myProfile?.username.isNullOrBlank()) {
                             item(key = "stats-username-setup") {
                                 UsernameSetupCard(
@@ -615,10 +944,9 @@ fun FriendsScreen(
                                                 friendsViewModel.consumeSocialFeedEntrance(sessionKey)
                                             },
                                             onOpenProfile = { onOpenProfile(profile) },
-                                            modifier = statsVerticalEdgeModifier(
-                                                listState = listState,
-                                                itemKey = "feed:${activity.reactionSessionKey()}",
-                                            ).animateItem(
+                                            // Recede at the pinned top edge; preserve genuine
+                                            // insertion/placement animations independently.
+                                            modifier = Modifier.statsTopExit().animateItem(
                                                 placementSpec = spring(
                                                     dampingRatio = Spring.DampingRatioMediumBouncy,
                                                     stiffness = Spring.StiffnessLow,
@@ -629,9 +957,60 @@ fun FriendsScreen(
                                 }
                             }
                         }
+                        } // Ao vivo listening page
+                        } // Pessoal and Ao vivo
                     }
                 }
             }
+        }
+
+        communityRankingSheetCategory?.let { category ->
+            val currentEntries = communityRankings.filter { it.category == category }
+            val ordered = if (category == "rated_artist") {
+                currentEntries.sortedWith(
+                    compareByDescending<CommunityRankEntry> { it.score ?: 0.0 }
+                        .thenByDescending { it.ratingsCount },
+                )
+            } else currentEntries.sortedByDescending { it.plays }
+            CommunityRankingSheet(
+                entries = ordered.take(30),
+                showRatings = category == "rated_artist",
+                circularArtwork = category == "artist" || category == "rated_artist",
+                previous = communityPrevious,
+                category = category,
+                period = statsPeriod,
+                onDismiss = { communityRankingSheetCategory = null },
+            )
+        }
+
+        if (artistRankingSheetOpen) {
+            PersonalMediaRankingSheet(
+                kind = null,
+                period = statsPeriod,
+                leaders = artistRanking.take(30).map { it.leader },
+                previousPositions = remember(statsPeriod, listeningStats) {
+                    friendsViewModel.personalPreviousRankingPositions(null, statsPeriod)
+                },
+                loading = artistRankingLoading,
+                onDismiss = {
+                    artistRankingSheetOpen = false
+                    friendsViewModel.closeArtistRanking()
+                },
+            )
+        }
+
+        personalMediaRanking?.let { kind ->
+            PersonalMediaRankingSheet(
+                kind = kind,
+                period = statsPeriod,
+                leaders = remember(kind, statsPeriod, listeningStats) {
+                    friendsViewModel.personalMediaRanking(kind, statsPeriod)
+                },
+                previousPositions = remember(kind, statsPeriod, listeningStats) {
+                    friendsViewModel.personalPreviousRankingPositions(kind, statsPeriod)
+                },
+                onDismiss = { personalMediaRanking = null },
+            )
         }
 
         if (shareStatsPreparing) {
@@ -671,6 +1050,344 @@ fun FriendsScreen(
 }
 
 
+/** Comparison for a ranked song/album/artist against the preceding equal-length window. */
+@Composable
+private fun CommunityChange(
+    entry: CommunityRankEntry,
+    previous: Map<String, Long>?,
+    lightText: Boolean = false,
+) {
+    // A metric always gets its own opaque container, including over artwork.
+    @Suppress("UNUSED_VARIABLE") val keepCallCompatibility = lightText
+    val old = previous?.get(communityRankKey(entry.category, entry.title, entry.subtitle))
+    val up = old != null && entry.plays > old
+    val down = old != null && entry.plays < old
+    val label = when {
+        old == null -> "—"
+        old == 0L && entry.plays > 0 -> stringResource(R.string.stats_change_new)
+        old == 0L -> "0%"
+        else -> String.format(Locale.getDefault(), "%+.0f%%", (entry.plays - old).toDouble() / old * 100.0)
+    }
+    StatsMetricPill(
+        compact = true,
+        tone = when {
+            up -> StatsMetricTone.POSITIVE
+            down -> StatsMetricTone.NEGATIVE
+            else -> StatsMetricTone.NEUTRAL
+        },
+    ) { ink ->
+        if (up) Icon(Icons.Rounded.ArrowUpward, contentDescription = null, tint = ink, modifier = Modifier.size(12.dp))
+        if (down) Icon(Icons.Rounded.ArrowDownward, contentDescription = null, tint = ink, modifier = Modifier.size(12.dp))
+        Text(label, color = ink, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, maxLines = 1)
+    }
+}
+
+@Composable
+private fun PersonalRankChange(
+    category: String,
+    title: String,
+    subtitle: String?,
+    position: Int,
+    previous: Map<String, Int>,
+) {
+    val old = previous[communityRankKey(category, title, subtitle)]
+    val delta = old?.minus(position) ?: 0
+    val label = when {
+        old == null -> stringResource(R.string.stats_change_new)
+        delta == 0 -> "—"
+        else -> "${kotlin.math.abs(delta)}"
+    }
+    StatsMetricPill(
+        compact = true,
+        tone = when {
+            delta > 0 -> StatsMetricTone.POSITIVE
+            delta < 0 -> StatsMetricTone.NEGATIVE
+            else -> StatsMetricTone.NEUTRAL
+        },
+    ) { ink ->
+        if (delta > 0) Icon(Icons.Rounded.ArrowUpward, contentDescription = null, tint = ink, modifier = Modifier.size(12.dp))
+        if (delta < 0) Icon(Icons.Rounded.ArrowDownward, contentDescription = null, tint = ink, modifier = Modifier.size(12.dp))
+        Text(label, style = MaterialTheme.typography.labelSmall, color = ink, fontWeight = FontWeight.SemiBold, maxLines = 1)
+    }
+}
+
+@Composable
+private fun StatsRankingPeriodLabel(period: StatsPeriod): String = when (period) {
+    StatsPeriod.WEEK -> stringResource(R.string.stats_period_week)
+    StatsPeriod.MONTH -> stringResource(R.string.stats_period_month)
+    StatsPeriod.QUARTER -> stringResource(R.string.stats_period_quarter)
+    StatsPeriod.SEMESTER -> stringResource(R.string.stats_period_semester)
+    StatsPeriod.YEAR -> stringResource(R.string.stats_period_year)
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PersonalMediaRankingSheet(
+    kind: PersonalMediaRanking?,
+    period: StatsPeriod,
+    leaders: List<StatsLeader>,
+    previousPositions: Map<String, Int>,
+    onDismiss: () -> Unit,
+    loading: Boolean = false,
+) {
+    RegisterSheetBackdrop()
+    val listHeightLimit = (LocalConfiguration.current.screenHeightDp.dp * 0.67f).coerceIn(180.dp, 620.dp)
+    val rankingTitle = when (kind) {
+        PersonalMediaRanking.SONGS -> stringResource(R.string.stats_general_top_songs)
+        PersonalMediaRanking.ALBUMS -> stringResource(R.string.orb_sheet_stats_albums)
+        null -> stringResource(R.string.stats_general_top_artists)
+    }
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        floatingTitle = rankingTitle,
+        floatingSubtitle = StatsRankingPeriodLabel(period),
+        containerColor = Color.Transparent,
+        shape = RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp),
+        // Paint the Android navigation inset as part of this very same glass
+        // surface, not as a separate tonal footer below it.
+        navigationBarInsetInContent = true,
+        // The handle belongs inside our glass sheet, never above it.
+        dragHandle = null,
+    ) {
+        val scheme = MaterialTheme.colorScheme
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.fillMaxWidth()
+                .clip(RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp))
+                .orbGlassSurface(
+                    orbOverlayGlassBaseColor(),
+                    cornerRadius = 30.dp,
+                    overlayOpacity = 0.52f,
+                    lightweightSheetMaterial = true,
+                    sheetTintMode = com.music.orb.ui.components.OrbSheetTintMode.BACKDROP,
+                )
+                .padding(horizontal = 18.dp, vertical = 12.dp),
+        ) {
+            Box(
+                modifier = Modifier.fillMaxWidth().padding(top = 1.dp, bottom = 12.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Box(
+                    Modifier.size(width = 34.dp, height = 4.dp)
+                        .clip(CircleShape)
+                        .background(scheme.onSurfaceVariant.copy(alpha = 0.60f)),
+                )
+            }
+            if (loading && leaders.isEmpty()) {
+                Box(Modifier.fillMaxWidth().height(110.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(modifier = Modifier.size(28.dp))
+                }
+            } else if (leaders.isEmpty()) {
+                Text(
+                    stringResource(R.string.stats_no_data_message),
+                    modifier = Modifier.padding(vertical = 32.dp),
+                    color = scheme.onSurfaceVariant,
+                )
+            } else {
+                val sheetListState = rememberLazyListState()
+                LazyColumn(
+                    state = sheetListState,
+                    modifier = Modifier.widthIn(max = 980.dp).fillMaxWidth().heightIn(max = listHeightLimit),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(bottom = 34.dp),
+                ) {
+                    itemsIndexed(leaders, key = { index, item -> "${kind?.name ?: "ARTISTS"}:$index:${item.title}" }) { index, item ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().statsSheetRowExit(sheetListState, index).padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            StatsRankNumber(index + 1)
+                            StatsCardArtwork(
+                                url = item.artworkUrl,
+                                title = item.title,
+                                subtitle = item.subtitle,
+                                kind = when (kind) {
+                                    PersonalMediaRanking.SONGS -> StatsArtworkKind.SONG
+                                    PersonalMediaRanking.ALBUMS -> StatsArtworkKind.ALBUM
+                                    null -> StatsArtworkKind.ARTIST
+                                },
+                                contentColor = scheme.onSurface,
+                                modifier = Modifier.size(50.dp)
+                                    .then(if (kind == null) Modifier.clip(CircleShape) else Modifier),
+                            )
+                            Column(Modifier.weight(1f)) {
+                                Text(item.title, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                    style = MaterialTheme.typography.titleSmall, color = scheme.onSurface)
+                                item.subtitle?.let {
+                                    Text(it, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                        style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+                                }
+                            }
+                            PersonalRankChange(
+                                category = when (kind) {
+                                    PersonalMediaRanking.SONGS -> "song"
+                                    PersonalMediaRanking.ALBUMS -> "album"
+                                    null -> "artist"
+                                },
+                                title = item.title,
+                                subtitle = if (kind == null) null else item.subtitle,
+                                position = index + 1,
+                                previous = previousPositions,
+                            )
+                        }
+                    }
+                }
+            }
+            // Extend the SAME glass paint to the bottom of the dialog window.
+            // The sheet no longer ends above Android's gesture/navigation bar.
+            Spacer(
+                Modifier
+                    .fillMaxWidth()
+                    .windowInsetsBottomHeight(WindowInsets.navigationBars),
+            )
+        }
+    }
+}
+
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CommunityRankingSheet(
+    entries: List<CommunityRankEntry>,
+    category: String,
+    period: StatsPeriod,
+    showRatings: Boolean,
+    circularArtwork: Boolean,
+    previous: Map<String, Long>?,
+    onDismiss: () -> Unit,
+) {
+    RegisterSheetBackdrop()
+    val listHeightLimit = (LocalConfiguration.current.screenHeightDp.dp * 0.67f).coerceIn(180.dp, 620.dp)
+    val rankingTitle = when (category) {
+        "song" -> stringResource(R.string.stats_general_top_songs)
+        "album" -> stringResource(R.string.orb_sheet_stats_albums)
+        "artist" -> stringResource(R.string.stats_general_top_artists)
+        else -> stringResource(R.string.stats_general_top_rated)
+    }
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        floatingTitle = rankingTitle,
+        // Community artist ratings are lifetime aggregates, not restricted to the
+        // listening window selected for song/album/artist play rankings.
+        floatingSubtitle = if (category == "rated_artist") null else StatsRankingPeriodLabel(period),
+        containerColor = Color.Transparent,
+        shape = RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp),
+        navigationBarInsetInContent = true,
+        dragHandle = null,
+    ) {
+        val scheme = MaterialTheme.colorScheme
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.fillMaxWidth()
+                .clip(RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp))
+                .orbGlassSurface(
+                    orbOverlayGlassBaseColor(),
+                    cornerRadius = 30.dp,
+                    overlayOpacity = 0.52f,
+                    lightweightSheetMaterial = true,
+                    sheetTintMode = com.music.orb.ui.components.OrbSheetTintMode.BACKDROP,
+                )
+                .padding(horizontal = 18.dp, vertical = 12.dp),
+        ) {
+            Box(
+                modifier = Modifier.fillMaxWidth().padding(top = 1.dp, bottom = 12.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Box(
+                    Modifier.size(width = 34.dp, height = 4.dp)
+                        .clip(CircleShape)
+                        .background(scheme.onSurfaceVariant.copy(alpha = 0.60f)),
+                )
+            }
+            if (entries.isEmpty()) {
+                Text(stringResource(R.string.stats_general_no_data),
+                    modifier = Modifier.padding(vertical = 32.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = scheme.onSurfaceVariant)
+            } else {
+                val state = rememberLazyListState()
+                LazyColumn(
+                    state = state,
+                    modifier = Modifier.widthIn(max = 980.dp).fillMaxWidth().heightIn(max = listHeightLimit),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(bottom = 34.dp),
+                ) {
+                    itemsIndexed(entries.take(30), key = { index, item ->
+                        "community:${item.category}:$index:${item.title}"
+                    }) { index, entry ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth()
+                                .statsSheetRowExit(state, index)
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            StatsRankNumber(index + 1)
+                            if (!entry.artworkUrl.isNullOrBlank()) {
+                                StatsRecoveringArtwork(
+                                    url = entry.artworkUrl,
+                                    title = entry.title,
+                                    subtitle = entry.subtitle,
+                                    kind = if (entry.category.contains("artist")) StatsArtworkKind.ARTIST
+                                        else if (entry.category.contains("album")) StatsArtworkKind.ALBUM
+                                        else StatsArtworkKind.SONG,
+                                    requestedPx = ROW_ART_PX,
+                                    contentDescription = null,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.size(50.dp)
+                                        .clip(if (circularArtwork) CircleShape else RoundedCornerShape(12.dp)),
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier.size(50.dp)
+                                        .clip(if (circularArtwork) CircleShape else RoundedCornerShape(12.dp))
+                                        .background(scheme.tertiaryContainer),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Icon(
+                                        if (circularArtwork) Icons.Rounded.Person else Icons.Rounded.MusicNote,
+                                        contentDescription = null, tint = scheme.onTertiaryContainer,
+                                    )
+                                }
+                            }
+                            Column(Modifier.weight(1f)) {
+                                Text(entry.title, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                    style = MaterialTheme.typography.titleSmall, color = scheme.onSurface)
+                                entry.subtitle?.takeIf(String::isNotBlank)?.let {
+                                    Text(it, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                        style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+                                }
+                            }
+                            Column(horizontalAlignment = Alignment.End) {
+                                if (showRatings) {
+                                    StatsMetricPill { ink ->
+                                        Icon(Icons.Rounded.Star, contentDescription = null,
+                                            tint = ink, modifier = Modifier.size(16.dp))
+                                        Text(String.format(Locale.getDefault(), "%.1f", entry.score ?: 0.0),
+                                            color = ink, fontWeight = FontWeight.Bold,
+                                            style = MaterialTheme.typography.labelLarge)
+                                    }
+                                } else {
+                                    CommunityChange(entry, previous)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Extend the SAME glass paint to the bottom of the dialog window.
+            // The sheet no longer ends above Android's gesture/navigation bar.
+            Spacer(
+                Modifier
+                    .fillMaxWidth()
+                    .windowInsetsBottomHeight(WindowInsets.navigationBars),
+            )
+        }
+    }
+}
+
+
 @Composable
 private fun StatsSharePreparingDialog() {
     Dialog(
@@ -683,9 +1400,11 @@ private fun StatsSharePreparingDialog() {
                 .background(Color.Black.copy(alpha = 0.46f)),
             contentAlignment = Alignment.Center,
         ) {
+            val glassColor = orbOverlayGlassBaseColor()
             Surface(
                 shape = RoundedCornerShape(28.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                color = Color.Transparent,
+                modifier = Modifier.orbGlassSurface(glassColor, cornerRadius = 28.dp),
             ) {
                 Row(
                     modifier = Modifier.padding(horizontal = 24.dp, vertical = 20.dp),
@@ -704,6 +1423,7 @@ private fun StatsSharePreparingDialog() {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun StatsSharePreviewDialog(
     bitmap: android.graphics.Bitmap,
@@ -711,66 +1431,91 @@ private fun StatsSharePreviewDialog(
     onSave: () -> Unit,
     onShare: () -> Unit,
 ) {
-    Dialog(
+    RegisterSheetBackdrop()
+    val previewGlassColor = orbOverlayGlassBaseColor()
+    ModalBottomSheet(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
+        floatingTitle = stringResource(R.string.stats_share_preview_title),
+        containerColor = Color.Transparent,
+        shape = RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp),
+        dragHandle = null,
+        scrimColor = Color.Black.copy(alpha = 0.10f),
+        navigationBarInsetInContent = true,
     ) {
-        Box(
+        Column(
             modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.72f))
-                .clickable(onClick = onDismiss),
-            contentAlignment = Alignment.Center,
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth(0.90f)
-                    .clickable(enabled = false) {},
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Text(
-                    text = stringResource(R.string.stats_share_preview_title),
-                    style = MaterialTheme.typography.titleLarge,
-                    color = Color.White,
-                    modifier = Modifier.padding(bottom = 12.dp),
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp))
+                .orbGlassSurface(
+                    previewGlassColor,
+                    cornerRadius = 30.dp,
+                    backdropBlur = 56.dp,
+                    overlayStrength = true,
+                    overlayOpacity = 0.48f,
+                    lightweightSheetMaterial = true,
+                    sheetTintMode = com.music.orb.ui.components.OrbSheetTintMode.BACKDROP,
                 )
-                Surface(
-                    shape = RoundedCornerShape(26.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    tonalElevation = 4.dp,
+                .padding(start = 18.dp, end = 18.dp, bottom = 18.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(34.dp),
+                contentAlignment = Alignment.TopCenter,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .padding(top = 10.dp)
+                        .size(width = 34.dp, height = 4.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.42f)),
+                )
+            }
+            Text(
+                text = stringResource(R.string.stats_share_preview_title),
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.padding(bottom = 12.dp),
+            )
+            Surface(
+                shape = RoundedCornerShape(26.dp),
+                color = Color.Transparent,
+                tonalElevation = 0.dp,
+            ) {
+                Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = stringResource(R.string.stats_share_preview_title),
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(9f / 16f),
+                )
+            }
+            Spacer(Modifier.height(14.dp))
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                OutlinedButton(
+                    onClick = onSave,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(22.dp),
                 ) {
-                    Image(
-                        bitmap = bitmap.asImageBitmap(),
-                        contentDescription = stringResource(R.string.stats_share_preview_title),
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .aspectRatio(9f / 16f),
-                    )
+                    Text(stringResource(R.string.stats_share_save), maxLines = 1)
                 }
-                Spacer(Modifier.height(14.dp))
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.fillMaxWidth(),
+                Button(
+                    onClick = onShare,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(22.dp),
                 ) {
-                    OutlinedButton(
-                        onClick = onSave,
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(22.dp),
-                    ) {
-                        Text(stringResource(R.string.stats_share_save), maxLines = 1)
-                    }
-                    Button(
-                        onClick = onShare,
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(22.dp),
-                    ) {
-                        Icon(Icons.Rounded.Share, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(7.dp))
-                        Text(stringResource(R.string.stats_share_share), maxLines = 1)
-                    }
+                    Icon(Icons.Rounded.Share, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(7.dp))
+                    Text(stringResource(R.string.stats_share_share), maxLines = 1)
                 }
             }
+            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.fillMaxWidth().windowInsetsBottomHeight(WindowInsets.navigationBars))
         }
     }
 }
@@ -811,8 +1556,949 @@ private fun ShareStatsButton(
 }
 
 
+/** A single travelling material pill — spring motion shared with the bottom navigation. */
+@Composable
+private fun StatsDestinationSelector(
+    destination: StatsDestination,
+    onSelect: (StatsDestination) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val haptics = LocalHapticFeedback.current
+    val scheme = MaterialTheme.colorScheme
+    val gap = 5.dp
+    val selectedIndex = if (destination == StatsDestination.GENERAL) 0 else 1
+    Box(modifier = modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        BoxWithConstraints(
+        modifier = Modifier
+            .widthIn(max = 780.dp)
+            .fillMaxWidth()
+            .padding(horizontal = PAGE_GUTTER, vertical = 10.dp)
+            .clip(RoundedCornerShape(32.dp))
+            .orbGlassSurface(pageColor = orbOverlayGlassBaseColor(), cornerRadius = 32.dp)
+            .padding(5.dp),
+    ) {
+        val slotWidth = (maxWidth - gap) / 2f
+        val indicatorOffset by animateDpAsState(
+            targetValue = (slotWidth + gap) * selectedIndex,
+            animationSpec = spring(
+                dampingRatio = Spring.DampingRatioMediumBouncy,
+                stiffness = Spring.StiffnessMediumLow,
+            ),
+            label = "Stats travelling spring indicator",
+        )
+        val indicatorShape = RoundedCornerShape(27.dp)
+        Box(
+            modifier = Modifier
+                .offset(x = indicatorOffset)
+                .width(slotWidth)
+                .height(46.dp)
+                .clip(indicatorShape)
+                .background(scheme.primaryContainer),
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
+            listOf(
+                Triple(StatsDestination.GENERAL, R.string.stats_destination_general, Icons.Rounded.Public),
+                Triple(StatsDestination.MY_NETWORK, R.string.stats_destination_network, Icons.Rounded.Person),
+            ).forEach { (item, label, icon) ->
+                val selected = destination == item
+                val tint by animateColorAsState(
+                    targetValue = if (selected) scheme.onPrimaryContainer else scheme.onSurfaceVariant,
+                    animationSpec = tween(180), label = "Stats tab content color",
+                )
+                Row(
+                    modifier = Modifier
+                        .width(slotWidth)
+                        .height(46.dp)
+                        .clip(indicatorShape)
+                        .clickable {
+                            if (!selected) {
+                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                onSelect(item)
+                            }
+                        },
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center,
+                ) {
+                    Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(7.dp))
+                    Text(
+                        text = stringResource(label),
+                        color = tint,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                    )
+                }
+            }
+        }
+    }
+}
+}
+
+@Composable
+private fun CommunityStatsDashboard(
+    period: StatsPeriod,
+    revealed: MutableMap<String, Boolean>,
+    rankings: List<CommunityRankEntry>,
+    previous: Map<String, Long>?,
+    genres: List<Pair<String, Float>>,
+    languages: List<Pair<String, Float>>,
+    loading: Boolean,
+    failed: Boolean,
+    onRetry: () -> Unit,
+    onMore: (String) -> Unit,
+) {
+    val songs = remember(rankings) { rankings.filter { it.category == "song" }.sortedByDescending { it.plays } }
+    val artists = remember(rankings) { rankings.filter { it.category == "artist" }.sortedByDescending { it.plays } }
+    val albums = remember(rankings) { rankings.filter { it.category == "album" }.sortedByDescending { it.plays } }
+    val ratedArtists = remember(rankings) {
+        rankings.filter { it.category == "rated_artist" }
+            .sortedWith(compareByDescending<CommunityRankEntry> { it.score ?: 0.0 }.thenByDescending { it.ratingsCount })
+    }
+    val entrance = "general:${period.name}:"
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val tablet = maxWidth >= 840.dp
+        Column(
+            modifier = Modifier.align(Alignment.TopCenter)
+                .widthIn(max = 1360.dp)
+                .fillMaxWidth()
+                .padding(start = PAGE_GUTTER, end = PAGE_GUTTER, bottom = 22.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            if (loading && rankings.isEmpty()) {
+                Box(Modifier.fillMaxWidth().height(140.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(modifier = Modifier.size(26.dp))
+                }
+            } else if (failed && rankings.isEmpty()) {
+                StateCard(
+                    title = stringResource(R.string.stats_general_unavailable),
+                    message = stringResource(R.string.stats_general_unavailable_message),
+                    actionLabel = stringResource(R.string.stats_general_retry),
+                    onAction = onRetry,
+                )
+            } else {
+                if (tablet) {
+                    // Tablet landscape: two genuine content columns rather than
+                    // stretching a phone-sized square across the whole window.
+                    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        CommunityTopSongsCard(
+                            title = stringResource(R.string.stats_general_top_songs),
+                            detail = stringResource(R.string.stats_general_top_songs_subtitle),
+                            entries = songs,
+                            previous = previous,
+                            onMore = { onMore("song") },
+                            modifier = Modifier.weight(1f).statsCascadeEnter(entrance + "songs", 0, revealed),
+                            cardHeight = 268.dp,
+                            revealed = revealed,
+                            entrancePrefix = entrance + "songs:",
+                        )
+                        CommunityFeaturedRankingCard(
+                            title = stringResource(R.string.stats_general_top_artists),
+                            entries = artists,
+                            previous = previous,
+                            onMore = { onMore("artist") },
+                            isArtistRanking = true,
+                            modifier = Modifier.weight(1f).statsCascadeEnter(entrance + "artists", 3, revealed),
+                            cardHeight = 268.dp,
+                            revealed = revealed,
+                            entrancePrefix = entrance + "artists:",
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        CommunityBreakdownSquareCard(
+                            title = stringResource(R.string.stats_general_genres),
+                            items = genres,
+                            aspect = 1.7f,
+                            modifier = Modifier.weight(1f).statsCascadeEnter(entrance + "genres", 1, revealed),
+                        )
+                        CommunityBreakdownSquareCard(
+                            title = stringResource(R.string.stats_general_languages),
+                            items = languages,
+                            aspect = 1.7f,
+                            modifier = Modifier.weight(1f).statsCascadeEnter(entrance + "languages", 2, revealed),
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        CommunityRankingSection(
+                            title = stringResource(R.string.stats_general_top_albums),
+                            detail = stringResource(R.string.stats_general_top_albums_subtitle),
+                            entries = albums,
+                            previous = previous,
+                            onMore = { onMore("album") },
+                            showRatings = false,
+                            showArtwork = true,
+                            modifier = Modifier.weight(1f).statsCascadeEnter(entrance + "albums", 4, revealed),
+                        )
+                        CommunityRankingSection(
+                            title = stringResource(R.string.stats_general_top_rated),
+                            detail = stringResource(R.string.stats_general_top_rated_subtitle),
+                            entries = ratedArtists,
+                            previous = previous,
+                            onMore = { onMore("rated_artist") },
+                            showRatings = true,
+                            showArtwork = true,
+                            preferCircularArtwork = true,
+                            modifier = Modifier.weight(1f).statsCascadeEnter(entrance + "rated", 5, revealed),
+                        )
+                    }
+                } else {
+                    CommunityTopSongsCard(
+                        modifier = Modifier.statsCascadeEnter(entrance + "songs", 0, revealed),
+                        title = stringResource(R.string.stats_general_top_songs),
+                        detail = stringResource(R.string.stats_general_top_songs_subtitle),
+                        entries = songs,
+                        previous = previous,
+                        onMore = { onMore("song") },
+                        revealed = revealed,
+                        entrancePrefix = entrance + "songs:",
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        CommunityBreakdownSquareCard(
+                            title = stringResource(R.string.stats_general_genres),
+                            items = genres,
+                            modifier = Modifier.weight(1f).statsCascadeEnter(entrance + "genres", 1, revealed),
+                        )
+                        CommunityBreakdownSquareCard(
+                            title = stringResource(R.string.stats_general_languages),
+                            items = languages,
+                            modifier = Modifier.weight(1f).statsCascadeEnter(entrance + "languages", 2, revealed),
+                        )
+                    }
+                    CommunityFeaturedRankingCard(
+                        modifier = Modifier.statsCascadeEnter(entrance + "artists", 3, revealed),
+                        title = stringResource(R.string.stats_general_top_artists),
+                        entries = artists,
+                        previous = previous,
+                        onMore = { onMore("artist") },
+                        isArtistRanking = true,
+                        revealed = revealed,
+                        entrancePrefix = entrance + "artists:",
+                    )
+                    CommunityRankingSection(
+                        modifier = Modifier.statsCascadeEnter(entrance + "albums", 4, revealed),
+                        title = stringResource(R.string.stats_general_top_albums),
+                        detail = stringResource(R.string.stats_general_top_albums_subtitle),
+                        entries = albums,
+                        previous = previous,
+                        onMore = { onMore("album") },
+                        showRatings = false,
+                        showArtwork = true,
+                    )
+                    CommunityRankingSection(
+                        modifier = Modifier.statsCascadeEnter(entrance + "rated", 5, revealed),
+                        title = stringResource(R.string.stats_general_top_rated),
+                        detail = stringResource(R.string.stats_general_top_rated_subtitle),
+                        entries = ratedArtists,
+                        previous = previous,
+                        onMore = { onMore("rated_artist") },
+                        showRatings = true,
+                        showArtwork = true,
+                        preferCircularArtwork = true,
+                    )
+                }
+                Text(
+                    stringResource(R.string.stats_general_privacy_note),
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
+                        .statsCascadeEnter(entrance + "privacy", 6, revealed),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CommunityBreakdownSquareCard(
+    title: String,
+    items: List<Pair<String, Float>>,
+    modifier: Modifier = Modifier,
+    aspect: Float = 1f,
+) {
+    val scheme = MaterialTheme.colorScheme
+    val colors = listOf(
+        scheme.primary,
+        scheme.tertiary,
+        scheme.secondary,
+        scheme.outline,
+    )
+    // Display three clearly readable categories plus the actual remainder;
+    // never confuse the five leading entries with 100% of all plays.
+    val total = items.sumOf { it.second.toDouble() }.coerceAtMost(100.0).toFloat()
+    val head = items.take(3)
+    val remainder = (100f - head.sumOf { it.second.toDouble() }.toFloat()).coerceIn(0f, 100f)
+    val portions = head + if (remainder > 0.5f) {
+        listOf(stringResource(R.string.stats_general_other) to remainder)
+    } else emptyList()
+    val glassColor = orbOverlayGlassBaseColor()
+    val chartReveal = remember(items) { Animatable(0f) }
+    LaunchedEffect(items) {
+        chartReveal.animateTo(1f, animationSpec = tween(durationMillis = 650))
+    }
+    Column(
+        modifier = modifier
+            .aspectRatio(aspect)
+            .statsTopExit()
+            .clip(RoundedCornerShape(topStart = 28.dp, topEnd = 18.dp, bottomEnd = 28.dp, bottomStart = 18.dp))
+            .orbGlassSurface(glassColor, cornerRadius = 26.dp)
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            title,
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold,
+            maxLines = 2,
+            color = scheme.onSurface,
+        )
+        if (items.isEmpty() || total <= 0f) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    stringResource(R.string.stats_general_breakdown_empty),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = scheme.onSurfaceVariant,
+                )
+            }
+        } else {
+            Row(
+                modifier = Modifier.fillMaxSize(),
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Canvas(modifier = Modifier.weight(0.9f).aspectRatio(1f)) {
+                    val strokeWidth = size.minDimension * .24f
+                    val diameter = size.minDimension - strokeWidth
+                    var startAngle = -90f
+                    portions.forEachIndexed { index, (_, percent) ->
+                        val sweep = 360f * (percent.coerceIn(0f, 100f) / 100f) * chartReveal.value
+                        drawArc(
+                            color = colors[index % colors.size],
+                            startAngle = startAngle,
+                            sweepAngle = sweep,
+                            useCenter = false,
+                            topLeft = Offset(strokeWidth / 2, strokeWidth / 2),
+                            size = androidx.compose.ui.geometry.Size(diameter, diameter),
+                            style = Stroke(width = strokeWidth, cap = StrokeCap.Butt),
+                        )
+                        startAngle += sweep
+                    }
+                }
+                Column(
+                    modifier = Modifier.weight(1.35f),
+                    verticalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
+                    portions.forEachIndexed { index, (name, percent) ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier.size(6.dp)
+                                    .clip(CircleShape)
+                                    .background(colors[index % colors.size]),
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                name,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = scheme.onSurface,
+                            )
+                            Spacer(Modifier.width(2.dp))
+                            Text(
+                                String.format(Locale.getDefault(), "%.0f%%", percent),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = scheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private val COMMUNITY_EXPLICIT_SUFFIX = Regex(
+    """(?i)\s*(?:[\(\[\-–—]\s*)?explicit(?:\s+version)?(?:\s*[\)\]])?\s*$""",
+)
+
+private fun String.communityDisplayTitle(): String {
+    val cleaned = COMMUNITY_EXPLICIT_SUFFIX.replace(trim(), "").trim()
+    return cleaned.ifBlank { trim() }
+}
+
+private fun String.hasCommunityExplicitMarker(): Boolean = COMMUNITY_EXPLICIT_SUFFIX.containsMatchIn(this)
+
+@Composable
+private fun CommunitySongTitle(
+    rawTitle: String,
+    color: Color,
+    pageColor: Color,
+    style: androidx.compose.ui.text.TextStyle,
+    maxLines: Int,
+    modifier: Modifier = Modifier,
+) {
+    val explicit = rawTitle.hasCommunityExplicitMarker()
+    val displayTitle = rawTitle.communityDisplayTitle()
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = displayTitle,
+            modifier = Modifier.weight(1f, fill = false),
+            maxLines = maxLines,
+            overflow = TextOverflow.Ellipsis,
+            style = style,
+            fontWeight = FontWeight.Bold,
+            color = color,
+        )
+        if (explicit) {
+            ExplicitBadgeSeal(
+                pageColor = pageColor,
+                size = 14.5.dp,
+                contentColorOverride = color,
+            )
+        }
+    }
+}
+
+/**
+ * Shared full-bleed layout for the community's most-played songs and artists.
+ * It intentionally follows PersonalArtistRankingCard's geometry: the same
+ * rounded glass frame, 252/268 dp hero and identical row/footer paddings.
+ */
+@Composable
+private fun CommunityFeaturedRankingCard(
+    title: String,
+    entries: List<CommunityRankEntry>,
+    previous: Map<String, Long>?,
+    onMore: () -> Unit,
+    isArtistRanking: Boolean,
+    modifier: Modifier = Modifier,
+    cardHeight: Dp = 252.dp,
+    revealed: MutableMap<String, Boolean>,
+    entrancePrefix: String,
+) {
+    val scheme = MaterialTheme.colorScheme
+    val glassColor = orbOverlayGlassBaseColor()
+    val visibleEntries = entries.take(5)
+    val hero = visibleEntries.firstOrNull()
+    // Geometry is supplied by the same breakpoint as PersonalArtistRankingCard.
+    val heroHeight = cardHeight
+    val textShadow = Shadow(
+        color = Color.Black.copy(alpha = 0.88f),
+        offset = Offset(0f, 2f),
+        blurRadius = 7f,
+    )
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .statsTopExit()
+            .clip(RoundedCornerShape(32.dp))
+            .orbGlassSurface(glassColor, cornerRadius = 32.dp),
+        verticalArrangement = Arrangement.spacedBy(0.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(heroHeight)
+                .clip(RoundedCornerShape(34.dp))
+                .background(scheme.surfaceContainerHighest)
+                .clickable(enabled = hero != null, onClick = onMore),
+        ) {
+            if (!hero?.artworkUrl.isNullOrBlank()) {
+                StatsRecoveringArtwork(
+                    url = hero?.artworkUrl,
+                    title = hero?.title,
+                    subtitle = hero?.subtitle,
+                    kind = if (isArtistRanking) StatsArtworkKind.ARTIST else StatsArtworkKind.SONG,
+                    requestedPx = TOP_ARTIST_ART_PX,
+                    contentDescription = hero?.title,
+                    contentScale = ContentScale.Crop,
+                    alignment = Alignment.Center,
+                    modifier = Modifier.matchParentSize()
+                        .statsCascadeEnter(entrancePrefix + "image", 1, revealed),
+                )
+            } else {
+                Box(
+                    modifier = Modifier.matchParentSize()
+                        .statsCascadeEnter(entrancePrefix + "image", 1, revealed)
+                        .background(scheme.tertiaryContainer),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        if (isArtistRanking) Icons.Rounded.Person else Icons.Rounded.MusicNote,
+                        contentDescription = null,
+                        tint = scheme.onTertiaryContainer,
+                        modifier = Modifier.size(54.dp),
+                    )
+                }
+            }
+            // Exactly the same bottom-shadow geometry as TopArtistFeatureCard.
+            Box(
+                modifier = Modifier.align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .fillMaxHeight(0.46f)
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                Color.Transparent,
+                                Color.Black.copy(alpha = 0.14f),
+                                Color.Black.copy(alpha = 0.70f),
+                            ),
+                        ),
+                    ),
+            )
+            Row(
+                modifier = Modifier.align(Alignment.BottomStart)
+                    .fillMaxWidth()
+                    .statsCascadeEnter(entrancePrefix + "text", 2, revealed)
+                    .padding(start = 18.dp, end = 18.dp, bottom = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.Bottom,
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.labelLarge.copy(shadow = textShadow),
+                        color = Color.White.copy(alpha = 0.88f),
+                        maxLines = 2,
+                    )
+                    if (isArtistRanking) {
+                        Text(
+                            text = hero?.title ?: stringResource(R.string.stats_general_no_data),
+                            style = MaterialTheme.typography.headlineMedium.copy(
+                                fontWeight = FontWeight.Bold, shadow = textShadow,
+                            ),
+                            color = Color.White,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    } else {
+                        hero?.let { song ->
+                            CommunitySongTitle(
+                                rawTitle = song.title,
+                                color = Color.White,
+                                pageColor = Color.Black.copy(alpha = 0.28f),
+                                style = MaterialTheme.typography.headlineSmall.copy(shadow = textShadow),
+                                maxLines = 2,
+                            )
+                        }
+                    }
+                    if (!isArtistRanking) {
+                        hero?.subtitle?.takeIf(String::isNotBlank)?.let { artist ->
+                            Text(
+                                artist,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodySmall.copy(shadow = textShadow),
+                                color = Color.White.copy(alpha = 0.90f),
+                            )
+                        }
+                    }
+                    hero?.let { featured ->
+                        Text(
+                            stringResource(
+                                R.string.stats_general_leader_summary,
+                                featured.plays,
+                                featured.listeners,
+                            ),
+                            style = MaterialTheme.typography.bodySmall.copy(shadow = textShadow),
+                            color = Color.White.copy(alpha = 0.88f),
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+                hero?.let { CommunityChange(it, previous, lightText = true) }
+            }
+        }
+        visibleEntries.drop(1).forEachIndexed { index, entry ->
+            Row(
+                modifier = Modifier.fillMaxWidth()
+                    .height(62.dp)
+                    .statsCascadeEnter(entrancePrefix + "row:$index", 3 + index, revealed)
+                    .statsTopExit()
+                    .clickable(onClick = onMore)
+                    .padding(horizontal = 14.dp, vertical = 9.dp),
+                horizontalArrangement = Arrangement.spacedBy(11.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                StatsRankNumber(index + 2)
+                if (!entry.artworkUrl.isNullOrBlank()) {
+                    StatsRecoveringArtwork(
+                        url = entry.artworkUrl,
+                        title = entry.title,
+                        subtitle = entry.subtitle,
+                        kind = if (isArtistRanking) StatsArtworkKind.ARTIST else StatsArtworkKind.SONG,
+                        requestedPx = ROW_ART_PX,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.size(40.dp)
+                            .clip(if (isArtistRanking) CircleShape else RoundedCornerShape(12.dp)),
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier.size(40.dp)
+                            .clip(if (isArtistRanking) CircleShape else RoundedCornerShape(12.dp))
+                            .background(scheme.surfaceContainerHigh),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            if (isArtistRanking) Icons.Rounded.Person else Icons.Rounded.MusicNote,
+                            contentDescription = null,
+                            tint = scheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    if (isArtistRanking) {
+                        Text(
+                            entry.title,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = scheme.onSurface,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    } else {
+                        CommunitySongTitle(
+                            rawTitle = entry.title,
+                            color = scheme.onSurface,
+                            pageColor = glassColor,
+                            style = MaterialTheme.typography.titleSmall,
+                            maxLines = 1,
+                        )
+                        entry.subtitle?.takeIf(String::isNotBlank)?.let { artist ->
+                            Text(
+                                artist,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = scheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+                CommunityChange(entry, previous)
+            }
+        }
+        if (entries.size > 5) {
+            Row(
+                modifier = Modifier.align(Alignment.End)
+                    .clickable(onClick = onMore)
+                    .padding(horizontal = 18.dp, vertical = 14.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    stringResource(R.string.stats_general_show_more),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = scheme.primary,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Icon(
+                    Icons.Rounded.ChevronRight,
+                    contentDescription = null,
+                    tint = scheme.primary,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CommunityTopSongsCard(
+    title: String,
+    detail: String,
+    entries: List<CommunityRankEntry>,
+    previous: Map<String, Long>?,
+    onMore: () -> Unit,
+    modifier: Modifier = Modifier,
+    cardHeight: Dp = 252.dp,
+    revealed: MutableMap<String, Boolean>,
+    entrancePrefix: String,
+) {
+    @Suppress("UNUSED_VARIABLE") val retainSourceCompatibility = detail
+    CommunityFeaturedRankingCard(
+        title = title,
+        entries = entries,
+        previous = previous,
+        onMore = onMore,
+        isArtistRanking = false,
+        modifier = modifier,
+        cardHeight = cardHeight,
+        revealed = revealed,
+        entrancePrefix = entrancePrefix,
+    )
+}
+
+@Composable
+private fun CommunityRankingSection(
+    title: String,
+    detail: String,
+    entries: List<CommunityRankEntry>,
+    previous: Map<String, Long>?,
+    showRatings: Boolean,
+    showArtwork: Boolean,
+    preferCircularArtwork: Boolean = false,
+    featureFirstTrack: Boolean = false,
+    onMore: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val scheme = MaterialTheme.colorScheme
+    val glassColor = orbOverlayGlassBaseColor()
+    val previewLimit = 5
+    val visibleEntries = entries.take(previewLimit)
+    Column(
+        modifier
+            .fillMaxWidth()
+            .statsTopExit()
+            .clip(RoundedCornerShape(30.dp))
+            .orbGlassSurface(glassColor, cornerRadius = 30.dp)
+            .padding(horizontal = 14.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text(
+            title,
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold,
+            color = scheme.onSurface,
+        )
+        Text(detail, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+        if (visibleEntries.isEmpty()) {
+            Text(
+                stringResource(R.string.stats_general_no_data),
+                modifier = Modifier.padding(vertical = 20.dp),
+                color = scheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        } else {
+            val max = visibleEntries.maxOfOrNull { if (showRatings) it.ratingsCount else it.plays }
+                ?.coerceAtLeast(1L) ?: 1L
+            // The #1 track appears once, as the hero of this same ranking.
+            // The remaining rows retain their actual positions (#2 through #30).
+            if (featureFirstTrack && !showRatings) {
+                val leader = visibleEntries.first()
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(topStart = 28.dp, topEnd = 16.dp, bottomEnd = 28.dp, bottomStart = 16.dp))
+                        .background(scheme.primaryContainer.copy(alpha = 0.42f))
+                        .padding(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (!leader.artworkUrl.isNullOrBlank()) {
+                        StatsRecoveringArtwork(
+                            url = leader.artworkUrl,
+                            title = leader.title,
+                            subtitle = leader.subtitle,
+                            kind = StatsArtworkKind.SONG,
+                            requestedPx = ROW_ART_PX,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.size(92.dp).clip(RoundedCornerShape(22.dp)),
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .size(92.dp)
+                                .clip(RoundedCornerShape(22.dp))
+                                .background(scheme.tertiaryContainer),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                Icons.Rounded.MusicNote,
+                                contentDescription = null,
+                                tint = scheme.onTertiaryContainer,
+                                modifier = Modifier.size(32.dp),
+                            )
+                        }
+                    }
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier
+                                    .size(28.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(scheme.primary),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    "1",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = scheme.onPrimary,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                stringResource(R.string.stats_general_top_track),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = scheme.onSurfaceVariant,
+                            )
+                        }
+                        Text(
+                            leader.title,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = scheme.onSurface,
+                        )
+                        leader.subtitle?.takeIf(String::isNotBlank)?.let {
+                            Text(
+                                it,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = scheme.onSurfaceVariant,
+                            )
+                        }
+                        Text(
+                            stringResource(
+                                R.string.stats_general_leader_summary,
+                                leader.plays,
+                                leader.listeners,
+                            ),
+                            maxLines = 2,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = scheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            visibleEntries.drop(if (featureFirstTrack && !showRatings) 1 else 0)
+                .forEachIndexed { index, entry ->
+                val position = index + (if (featureFirstTrack && !showRatings) 2 else 1)
+                Row(
+                    modifier = Modifier.fillMaxWidth().statsTopExit().padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    StatsRankNumber(position)
+                    if (showArtwork && !entry.artworkUrl.isNullOrBlank()) {
+                        StatsRecoveringArtwork(
+                            url = entry.artworkUrl,
+                            title = entry.title,
+                            subtitle = entry.subtitle,
+                            kind = if (preferCircularArtwork) StatsArtworkKind.ARTIST else StatsArtworkKind.SONG,
+                            requestedPx = ROW_ART_PX,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.size(44.dp).clip(if (preferCircularArtwork) CircleShape else RoundedCornerShape(13.dp)),
+                        )
+                    } else if (showArtwork) {
+                        Box(
+                            Modifier.size(44.dp)
+                                .clip(if (preferCircularArtwork) CircleShape else RoundedCornerShape(13.dp))
+                                .background(scheme.tertiaryContainer),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                if (preferCircularArtwork) Icons.Rounded.Person else Icons.Rounded.MusicNote,
+                                contentDescription = null,
+                                tint = scheme.onTertiaryContainer,
+                            )
+                        }
+                    }
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            entry.title,
+                            maxLines = if (LocalConfiguration.current.screenWidthDp >= 840) 2 else 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = scheme.onSurface,
+                        )
+                        entry.subtitle?.takeIf(String::isNotBlank)?.let { subtitle ->
+                            Text(
+                                subtitle,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = scheme.onSurfaceVariant,
+                            )
+                        }
+                        if (!showRatings) {
+                            val progress = (entry.plays.toFloat() / max.toFloat()).coerceIn(0f, 1f)
+                            Box(
+                                Modifier
+                                    .padding(top = 5.dp)
+                                    .fillMaxWidth()
+                                    .height(5.dp)
+                                    .clip(CircleShape)
+                                    .background(scheme.surfaceContainerHighest),
+                            ) {
+                                Box(
+                                    Modifier
+                                        .fillMaxWidth(progress)
+                                        .fillMaxHeight()
+                                        .clip(CircleShape)
+                                        .background(scheme.primary),
+                                )
+                            }
+                        }
+                    }
+                    Column(horizontalAlignment = Alignment.End) {
+                        if (showRatings) {
+                            StatsMetricPill { ink ->
+                                Icon(
+                                    Icons.Rounded.Star,
+                                    contentDescription = null,
+                                    tint = ink,
+                                    modifier = Modifier.size(15.dp),
+                                )
+                                Text(
+                                    String.format(Locale.getDefault(), "%.1f", entry.score ?: 0.0),
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ink,
+                                )
+                            }
+                        } else {
+                            CommunityChange(entry, previous)
+                        }
+                    }
+                }
+            }
+            if (entries.size > previewLimit) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.End)
+                        .clip(RoundedCornerShape(16.dp))
+                        .clickable(onClick = onMore)
+                        .padding(horizontal = 8.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        stringResource(R.string.stats_general_show_more),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = scheme.primary,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Icon(
+                        Icons.Rounded.ChevronRight,
+                        contentDescription = null,
+                        tint = scheme.primary,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun StatsDashboard(
+    revealed: MutableMap<String, Boolean>,
     stats: ListeningStats,
     period: StatsPeriod,
     loading: Boolean,
@@ -820,185 +2506,411 @@ private fun StatsDashboard(
     onPeriodSelected: (StatsPeriod) -> Unit,
     onTopArtistClick: () -> Unit,
     showTopArtistRankingHint: Boolean,
+    artistPreview: List<StatsLeader>,
+    previousArtistPositions: Map<String, Int>,
+    genreShares: List<Pair<String, Float>>,
+    languageShares: List<Pair<String, Float>>,
+    listeningHours: List<Int>,
+    onMediaRanking: (PersonalMediaRanking) -> Unit,
 ) {
-    val configuration = LocalConfiguration.current
-    val tabletLandscape = configuration.smallestScreenWidthDp >= 600 &&
-        configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 12.dp),
-    ) {
-        // All Stats cards live on the same horizontal rail. The taste block
-        // intentionally keeps genres + languages stacked so it occupies one
-        // position in the sequence without changing their compact treatment.
-        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-            val railGap = 12.dp
-            val availableWidth = maxWidth - PAGE_GUTTER * 2f
-            // Tablet landscape should read like a rail, not a sequence of
-            // nearly full-screen posters. Keeping fixed, compact card widths
-            // leaves the artwork and the card label visible together and
-            // exposes the next card as a strong scroll affordance.
-            val featureWidth = if (tabletLandscape) 360.dp else availableWidth * 0.92f
-            val mediaCardWidth = if (tabletLandscape) 190.dp else (availableWidth - railGap) / 2f
-            val cardHeight = 302.dp
-            val compactInsightHeight = (cardHeight - railGap) / 2f
-
-            val railState = rememberLazyListState()
-            // Track the direction of the gesture so only the card that is
-            // leaving the viewport fades. Incoming/peek cards remain fully
-            // present, and reversing the gesture mirrors the effect naturally.
-            var railScrollDirection by remember { mutableStateOf(1) } // 1 = forward/left, -1 = back/right
-            LaunchedEffect(railState) {
-                var lastIndex = railState.firstVisibleItemIndex
-                var lastOffset = railState.firstVisibleItemScrollOffset
-                snapshotFlow {
-                    railState.firstVisibleItemIndex to railState.firstVisibleItemScrollOffset
-                }.collect { (index, offset) ->
-                    railScrollDirection = when {
-                        index > lastIndex -> 1
-                        index < lastIndex -> -1
-                        offset > lastOffset -> 1
-                        offset < lastOffset -> -1
-                        else -> railScrollDirection
+    val scheme = MaterialTheme.colorScheme
+    val entrance = "personal:${period.name}:"
+    @Suppress("UNUSED_VARIABLE") val preserveSourceApi = onPeriodSelected to showTopArtistRankingHint
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val tablet = maxWidth >= 840.dp
+        val contentWidth = minOf(maxWidth, 1360.dp) - PAGE_GUTTER * 2
+        val gap = 14.dp
+        Column(
+            modifier = Modifier.align(Alignment.TopCenter)
+                .widthIn(max = 1360.dp)
+                .fillMaxWidth()
+                .padding(start = PAGE_GUTTER, top = 8.dp, end = PAGE_GUTTER, bottom = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(gap),
+        ) {
+            if (tablet) {
+                Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.Top) {
+                    PersonalArtistRankingCard(
+                        stats.topArtist, artistPreview, previousArtistPositions, period, onTopArtistClick,
+                        cardHeight = 268.dp,
+                        modifier = Modifier.weight(1f).statsCascadeEnter(entrance + "artists", 0, revealed),
+                        revealed = revealed,
+                    )
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(gap),
+                    ) {
+                        StatsHeroCard(stats, period, loading, cardHeight = 316.dp,
+                            modifier = Modifier.fillMaxWidth().statsCascadeEnter(entrance + "rhythm", 1, revealed),
+                            revealed = revealed)
+                        PersonalExplorerCard(stats,
+                            modifier = Modifier.fillMaxWidth().statsCascadeEnter(entrance + "explorer", 4, revealed))
                     }
-                    lastIndex = index
-                    lastOffset = offset
                 }
+            } else {
+                PersonalArtistRankingCard(
+                    stats.topArtist, artistPreview, previousArtistPositions, period, onTopArtistClick,
+                    cardHeight = 252.dp,
+                    modifier = Modifier.fillMaxWidth().statsCascadeEnter(entrance + "artists", 0, revealed),
+                    revealed = revealed,
+                )
+                StatsHeroCard(stats, period, loading, cardHeight = 306.dp,
+                    modifier = Modifier.fillMaxWidth().statsCascadeEnter(entrance + "rhythm", 1, revealed),
+                    revealed = revealed)
             }
-            androidx.compose.foundation.lazy.LazyRow(
-                state = railState,
-                contentPadding = PaddingValues(horizontal = PAGE_GUTTER),
-                horizontalArrangement = Arrangement.spacedBy(railGap),
-                verticalAlignment = Alignment.Top,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                item(key = "stats-feature-top-artist") {
-                    Box(modifier = Modifier.width(featureWidth)) {
-                        StatsRailEdgeFade(railState, "stats-feature-top-artist", railScrollDirection) {
-                            TopArtistFeatureCard(
-                                leader = stats.topArtist,
-                                period = period,
-                                onClick = onTopArtistClick,
-                                cardHeight = cardHeight,
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                        }
-                        if (showTopArtistRankingHint) {
-                            Surface(
-                                modifier = Modifier
-                                    .align(Alignment.TopCenter)
-                                    .padding(top = 14.dp, start = 14.dp, end = 14.dp)
-                                    .zIndex(2f),
-                                shape = RoundedCornerShape(18.dp),
-                                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
-                                contentColor = MaterialTheme.colorScheme.onSurface,
-                                tonalElevation = 3.dp,
-                                shadowElevation = 5.dp,
-                            ) {
-                                Text(
-                                    text = stringResource(R.string.stats_artist_ranking_hint),
-                                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
-                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                                )
-                            }
-                        }
-                    }
-                }
 
-                item(key = "stats-top-song") {
-                    StatsRailEdgeFade(railState, "stats-top-song", railScrollDirection) {
-                        LeaderStatCard(
-                            label = stringResource(R.string.stats_top_song),
-                            leader = stats.topSong,
-                            emptyText = stringResource(R.string.stats_no_data_short),
-                            containerColor = MaterialTheme.colorScheme.tertiaryContainer,
-                            contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
-                            cardHeight = cardHeight,
-                            modifier = Modifier.width(mediaCardWidth),
-                        )
-                    }
+            if (tablet) {
+                // Two wide horizontal media cards avoid oversized square covers
+                // on a landscape tablet; all titles can take the remaining width.
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(gap),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    LeaderStatCard(
+                        label = stringResource(R.string.stats_top_song),
+                        leader = stats.topSong,
+                        onClick = { onMediaRanking(PersonalMediaRanking.SONGS) },
+                        emptyText = stringResource(R.string.stats_no_data_short),
+                        cardHeight = 198.dp,
+                        horizontalLayout = true,
+                        modifier = Modifier.weight(1f).statsCascadeEnter(entrance + "song", 2, revealed),
+                        revealed = revealed,
+                        entrancePrefix = entrance + "song:",
+                    )
+                    LeaderStatCard(
+                        label = stringResource(R.string.stats_top_album),
+                        leader = stats.topAlbum,
+                        onClick = { onMediaRanking(PersonalMediaRanking.ALBUMS) },
+                        emptyText = stringResource(R.string.stats_no_data_short),
+                        cardHeight = 198.dp,
+                        horizontalLayout = true,
+                        modifier = Modifier.weight(1f).statsCascadeEnter(entrance + "album", 3, revealed),
+                        revealed = revealed,
+                        entrancePrefix = entrance + "album:",
+                    )
                 }
-
-                item(key = "stats-top-album") {
-                    StatsRailEdgeFade(railState, "stats-top-album", railScrollDirection) {
-                        LeaderStatCard(
-                            label = stringResource(R.string.stats_top_album),
-                            leader = stats.topAlbum,
-                            emptyText = stringResource(R.string.stats_no_data_short),
-                            containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-                            contentColor = MaterialTheme.colorScheme.onSurface,
-                            cardHeight = cardHeight,
-                            modifier = Modifier.width(mediaCardWidth),
-                        )
-                    }
+            } else {
+                val tileWidth = (contentWidth - gap) / 2f
+                val compactMediaCardHeight = tileWidth + 108.dp
+                Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
+                    LeaderStatCard(
+                        label = stringResource(R.string.stats_top_song),
+                        leader = stats.topSong,
+                        onClick = { onMediaRanking(PersonalMediaRanking.SONGS) },
+                        emptyText = stringResource(R.string.stats_no_data_short),
+                        cardHeight = compactMediaCardHeight,
+                        modifier = Modifier.weight(1f).statsCascadeEnter(entrance + "song", 2, revealed),
+                        revealed = revealed,
+                        entrancePrefix = entrance + "song:",
+                    )
+                    LeaderStatCard(
+                        label = stringResource(R.string.stats_top_album),
+                        leader = stats.topAlbum,
+                        onClick = { onMediaRanking(PersonalMediaRanking.ALBUMS) },
+                        emptyText = stringResource(R.string.stats_no_data_short),
+                        cardHeight = compactMediaCardHeight,
+                        modifier = Modifier.weight(1f).statsCascadeEnter(entrance + "album", 3, revealed),
+                        revealed = revealed,
+                        entrancePrefix = entrance + "album:",
+                    )
                 }
+                PersonalExplorerCard(stats,
+                            modifier = Modifier.fillMaxWidth().statsCascadeEnter(entrance + "explorer", 4, revealed))
+            }
+            // Charts get their own wide row, preventing clipped legends and
+            // 1:1 chart cards floating alongside much taller media tiles.
+            Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
+                CommunityBreakdownSquareCard(
+                    title = stringResource(R.string.stats_top_genres),
+                    items = genreShares,
+                    modifier = Modifier.weight(1f).statsCascadeEnter(entrance + "genres", 5, revealed),
+                    aspect = if (tablet) 1.9f else 1f,
+                )
+                CommunityBreakdownSquareCard(
+                    title = stringResource(R.string.stats_top_languages),
+                    items = languageShares,
+                    modifier = Modifier.weight(1f).statsCascadeEnter(entrance + "languages", 6, revealed),
+                    aspect = if (tablet) 1.9f else 1f,
+                )
+            }
 
-                item(key = "stats-taste") {
-                    StatsRailEdgeFade(railState, "stats-taste", railScrollDirection) {
-                        Column(
-                            modifier = Modifier.width(mediaCardWidth),
-                            verticalArrangement = Arrangement.spacedBy(railGap),
-                        ) {
-                            TopGenreStatCard(
-                                genres = stats.topGenres.ifEmpty { listOfNotNull(stats.topGenre) },
-                                cardHeight = compactInsightHeight,
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                            TopLanguageStatCard(
-                                languages = stats.topLanguages.ifEmpty { listOfNotNull(stats.topLanguage) },
-                                cardHeight = compactInsightHeight,
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                        }
-                    }
+            if (tablet) {
+                Row(horizontalArrangement = Arrangement.spacedBy(gap), verticalAlignment = Alignment.Top) {
+                    WidePlaylistStatCard(
+                        label = stringResource(R.string.stats_top_playlist),
+                        leader = stats.topPlaylist,
+                        emptyText = stringResource(R.string.stats_playlist_no_data),
+                        modifier = Modifier.weight(1f).statsCascadeEnter(entrance + "playlist", 7, revealed),
+                    )
+                    PersonalListeningHoursCard(listeningHours,
+                        modifier = Modifier.weight(1f).statsCascadeEnter(entrance + "hours", 8, revealed))
                 }
+            } else {
+                WidePlaylistStatCard(
+                    label = stringResource(R.string.stats_top_playlist),
+                    leader = stats.topPlaylist,
+                    emptyText = stringResource(R.string.stats_playlist_no_data),
+                    modifier = Modifier.statsCascadeEnter(entrance + "playlist", 7, revealed),
+                )
+                PersonalListeningHoursCard(listeningHours,
+                    modifier = Modifier.statsCascadeEnter(entrance + "hours", 8, revealed))
+            }
 
-                item(key = "stats-top-playlist") {
-                    StatsRailEdgeFade(railState, "stats-top-playlist", railScrollDirection) {
-                        LeaderStatCard(
-                            label = stringResource(R.string.stats_top_playlist),
-                            leader = stats.topPlaylist,
-                            emptyText = stringResource(R.string.stats_playlist_no_data),
-                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                            cardHeight = cardHeight,
-                            modifier = Modifier.width(mediaCardWidth),
-                        )
-                    }
-                }
+            if (loadFailed || (!loading && stats.trackCount == 0)) {
+                Text(
+                    text = stringResource(if (loadFailed) R.string.stats_load_error else R.string.stats_no_data_message),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (loadFailed) scheme.error else scheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                        .statsCascadeEnter(entrance + "status", 9, revealed),
+                )
+            }
+        }
+    }
+}
 
-                item(key = "stats-feature-rhythm") {
-                    StatsRailEdgeFade(railState, "stats-feature-rhythm", railScrollDirection) {
-                        StatsHeroCard(
-                            stats = stats,
-                            period = period,
-                            loading = loading,
-                            cardHeight = cardHeight,
-                            modifier = Modifier.width(featureWidth),
-                        )
-                    }
+@Composable
+private fun PersonalExplorerCard(stats: ListeningStats, modifier: Modifier = Modifier) {
+    val scheme = MaterialTheme.colorScheme
+    Column(
+        modifier = modifier.fillMaxWidth()
+            .clip(RoundedCornerShape(30.dp))
+            .statsTopExit()
+            .orbGlassSurface(orbOverlayGlassBaseColor(), cornerRadius = 30.dp)
+            .padding(18.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Text(
+            stringResource(R.string.stats_explorer_title),
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold,
+            color = scheme.onSurface,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            listOf(
+                stats.uniqueArtists to R.string.stats_explorer_artists,
+                stats.uniqueTracks to R.string.stats_explorer_tracks,
+                stats.uniqueAlbums to R.string.stats_explorer_albums,
+            ).forEach { (count, labelId) ->
+                Column(
+                    modifier = Modifier.weight(1f)
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(scheme.primaryContainer)
+                        .border(1.dp, scheme.outlineVariant, RoundedCornerShape(18.dp))
+                        .padding(horizontal = 9.dp, vertical = 15.dp),
+                ) {
+                    Text(
+                        "$count", style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold, color = scheme.onPrimaryContainer,
+                    )
+                    Text(
+                        stringResource(labelId),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = scheme.onPrimaryContainer,
+                        maxLines = 2,
+                    )
                 }
             }
         }
+    }
+}
 
-        if (loadFailed) {
-            Spacer(Modifier.height(10.dp))
+@Composable
+private fun PersonalListeningHoursCard(hours: List<Int>, modifier: Modifier = Modifier) {
+    val scheme = MaterialTheme.colorScheme
+    val max = hours.maxOrNull()?.coerceAtLeast(1) ?: 1
+    val peak = hours.indices.maxByOrNull { hours.getOrElse(it) { 0 } } ?: 0
+    Column(
+        modifier = modifier.fillMaxWidth()
+            .clip(RoundedCornerShape(30.dp))
+            .statsTopExit()
+            .orbGlassSurface(orbOverlayGlassBaseColor(), cornerRadius = 30.dp)
+            .padding(18.dp),
+        verticalArrangement = Arrangement.spacedBy(13.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = stringResource(R.string.stats_load_error),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
-                modifier = Modifier.padding(horizontal = PAGE_GUTTER + 4.dp),
+                stringResource(R.string.stats_listening_hours_title),
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.titleLarge,
+                color = scheme.onSurface,
+                fontWeight = FontWeight.Bold,
             )
-        } else if (!loading && stats.trackCount == 0) {
-            Spacer(Modifier.height(10.dp))
+            if (hours.any { it > 0 }) {
+                Text(
+                    stringResource(R.string.stats_listening_hours_peak, peak),
+                    color = scheme.primary,
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth().height(96.dp),
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            (0 until 24).forEach { hour ->
+                val count = hours.getOrElse(hour) { 0 }
+                val level = (count.toFloat() / max.toFloat()).coerceIn(0f, 1f)
+                Box(
+                    modifier = Modifier.weight(1f)
+                        .fillMaxHeight(if (count == 0) .045f else level.coerceAtLeast(.09f))
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(if (hour == peak && count > 0) scheme.primary else scheme.tertiary.copy(alpha = .68f)),
+                )
+            }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            listOf("00h", "06h", "12h", "18h", "23h").forEach { label ->
+                Text(label, style = MaterialTheme.typography.labelSmall, color = scheme.onSurfaceVariant)
+            }
+        }
+        Text(stringResource(R.string.stats_listening_hours_note), style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun LiveListeningOverviewCard(
+    people: List<OrbProfile>,
+    onOpen: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val scheme = MaterialTheme.colorScheme
+    Column(
+        modifier = modifier
+            .widthIn(max = 1360.dp)
+            .fillMaxWidth()
+            .padding(horizontal = PAGE_GUTTER, vertical = 8.dp)
+            .clip(RoundedCornerShape(30.dp))
+            .statsTopExit()
+            .orbGlassSurface(orbOverlayGlassBaseColor(), cornerRadius = 30.dp)
+            .clickable(onClick = onOpen)
+            .padding(18.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(9.dp).clip(CircleShape).background(scheme.primary))
+            Spacer(Modifier.width(10.dp))
             Text(
-                text = stringResource(R.string.stats_no_data_message),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = PAGE_GUTTER + 4.dp),
+                stringResource(R.string.stats_live_title),
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.titleLarge,
+                color = scheme.onSurface,
+                fontWeight = FontWeight.Bold,
             )
+            Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = scheme.onSurface)
+        }
+        if (people.isEmpty()) {
+            Text(stringResource(R.string.stats_live_empty), style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+        } else {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                people.take(7).forEach { friend ->
+                    if (!friend.avatarUrl.isNullOrBlank()) {
+                        AsyncImage(
+                            model = friend.avatarUrl,
+                            contentDescription = friend.displayName,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.size(44.dp).clip(CircleShape),
+                        )
+                    } else {
+                        Box(
+                            Modifier.size(44.dp).clip(CircleShape)
+                                .background(scheme.secondaryContainer),
+                            contentAlignment = Alignment.Center,
+                        ) { Icon(Icons.Rounded.Person, contentDescription = null, tint = scheme.onSecondaryContainer) }
+                    }
+                }
+            }
+            Text(
+                stringResource(R.string.stats_live_count, people.size),
+                style = MaterialTheme.typography.labelMedium,
+                color = scheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun PersonalArtistRankingCard(
+    leader: StatsLeader?,
+    artistPreview: List<StatsLeader>,
+    previousArtistPositions: Map<String, Int>,
+    period: StatsPeriod,
+    onClick: () -> Unit,
+    cardHeight: Dp,
+    modifier: Modifier = Modifier,
+    revealed: MutableMap<String, Boolean>,
+) {
+    val scheme = MaterialTheme.colorScheme
+    Column(
+        modifier = modifier
+            .statsTopExit()
+            .clip(RoundedCornerShape(32.dp))
+            .orbGlassSurface(orbOverlayGlassBaseColor(), cornerRadius = 32.dp),
+        verticalArrangement = Arrangement.spacedBy(0.dp),
+    ) {
+        // Highlight and positions 2–5 share one card, matching the Geral music ranking.
+        TopArtistFeatureCard(
+            leader = leader,
+            period = period,
+            onClick = onClick,
+            cardHeight = cardHeight,
+            modifier = Modifier.fillMaxWidth(),
+            revealed = revealed,
+        )
+        artistPreview.drop(1).take(4).forEachIndexed { index, artist ->
+            Row(
+                modifier = Modifier.fillMaxWidth()
+                    .height(62.dp)
+                    .statsCascadeEnter("personal:${period.name}:artist-row:$index", 3 + index, revealed)
+                    .clickable(onClick = onClick)
+                    .padding(horizontal = 14.dp, vertical = 9.dp),
+                horizontalArrangement = Arrangement.spacedBy(11.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                StatsRankNumber(index + 2)
+                if (!artist.artworkUrl.isNullOrBlank()) {
+                    StatsRecoveringArtwork(
+                        url = artist.artworkUrl,
+                        title = artist.title,
+                        kind = StatsArtworkKind.ARTIST,
+                        requestedPx = ROW_ART_PX,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.size(40.dp).clip(CircleShape),
+                    )
+                } else {
+                    Box(
+                        Modifier.size(40.dp).clip(CircleShape).background(scheme.surfaceContainerHigh),
+                        contentAlignment = Alignment.Center,
+                    ) { Icon(Icons.Rounded.Person, contentDescription = null, tint = scheme.onSurfaceVariant) }
+                }
+                Text(
+                    artist.title,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleSmall,
+                    color = scheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                PersonalRankChange(
+                    category = "artist", title = artist.title, subtitle = null,
+                    position = index + 2, previous = previousArtistPositions,
+                )
+            }
+        }
+        Row(
+            modifier = Modifier.align(Alignment.End)
+                .statsCascadeEnter("personal:${period.name}:artist-more", 7, revealed)
+                .clickable(onClick = onClick)
+                .padding(horizontal = 18.dp, vertical = 14.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(stringResource(R.string.stats_general_show_more),
+                style = MaterialTheme.typography.labelLarge, color = scheme.primary,
+                fontWeight = FontWeight.SemiBold)
+            Icon(Icons.Rounded.ChevronRight, contentDescription = null,
+                tint = scheme.primary, modifier = Modifier.size(18.dp))
         }
     }
 }
@@ -1010,6 +2922,7 @@ private fun TopArtistFeatureCard(
     onClick: () -> Unit,
     cardHeight: Dp = 302.dp,
     modifier: Modifier = Modifier,
+    revealed: MutableMap<String, Boolean>,
 ) {
     val periodDays = when (period) {
         StatsPeriod.WEEK -> 7
@@ -1044,17 +2957,22 @@ private fun TopArtistFeatureCard(
             .clickable(enabled = leader != null, onClick = onClick),
     ) {
         if (!leader?.artworkUrl.isNullOrBlank()) {
-            AsyncImage(
-                model = leader?.artworkUrl.artworkAt(TOP_ARTIST_ART_PX),
+            StatsRecoveringArtwork(
+                url = leader?.artworkUrl,
+                title = leader?.title,
+                kind = StatsArtworkKind.ARTIST,
+                requestedPx = TOP_ARTIST_ART_PX,
                 contentDescription = leader?.title,
                 contentScale = ContentScale.Crop,
                 alignment = Alignment.Center,
-                modifier = Modifier.matchParentSize(),
+                modifier = Modifier.matchParentSize()
+                    .statsCascadeEnter("personal:${period.name}:hero-image", 1, revealed),
             )
         } else {
             Box(
                 modifier = Modifier
                     .matchParentSize()
+                    .statsCascadeEnter("personal:${period.name}:hero-image", 1, revealed)
                     .background(MaterialTheme.colorScheme.tertiaryContainer),
                 contentAlignment = Alignment.Center,
             ) {
@@ -1089,6 +3007,7 @@ private fun TopArtistFeatureCard(
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .fillMaxWidth()
+                .statsCascadeEnter("personal:${period.name}:hero-text", 2, revealed)
                 .padding(start = 18.dp, end = 18.dp, bottom = 16.dp),
             verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
@@ -1135,43 +3054,47 @@ private fun StatsHeroCard(
     loading: Boolean,
     cardHeight: Dp = 302.dp,
     modifier: Modifier = Modifier,
+    revealed: MutableMap<String, Boolean>,
 ) {
     val comparison = stats.comparisonPercent
     Column(
         modifier = modifier
-            .height(cardHeight)
+            .heightIn(min = cardHeight)
             .clip(RoundedCornerShape(34.dp))
-            .background(MaterialTheme.colorScheme.primaryContainer)
+            .statsTopExit()
+            .orbGlassSurface(orbOverlayGlassBaseColor(), cornerRadius = 34.dp)
             .padding(20.dp),
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth()
+                .statsCascadeEnter("personal:${period.name}:rhythm-heading", 2, revealed),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(Modifier.weight(1f)) {
                 Text(
                     text = stringResource(R.string.stats_summary_title),
                     style = MaterialTheme.typography.titleLarge,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    color = MaterialTheme.colorScheme.onSurface,
                 )
                 Text(
                     text = stringResource(R.string.stats_summary_subtitle),
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.72f),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             if (loading) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(20.dp),
                     strokeWidth = 2.dp,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    color = MaterialTheme.colorScheme.onSurface,
                 )
             }
         }
 
         Spacer(Modifier.height(14.dp))
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth()
+                .statsCascadeEnter("personal:${period.name}:rhythm-metrics", 3, revealed),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             HeroMetric(
@@ -1203,28 +3126,41 @@ private fun StatsHeroCard(
             period = period,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(104.dp),
+                .height(104.dp)
+                .statsCascadeEnter("personal:${period.name}:rhythm-chart", 4, revealed),
         )
 
         Spacer(Modifier.height(10.dp))
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth()
+                .statsCascadeEnter("personal:${period.name}:rhythm-comparison", 5, revealed),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
                 text = stringResource(R.string.stats_comparison_caption),
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.68f),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.weight(1f),
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
-            Text(
-                text = comparison?.let { if (it > 0) "+$it%" else "$it%" } ?: "—",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-            )
+            StatsMetricPill(
+                compact = true,
+                tone = when {
+                    comparison == null || comparison == 0 -> StatsMetricTone.NEUTRAL
+                    comparison > 0 -> StatsMetricTone.POSITIVE
+                    else -> StatsMetricTone.NEGATIVE
+                },
+            ) { ink ->
+                Text(
+                    text = comparison?.let { if (it > 0) "+$it%" else "$it%" } ?: "—",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = ink,
+                    maxLines = 1,
+                )
+            }
         }
     }
 }
@@ -1239,9 +3175,10 @@ private fun RhythmMiniChart(
     val current = if (currentValues.isNotEmpty()) currentValues else List(12) { 0 }
     val previous = if (previousValues.isNotEmpty()) previousValues else List(current.size.coerceAtLeast(2)) { 0 }
     val reveal = remember(current, previous) { Animatable(0f) }
-    val contentColor = MaterialTheme.colorScheme.onPrimaryContainer
-    val gradientStart = Color(0xFF9C4DFF)
-    val gradientEnd = Color(0xFF27C7FF)
+    val contentColor = MaterialTheme.colorScheme.onSurface
+    // Material You: do not pin neon colors that break dynamic wallpaper palettes.
+    val gradientStart = MaterialTheme.colorScheme.primary
+    val gradientEnd = MaterialTheme.colorScheme.tertiary
     val pointCount = maxOf(current.size, previous.size, 2)
     var selectedIndex by remember(current, previous) { mutableStateOf<Int?>(null) }
 
@@ -1412,6 +3349,7 @@ private fun RhythmMiniChart(
                     ),
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurface,
+                    fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                 )
                 Text(
@@ -1460,12 +3398,12 @@ private fun formatStatsChartInterval(
     val periodStart = when (period) {
         StatsPeriod.WEEK -> now
             .toLocalDate()
-            .minusDays((now.dayOfWeek.value - 1).toLong())
+            .minusDays(6)
             .atStartOfDay(now.zone)
 
         StatsPeriod.MONTH -> now
-            .withDayOfMonth(1)
             .toLocalDate()
+            .minusDays((now.toLocalDate().lengthOfMonth() - 1).toLong())
             .atStartOfDay(now.zone)
 
         StatsPeriod.QUARTER -> {
@@ -1497,10 +3435,8 @@ private fun formatStatsChartInterval(
 
         StatsPeriod.MONTH -> {
             val firstDay = periodStart.toLocalDate().plusDays((safeIndex * 7L))
-            val monthEnd = periodStart.toLocalDate().withDayOfMonth(
-                periodStart.toLocalDate().lengthOfMonth(),
-            )
-            val lastDay = firstDay.plusDays(6).let { if (it > monthEnd) monthEnd else it }
+            val rollingEnd = now.toLocalDate()
+            val lastDay = firstDay.plusDays(6).let { if (it > rollingEnd) rollingEnd else it }
             formatStatsDateRange(firstDay, lastDay, locale)
         }
 
@@ -1578,200 +3514,19 @@ private fun smoothChartPath(points: List<Offset>): Path {
 }
 
 @Composable
-private fun StatsRailEdgeFade(
-    listState: LazyListState,
-    itemKey: String,
-    scrollDirection: Int,
-    content: @Composable () -> Unit,
-) {
-    val density = LocalDensity.current
-    val minFadeDistancePx = with(density) { 104.dp.toPx() }
-    val edgePaddingPx = with(density) { PAGE_GUTTER.toPx() }
-    val edgeState by remember(listState, itemKey, minFadeDistancePx, edgePaddingPx) {
-        derivedStateOf {
-            val layout = listState.layoutInfo
-            val info = layout.visibleItemsInfo.firstOrNull { it.key == itemKey }
-                ?: return@derivedStateOf Triple(1f, 0f, 1f)
-            val itemStart = info.offset.toFloat()
-            val itemEnd = itemStart + info.size.toFloat()
-            val leftEdge = edgePaddingPx
-            val rightEdge = layout.viewportSize.width.toFloat() - edgePaddingPx
-
-            // The animation begins while the card is entering the viewport, not
-            // only after it has already crossed an edge. Wider cards keep a
-            // proportionally longer runway, so the featured artist card takes
-            // longer to disappear than compact cards.
-            val fadeDistance = maxOf(minFadeDistancePx, info.size * 0.72f)
-            val leftProgress = ((itemEnd - leftEdge) / fadeDistance).coerceIn(0f, 1f)
-            val rightProgress = ((rightEdge - itemStart) / fadeDistance).coerceIn(0f, 1f)
-            val raw = minOf(leftProgress, rightProgress)
-            val smooth = raw * raw * (3f - 2f * raw)
-            val translateDirection = when {
-                itemEnd < leftEdge + fadeDistance -> -1f
-                itemStart > rightEdge - fadeDistance -> 1f
-                else -> 0f
-            }
-            Triple(smooth.coerceAtLeast(0.03f), translateDirection, fadeDistance)
-        }
-    }
-    val edgeFade = edgeState.first
-    val direction = edgeState.second
-    Box(
-        modifier = Modifier
-            .alpha(edgeFade)
-            .offset(x = (10.dp * direction) * (1f - edgeFade))
-            .graphicsLayer {
-                // Incoming cards now grow into place as they enter either edge,
-                // while outgoing cards shrink visibly enough to read as depth.
-                val scale = 0.82f + 0.18f * edgeFade
-                scaleX = scale
-                scaleY = scale
-            },
-    ) {
-        content()
-    }
-}
-
-@Composable
-private fun statsVerticalEdgeModifier(
-    listState: LazyListState,
-    itemKey: String,
-): Modifier {
-    val density = LocalDensity.current
-    val minDistancePx = with(density) { 76.dp.toPx() }
-    // Stats content scrolls underneath a frosted top bar. Using the logical
-    // viewport start (which includes negative content padding) makes rows stay
-    // full-size until they are already hidden. Track the visual header edge.
-    val topOcclusionPx = with(density) { 144.dp.toPx() }
-    val edgeState by remember(listState, itemKey, minDistancePx, topOcclusionPx) {
-        derivedStateOf {
-            val layout = listState.layoutInfo
-            val info = layout.visibleItemsInfo.firstOrNull { it.key == itemKey }
-                ?: return@derivedStateOf Pair(1f, 0f)
-            val start = info.offset.toFloat()
-            val end = start + info.size.toFloat()
-            // visibleItemsInfo offsets are expressed in the LazyColumn content
-            // coordinate space. The fixed-header height is screen-relative, so
-            // translate it by viewportStartOffset (=-top content padding). Using
-            // topOcclusionPx as an absolute offset double-counted the padding and
-            // made the first Stats rows shrink/fade before any scroll happened.
-            val top = layout.viewportStartOffset.toFloat() + topOcclusionPx
-            val bottom = layout.viewportEndOffset.toFloat()
-            val distance = maxOf(minDistancePx, info.size * 0.92f)
-            val topProgress = if (start >= top) {
-                1f
-            } else {
-                ((end - top) / info.size.coerceAtLeast(1).toFloat()).coerceIn(0f, 1f)
-            }
-            val bottomProgress = ((bottom - start) / distance).coerceIn(0f, 1f)
-            val raw = minOf(topProgress, bottomProgress)
-            val smooth = raw * raw * (3f - 2f * raw)
-            val direction = when {
-                start < top -> -1f
-                start > bottom - distance -> 1f
-                else -> 0f
-            }
-            Pair(smooth.coerceAtLeast(0.04f), direction)
-        }
-    }
-    val edge = edgeState.first
-    val direction = edgeState.second
-    return Modifier
-        .alpha(edge)
-        .offset(y = 10.dp * direction * (1f - edge))
-        .graphicsLayer {
-            val scale = 0.84f + 0.16f * edge
-            scaleX = scale
-            scaleY = scale
-        }
-}
-
-@Composable
 private fun ArtistRankingEntrance(
     index: Int,
-    listState: LazyListState,
-    itemKey: String,
     animationKey: String,
+    alreadyRevealed: Boolean,
+    onRevealed: () -> Unit,
     content: @Composable () -> Unit,
 ) {
-    val progress = remember(animationKey) { Animatable(0f) }
-    val density = LocalDensity.current
-    val minFadeDistancePx = with(density) { 72.dp.toPx() }
-    val topOcclusionPx = with(density) { 144.dp.toPx() }
-
-    LaunchedEffect(animationKey) {
-        progress.snapTo(0f)
-        delay((index * 72L).coerceAtMost(720L))
-        progress.animateTo(
-            targetValue = 1f,
-            animationSpec = spring(
-                dampingRatio = 0.72f,
-                stiffness = 260f,
-                visibilityThreshold = 0.001f,
-            ),
-        )
-    }
-
-    // Apply the same depth logic at both vertical edges. Rows entering from
-    // below grow into place instead of popping in at full scale, and rows that
-    // leave through the top shrink/fade progressively.
-    val edgeState by remember(listState, itemKey, minFadeDistancePx, topOcclusionPx) {
-        derivedStateOf {
-            val layout = listState.layoutInfo
-            val info = layout.visibleItemsInfo.firstOrNull { it.key == itemKey }
-                ?: return@derivedStateOf Pair(1f, 0f)
-            val itemStart = info.offset.toFloat()
-            val itemEnd = itemStart + info.size.toFloat()
-            // Same coordinate conversion as statsVerticalEdgeModifier: the
-            // fixed header is already reserved by content padding, so its visual
-            // lower edge is viewportStartOffset + header height, not header
-            // height measured again from the LazyColumn content origin.
-            val topEdge = layout.viewportStartOffset.toFloat() + topOcclusionPx
-            val bottomEdge = layout.viewportEndOffset.toFloat()
-            val fadeDistance = maxOf(minFadeDistancePx, info.size * 0.95f)
-            // At the natural top of the ranking, the #1 card must be full-size.
-            // Only activate the top-edge shrink once the user has actually
-            // scrolled the list upward; otherwise the fixed Stats header would
-            // make the first card look permanently compressed.
-            val hasScrolledFromTop = listState.canScrollBackward
-            val topProgress = if (!hasScrolledFromTop || itemStart >= topEdge) {
-                1f
-            } else {
-                ((itemEnd - topEdge) / info.size.coerceAtLeast(1).toFloat()).coerceIn(0f, 1f)
-            }
-            val bottomProgress = ((bottomEdge - itemStart) / fadeDistance).coerceIn(0f, 1f)
-            val raw = minOf(topProgress, bottomProgress)
-            val smooth = raw * raw * (3f - 2f * raw)
-            val direction = when {
-                itemStart < topEdge && hasScrolledFromTop -> -1f
-                itemStart > bottomEdge - fadeDistance -> 1f
-                else -> 0f
-            }
-            Pair(smooth.coerceAtLeast(0.04f), direction)
-        }
-    }
-
-    val p = progress.value.coerceIn(0f, 1.08f)
-    val entrance = p.coerceIn(0f, 1f)
-    val edgeFade = edgeState.first
-    val edgeDirection = edgeState.second
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .offset(
-                y = 42.dp * (1f - p) + 10.dp * edgeDirection * (1f - edgeFade),
-            )
-            .alpha(entrance * edgeFade)
-            .graphicsLayer {
-                val entranceScale = 0.94f + (0.06f * entrance)
-                val edgeScale = 0.82f + (0.18f * edgeFade)
-                val scale = entranceScale * edgeScale
-                scaleX = scale
-                scaleY = scale
-            },
-    ) {
-        content()
-    }
+    com.music.orb.ui.components.ProgressiveActionSheetItem(
+        index = index,
+        itemKey = animationKey,
+        initiallyRevealed = alreadyRevealed,
+        onRevealed = onRevealed,
+    ) { content() }
 }
 
 @Composable
@@ -1922,8 +3677,12 @@ private fun ArtistRankingRow(
             contentAlignment = Alignment.Center,
         ) {
             if (!leader.artworkUrl.isNullOrBlank()) {
-                AsyncImage(
-                    model = leader.artworkUrl.artworkAt(ROW_ART_PX),
+                StatsRecoveringArtwork(
+                    url = leader.artworkUrl,
+                    title = leader.title,
+                    subtitle = leader.subtitle,
+                    kind = StatsArtworkKind.ARTIST,
+                    requestedPx = ROW_ART_PX,
                     contentDescription = leader.title,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),
@@ -1958,18 +3717,31 @@ private fun HeroMetric(
         Text(
             text = label,
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.68f),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )
         Spacer(Modifier.height(3.dp))
-        Text(
-            text = value,
-            style = MaterialTheme.typography.titleLarge,
-            color = MaterialTheme.colorScheme.onPrimaryContainer,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        val colors = MaterialTheme.colorScheme
+        val shape = RoundedCornerShape(11.dp)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(shape)
+                .background(colors.surfaceContainerHighest)
+                .border(1.dp, colors.outlineVariant, shape)
+                .padding(horizontal = 4.dp, vertical = 5.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = value,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = colors.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 
@@ -1980,154 +3752,179 @@ private fun StatsPeriodSelector(
 ) {
     val periods = StatsPeriod.values().toList()
     val selectedIndex = periods.indexOf(selected).coerceAtLeast(0)
-    val listState = rememberLazyListState()
-
-    // Match Home's filter behavior: when the active option changes, keep the
-    // selected pill visible even on narrower screens.
-    LaunchedEffect(selectedIndex, periods.size) {
-        if (periods.isNotEmpty()) {
-            listState.animateScrollToCenteredItem(selectedIndex.coerceIn(periods.indices))
+    val labels = periods.map { period ->
+        when (period) {
+            StatsPeriod.WEEK -> stringResource(R.string.stats_period_week)
+            StatsPeriod.MONTH -> stringResource(R.string.stats_period_month)
+            StatsPeriod.QUARTER -> stringResource(R.string.stats_period_quarter)
+            StatsPeriod.SEMESTER -> stringResource(R.string.stats_period_semester)
+            StatsPeriod.YEAR -> stringResource(R.string.stats_period_year)
         }
     }
 
-    androidx.compose.foundation.lazy.LazyRow(
-        state = listState,
-        contentPadding = PaddingValues(horizontal = PAGE_GUTTER),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        itemsIndexed(periods) { _, period ->
-            val active = selected == period
-            val label = when (period) {
-                StatsPeriod.WEEK -> stringResource(R.string.stats_period_week)
-                StatsPeriod.MONTH -> stringResource(R.string.stats_period_month)
-                StatsPeriod.QUARTER -> stringResource(R.string.stats_period_quarter)
-                StatsPeriod.SEMESTER -> stringResource(R.string.stats_period_semester)
-                StatsPeriod.YEAR -> stringResource(R.string.stats_period_year)
-            }
-            val background = if (active) {
-                MaterialTheme.colorScheme.primaryContainer
-            } else {
-                MaterialTheme.colorScheme.surfaceContainerHighest
-            }
-            val outline = if (active) {
-                MaterialTheme.colorScheme.primary.copy(alpha = 0.20f)
-            } else {
-                MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)
-            }
-            val chipShapeRadius by animateDpAsState(
-                targetValue = if (active) 22.dp else 15.dp,
-                animationSpec = spring(
-                    dampingRatio = Spring.DampingRatioMediumBouncy,
-                    stiffness = Spring.StiffnessMediumLow,
-                ),
-                label = "statsPeriodShape",
-            )
-            val chipScale by animateFloatAsState(
-                targetValue = if (active) 1.04f else 1f,
-                animationSpec = spring(
-                    dampingRatio = Spring.DampingRatioMediumBouncy,
-                    stiffness = Spring.StiffnessMediumLow,
-                ),
-                label = "statsPeriodScale",
-            )
-            val animatedBackground by animateColorAsState(
-                targetValue = background,
-                animationSpec = spring(
-                    dampingRatio = Spring.DampingRatioMediumBouncy,
-                    stiffness = Spring.StiffnessMediumLow,
-                ),
-                label = "statsPeriodBackground",
-            )
-            val animatedOutline by animateColorAsState(
-                targetValue = outline,
-                animationSpec = spring(
-                    dampingRatio = Spring.DampingRatioMediumBouncy,
-                    stiffness = Spring.StiffnessMediumLow,
-                ),
-                label = "statsPeriodOutline",
-            )
-            val chipShape = RoundedCornerShape(chipShapeRadius)
-
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelLarge,
-                color = if (active) {
-                    MaterialTheme.colorScheme.onPrimaryContainer
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
-                maxLines = 1,
-                modifier = Modifier
-                    .graphicsLayer {
-                        scaleX = chipScale
-                        scaleY = chipScale
-                    }
-                    .clip(chipShape)
-                    .background(animatedBackground)
-                    .border(1.dp, animatedOutline, chipShape)
-                    .clickable { onSelected(period) }
-                    .padding(horizontal = 18.dp, vertical = 11.dp),
-            )
-        }
-    }
+    // Use the exact same travelling/bouncy capsule as Home so Week, Month,
+    // Quarter, Semester and Year share Orb's bottom-navigation motion language.
+    OrbBouncyPillSelector(
+        labels = labels,
+        selectedIndex = selectedIndex,
+        onSelected = { index ->
+            periods.getOrNull(index)?.let(onSelected)
+        },
+    )
 }
 
+/** Small square-cover tile used by the personal music Bento. */
 @Composable
 private fun LeaderStatCard(
     label: String,
     leader: StatsLeader?,
     emptyText: String,
-    containerColor: Color,
-    contentColor: Color,
     cardHeight: Dp,
     modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null,
+    horizontalLayout: Boolean = false,
+    revealed: MutableMap<String, Boolean>,
+    entrancePrefix: String,
 ) {
-    Column(
+    val scheme = MaterialTheme.colorScheme
+    val cardShape = RoundedCornerShape(topStart = 30.dp, topEnd = 22.dp, bottomEnd = 30.dp, bottomStart = 22.dp)
+    if (horizontalLayout) {
+        Row(
+            modifier = modifier.height(cardHeight)
+                .statsTopExit()
+                .clip(cardShape)
+                .orbGlassSurface(orbOverlayGlassBaseColor(), cornerRadius = 28.dp)
+                .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+                .padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            StatsCardArtwork(
+                url = leader?.artworkUrl,
+                title = leader?.title,
+                subtitle = leader?.subtitle,
+                kind = if (entrancePrefix.contains("album")) StatsArtworkKind.ALBUM else StatsArtworkKind.SONG,
+                contentColor = scheme.onSurface,
+                modifier = Modifier.size(150.dp)
+                    .statsCascadeEnter(entrancePrefix + "art", 1, revealed),
+            )
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
+                Text(label, style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold, color = scheme.onSurfaceVariant,
+                    modifier = Modifier.statsCascadeEnter(entrancePrefix + "label", 2, revealed),
+                    maxLines = 2)
+                Text(leader?.title ?: emptyText,
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    color = scheme.onSurface, maxLines = 3, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.statsCascadeEnter(entrancePrefix + "title", 3, revealed))
+                leader?.subtitle?.takeIf(String::isNotBlank)?.let { subtitle ->
+                    Text(subtitle, style = MaterialTheme.typography.bodySmall,
+                        color = scheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+                if (onClick != null) {
+                    Spacer(Modifier.weight(1f))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        Icon(Icons.Rounded.ChevronRight, contentDescription = null,
+                            tint = scheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+                    }
+                }
+            }
+        }
+    } else {
+        Column(
+            modifier = modifier.height(cardHeight)
+                .statsTopExit()
+                .clip(cardShape)
+                .orbGlassSurface(orbOverlayGlassBaseColor(), cornerRadius = 28.dp)
+                .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+                .padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            Text(label, style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold, color = scheme.onSurface,
+                modifier = Modifier.statsCascadeEnter(entrancePrefix + "label", 2, revealed),
+                maxLines = 2)
+            StatsCardArtwork(
+                url = leader?.artworkUrl, title = leader?.title, subtitle = leader?.subtitle,
+                kind = if (entrancePrefix.contains("album")) StatsArtworkKind.ALBUM else StatsArtworkKind.SONG,
+                contentColor = scheme.onSurface,
+                modifier = Modifier.fillMaxWidth().aspectRatio(1f)
+                    .statsCascadeEnter(entrancePrefix + "art", 1, revealed),
+            )
+            Text(leader?.title ?: emptyText,
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                color = scheme.onSurface, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.statsCascadeEnter(entrancePrefix + "title", 3, revealed))
+            leader?.subtitle?.takeIf(String::isNotBlank)?.let { subtitle ->
+                Text(subtitle, style = MaterialTheme.typography.labelSmall,
+                    color = scheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+            if (onClick != null) {
+                Spacer(Modifier.weight(1f))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    Icon(Icons.Rounded.ChevronRight, contentDescription = null,
+                        tint = scheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+                }
+            }
+        }
+    }
+}
+
+/** Playlist occupies a landscape tile on phones rather than a third long portrait. */
+@Composable
+private fun WidePlaylistStatCard(
+    label: String,
+    leader: StatsLeader?,
+    emptyText: String,
+    modifier: Modifier = Modifier,
+) {
+    val scheme = MaterialTheme.colorScheme
+    Row(
         modifier = modifier
             .fillMaxWidth()
-            .height(cardHeight)
-            .clip(RoundedCornerShape(28.dp))
-            .background(containerColor),
+            .height(138.dp)
+            .clip(RoundedCornerShape(topStart = 22.dp, topEnd = 30.dp, bottomEnd = 22.dp, bottomStart = 30.dp))
+            .statsTopExit()
+            .orbGlassSurface(orbOverlayGlassBaseColor(), cornerRadius = 26.dp)
+            .padding(12.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelMedium,
-            color = contentColor.copy(alpha = 0.82f),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 10.dp),
-        )
-        Spacer(Modifier.height(6.dp))
-        // Let the artwork become part of the card silhouette instead of
-        // looking like a small thumbnail floating inside another card.
         StatsCardArtwork(
             url = leader?.artworkUrl,
             title = leader?.title,
-            contentColor = contentColor,
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(1f),
+            kind = StatsArtworkKind.PLAYLIST,
+            contentColor = scheme.onSurface,
+            modifier = Modifier.size(114.dp),
         )
-        Spacer(Modifier.height(9.dp))
-        Text(
-            text = leader?.title ?: emptyText,
-            style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-            color = contentColor,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(horizontal = 12.dp),
-        )
-        leader?.subtitle?.takeIf { it.isNotBlank() }?.let { subtitle ->
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(7.dp).clip(CircleShape).background(scheme.secondary))
+                Spacer(Modifier.width(6.dp))
+                Text(label, color = scheme.onSurfaceVariant, style = MaterialTheme.typography.labelMedium)
+            }
             Text(
-                text = subtitle,
-                style = MaterialTheme.typography.bodyMedium,
-                color = contentColor.copy(alpha = 0.78f),
-                maxLines = 1,
+                leader?.title ?: emptyText,
+                color = scheme.onSurface,
+                style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(horizontal = 12.dp),
             )
+            leader?.subtitle?.takeIf(String::isNotBlank)?.let { subtitle ->
+                Text(
+                    subtitle,
+                    color = scheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }
@@ -2138,30 +3935,19 @@ private fun StatsCardArtwork(
     title: String?,
     contentColor: Color,
     modifier: Modifier = Modifier,
+    subtitle: String? = null,
+    kind: StatsArtworkKind = StatsArtworkKind.SONG,
 ) {
-    val shape = RoundedCornerShape(22.dp)
-    if (!url.isNullOrBlank()) {
-        AsyncImage(
-            model = url.artworkAt(STATS_TILE_ART_PX),
-            contentDescription = title,
-            contentScale = ContentScale.Crop,
-            modifier = modifier.clip(shape),
-        )
-    } else {
-        Box(
-            modifier = modifier
-                .clip(shape)
-                .background(contentColor.copy(alpha = 0.10f)),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector = Icons.Rounded.MusicNote,
-                contentDescription = null,
-                tint = contentColor.copy(alpha = 0.72f),
-                modifier = Modifier.size(28.dp),
-            )
-        }
-    }
+    StatsRecoveringArtwork(
+        url = url,
+        title = title,
+        subtitle = subtitle,
+        kind = kind,
+        requestedPx = STATS_TILE_ART_PX,
+        fallbackColor = contentColor.copy(alpha = 0.72f),
+        modifier = modifier.clip(RoundedCornerShape(12.dp))
+            .background(contentColor.copy(alpha = 0.10f)),
+    )
 }
 
 @Composable
@@ -2254,41 +4040,58 @@ private fun RankedTasteStatCard(
     cardHeight: Dp,
     modifier: Modifier = Modifier,
 ) {
+    val scheme = MaterialTheme.colorScheme
     val primary = ranked.firstOrNull()
-    val runnersUp = ranked.drop(1)
-
+    val runnersUp = ranked.drop(1).take(3)
+    @Suppress("UNUSED_VARIABLE") val originalColors = containerColor to contentColor
     Column(
         modifier = modifier
-            .fillMaxWidth()
             .height(cardHeight)
-            .clip(RoundedCornerShape(28.dp))
-            .background(containerColor)
-            .padding(horizontal = 14.dp, vertical = 11.dp),
+            .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 32.dp, bottomEnd = 32.dp, bottomStart = 24.dp))
+            .orbGlassSurface(orbOverlayGlassBaseColor(), cornerRadius = 28.dp)
+            .padding(horizontal = 13.dp, vertical = 13.dp),
+        verticalArrangement = Arrangement.spacedBy(7.dp),
     ) {
-        Text(
-            text = stringResource(if (ranked.size > 1) pluralLabel else singularLabel),
-            style = MaterialTheme.typography.labelMedium,
-            color = contentColor.copy(alpha = 0.82f),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Spacer(Modifier.weight(1f))
-        Text(
-            text = primary ?: stringResource(R.string.stats_no_data_short),
-            style = (if (ranked.size >= 5) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleLarge)
-                .copy(fontWeight = FontWeight.Bold),
-            color = contentColor,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        runnersUp.forEach { item ->
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.size(18.dp).clip(CircleShape).background(containerColor),
+                contentAlignment = Alignment.Center,
+            ) {
+                Box(Modifier.size(7.dp).clip(CircleShape).background(scheme.primary))
+            }
+            Spacer(Modifier.width(7.dp))
             Text(
-                text = item,
-                style = MaterialTheme.typography.labelSmall,
-                color = contentColor.copy(alpha = 0.74f),
-                maxLines = 1,
+                stringResource(if (ranked.size > 1) pluralLabel else singularLabel),
+                style = MaterialTheme.typography.labelMedium,
+                color = scheme.onSurface,
+                fontWeight = FontWeight.Bold,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = primary ?: stringResource(R.string.stats_no_data_short),
+            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+            color = scheme.primary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        runnersUp.forEachIndexed { index, item ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(5.dp).clip(CircleShape)
+                        .background(if (index == 0) scheme.tertiary else scheme.secondary.copy(alpha = 0.72f)),
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    item,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = scheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }
@@ -2488,11 +4291,44 @@ private fun FriendNowPlayingCard(
     var visible by remember(sessionKey) { mutableStateOf(!animateEntrance) }
     var reactionPickerOpen by remember(sessionKey) { mutableStateOf(false) }
     var clockMs by remember(sessionKey) { mutableStateOf(System.currentTimeMillis()) }
-    val haptic = LocalHapticFeedback.current
+    val tactileContext = LocalContext.current
+    var flightArrived by remember(sessionKey) { mutableStateOf(false) }
+    var reactionCenterInWindow by remember(sessionKey) { mutableStateOf(Offset.Zero) }
+    var removingReaction by remember(sessionKey) { mutableStateOf<NowPlayingReactionType?>(null) }
+    val smoke = remember(sessionKey) { Animatable(0f) }
+    LaunchedEffect(removingReaction) {
+        val type = removingReaction ?: return@LaunchedEffect
+        smoke.snapTo(0f)
+        com.music.orb.ui.components.OrbHaptics.reactionWhoosh(tactileContext)
+        onReact(type)
+        smoke.animateTo(1f, tween(850))
+        removingReaction = null
+    }
+    var flyingReaction by remember(sessionKey) { mutableStateOf<Pair<NowPlayingReactionType, Offset>?>(null) }
+    var heartBurstNonce by remember(sessionKey) { mutableIntStateOf(0) }
+    val flight = remember(sessionKey) { Animatable(0f) }
+    val landing = remember(sessionKey) { Animatable(1f) }
+    LaunchedEffect(flyingReaction) {
+        val flying = flyingReaction ?: return@LaunchedEffect
+        try {
+            flightArrived = false
+            flight.snapTo(0f)
+            flight.animateTo(1f, tween(520, easing = androidx.compose.animation.core.FastOutSlowInEasing))
+            com.music.orb.ui.components.OrbHaptics.reactionPop(tactileContext)
+            if (flying.first == NowPlayingReactionType.HEART) heartBurstNonce += 1
+            onReact(flying.first)
+            flightArrived = true
+            landing.snapTo(1.24f)
+            landing.animateTo(1f, spring(dampingRatio = 0.48f, stiffness = 380f))
+        } finally {
+            flyingReaction = null
+            flightArrived = false
+        }
+    }
     val reactionCardScale by animateFloatAsState(
-        targetValue = if (reactionPickerOpen) 1.018f else 1f,
+        targetValue = if (reactionPickerOpen) 1.012f else 1f,
         animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
+            dampingRatio = 0.82f,
             stiffness = Spring.StiffnessMediumLow,
         ),
         label = "friendReactionCardScale",
@@ -2541,6 +4377,11 @@ private fun FriendNowPlayingCard(
         ) + fadeOut(animationSpec = tween(150)),
     ) {
         val colorIndex = (sessionKey.hashCode() and Int.MAX_VALUE) % 3
+        val accentColor = when (colorIndex) {
+            0 -> MaterialTheme.colorScheme.primary
+            1 -> MaterialTheme.colorScheme.secondary
+            else -> MaterialTheme.colorScheme.tertiary
+        }
         val containerColor = when (colorIndex) {
             0 -> MaterialTheme.colorScheme.primaryContainer
             1 -> MaterialTheme.colorScheme.secondaryContainer
@@ -2551,6 +4392,9 @@ private fun FriendNowPlayingCard(
             1 -> MaterialTheme.colorScheme.onSecondaryContainer
             else -> MaterialTheme.colorScheme.onTertiaryContainer
         }
+        val secondaryTextColor = contentColor.copy(alpha = 0.86f)
+        val tertiaryTextColor = contentColor.copy(alpha = 0.74f)
+        val textShadow = Shadow(color = Color.Transparent)
         val myReaction = reactions
             .firstOrNull { it.reactorId == currentUserId }
             ?.type()
@@ -2558,61 +4402,80 @@ private fun FriendNowPlayingCard(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = PAGE_GUTTER, vertical = 5.dp),
+                .padding(horizontal = PAGE_GUTTER, vertical = 4.dp),
         ) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 3.dp, bottom = 14.dp),
+                    .padding(top = 0.dp, bottom = 12.dp),
             ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(top = 24.dp)
-                        .clip(RoundedCornerShape(32.dp))
-                        .background(containerColor)
-                        .border(1.dp, contentColor.copy(alpha = 0.28f), RoundedCornerShape(32.dp))
+                        .padding(top = 44.dp)
                         .graphicsLayer {
                             scaleX = reactionCardScale
                             scaleY = reactionCardScale
                         }
+                        .clip(RoundedCornerShape(32.dp))
+                        .background(containerColor)
+                        .orbGlassSurface(pageColor = containerColor, cornerRadius = 32.dp)
+                        .border(1.dp, accentColor.copy(alpha = 0.24f), RoundedCornerShape(32.dp))
                         .combinedClickable(
                             onClick = { },
                             onLongClick = {
-                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                com.music.orb.ui.components.OrbHaptics.perform(tactileContext, com.music.orb.ui.components.OrbHaptics.Kind.ACTION)
                                 reactionPickerOpen = true
                             },
-                        )
-                        .padding(start = 16.dp, top = 20.dp, end = 14.dp, bottom = 17.dp),
+                        ),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Column(
+                    Box(
                         modifier = Modifier
                             .weight(1f)
-                            .padding(start = 37.dp, end = 10.dp),
+                            .padding(start = 18.dp, top = 16.dp, end = 12.dp, bottom = 16.dp),
                     ) {
+                        Box(
+                            modifier = Modifier
+                                .matchParentSize()
+                                .clip(RoundedCornerShape(24.dp))
+                                .background(
+                                    Brush.horizontalGradient(
+                                        colors = listOf(
+                                            containerColor.copy(alpha = 0.12f),
+                                            containerColor.copy(alpha = 0.06f),
+                                            Color.Transparent,
+                                        ),
+                                    ),
+                                ),
+                        )
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(end = 4.dp),
+                        ) {
                         Text(
                             text = if (isLive) {
                                 stringResource(R.string.friends_is_listening_now)
                             } else {
                                 pastListeningLabel(activity.finishedAt, clockMs)
                             },
-                            style = MaterialTheme.typography.labelMedium,
-                            color = contentColor.copy(alpha = 0.78f),
+                            style = MaterialTheme.typography.labelMedium.copy(shadow = textShadow),
+                            color = secondaryTextColor,
                             maxLines = 1,
                         )
                         Spacer(Modifier.height(7.dp))
                         Text(
                             text = nowPlaying.title,
-                            style = MaterialTheme.typography.titleMedium,
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold, shadow = textShadow),
                             color = contentColor,
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
                         )
                         Text(
                             text = nowPlaying.artist,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = contentColor.copy(alpha = 0.86f),
+                            style = MaterialTheme.typography.bodyMedium.copy(shadow = textShadow),
+                            color = secondaryTextColor,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -2620,14 +4483,15 @@ private fun FriendNowPlayingCard(
                             Spacer(Modifier.height(3.dp))
                             Text(
                                 text = album,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = contentColor.copy(alpha = 0.76f),
+                                style = MaterialTheme.typography.bodySmall.copy(shadow = textShadow),
+                                color = tertiaryTextColor,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
                         }
+                        }
                     }
-                    Artwork(nowPlaying = nowPlaying, size = 84)
+                    Box(Modifier.padding(end = 12.dp)) { Artwork(nowPlaying = nowPlaying, size = 84) }
                 }
 
                 Box(
@@ -2647,11 +4511,12 @@ private fun FriendNowPlayingCard(
                         ?: profile.displayLabel(),
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurface,
+                    fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier
                         .align(Alignment.TopStart)
-                        .padding(start = 59.dp, top = 5.dp, end = 12.dp)
+                        .padding(start = 60.dp, top = 15.dp, end = 12.dp)
                         .clickable(onClick = onOpenProfile),
                 )
 
@@ -2659,26 +4524,81 @@ private fun FriendNowPlayingCard(
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
                         .offset(x = (-13).dp, y = 12.dp)
+                        .onGloballyPositioned { reactionCenterInWindow = it.boundsInWindow().center }
+                        .graphicsLayer { scaleX = landing.value; scaleY = landing.value }
                         .zIndex(3f),
                 ) {
                     LiveReactionSummary(
                         reactions = reactions,
                         busy = reactionBusy,
                         onOpenPicker = {
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            com.music.orb.ui.components.OrbHaptics.perform(tactileContext, com.music.orb.ui.components.OrbHaptics.Kind.ACTION)
                             reactionPickerOpen = true
                         },
                     )
+                    HeartBurstOverlay(
+                        trigger = heartBurstNonce,
+                        tint = Color(0xFFFF3B30),
+                        modifier = Modifier
+                            .matchParentSize()
+                            .graphicsLayer {
+                                scaleX = 1.55f
+                                scaleY = 1.55f
+                            },
+                    )
+                flyingReaction?.let { (type, origin) ->
+                    val progress = flight.value.coerceIn(0f, 1f)
+                    if (!flightArrived) {
+                        Box(Modifier.align(Alignment.Center).size(0.dp)
+                            .wrapContentSize(Alignment.Center, unbounded = true)) {
+                            Text(type.emoji, style = MaterialTheme.typography.labelLarge,
+                                modifier = Modifier.graphicsLayer {
+                                    val delta = origin - reactionCenterInWindow
+                                    translationX = delta.x * (1f - progress)
+                                    translationY = delta.y * (1f - progress) -
+                                        40.dp.toPx() * kotlin.math.sin(Math.PI * progress).toFloat()
+                                    scaleX = 1f + .35f * (1f - progress)
+                                    scaleY = scaleX
+                                })
+                        }
+                    }
+                }
+                removingReaction?.let { type ->
+                    val progress = smoke.value
+                    val smokeColor = MaterialTheme.colorScheme.onSurfaceVariant
+                    Box(Modifier.align(Alignment.Center).size(0.dp)
+                        .wrapContentSize(Alignment.Center, unbounded = true).size(112.dp),
+                        contentAlignment = Alignment.Center) {
+                        Canvas(Modifier.fillMaxSize().blur(5.dp)) {
+                            repeat(8) { index ->
+                                val angle = index * Math.PI * 2 / 8
+                                val spread = 32.dp.toPx() * progress
+                                drawCircle(smokeColor.copy(alpha = (1f - progress) * progress * .65f),
+                                    radius = (4f + 9f * progress).dp.toPx(),
+                                    center = center + Offset(kotlin.math.cos(angle).toFloat() * spread,
+                                        kotlin.math.sin(angle).toFloat() * spread - 26.dp.toPx() * progress))
+                            }
+                        }
+                        Text(type.emoji, style = MaterialTheme.typography.labelLarge,
+                            modifier = Modifier.blur((progress * 9f).dp).graphicsLayer {
+                                alpha = (1f - progress).coerceIn(0f, 1f)
+                                translationY = -26.dp.toPx() * progress
+                                scaleX = 1f + progress * .4f
+                                scaleY = scaleX
+                            })
+                    }
+                }
                 }
 
                 if (reactionPickerOpen) {
                     FriendReactionPickerBubble(
                         selected = myReaction,
-                        busy = reactionBusy,
+                        busy = reactionBusy || flyingReaction != null || removingReaction != null,
                         onDismiss = { reactionPickerOpen = false },
-                        onReact = { type ->
+                        onReact = { type, origin ->
                             reactionPickerOpen = false
-                            onReact(type)
+                            if (type == myReaction) removingReaction = type
+                            else flyingReaction = type to origin
                         },
                         modifier = Modifier
                             .align(Alignment.TopCenter)
@@ -2686,6 +4606,46 @@ private fun FriendNowPlayingCard(
                             .zIndex(12f),
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HeartBurstOverlay(
+    trigger: Int,
+    tint: Color,
+    modifier: Modifier = Modifier,
+) {
+    val burst = remember { Animatable(0f) }
+    LaunchedEffect(trigger) {
+        if (trigger <= 0) return@LaunchedEffect
+        burst.snapTo(0f)
+        burst.animateTo(1f, tween(520, easing = androidx.compose.animation.core.FastOutSlowInEasing))
+    }
+    val progress = burst.value
+    if (progress <= 0f || progress >= 1f) return
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        Canvas(Modifier.fillMaxSize()) {
+            val ringRadius = size.minDimension * (0.16f + 0.34f * progress)
+            drawCircle(
+                color = tint.copy(alpha = (1f - progress) * 0.18f),
+                radius = ringRadius,
+                center = center,
+            )
+            val particleRadius = size.minDimension * 0.055f
+            repeat(6) { index ->
+                val angle = (Math.PI * 2.0 * index / 6.0) - Math.PI / 2.0
+                val travel = size.minDimension * (0.10f + 0.22f * progress)
+                val offset = Offset(
+                    x = kotlin.math.cos(angle).toFloat() * travel,
+                    y = kotlin.math.sin(angle).toFloat() * travel,
+                )
+                drawCircle(
+                    color = tint.copy(alpha = (1f - progress) * 0.95f),
+                    radius = particleRadius * (1f - 0.32f * progress),
+                    center = center + offset,
+                )
             }
         }
     }
@@ -2871,53 +4831,143 @@ private fun FriendReactionPickerBubble(
     selected: NowPlayingReactionType?,
     busy: Boolean,
     onDismiss: () -> Unit,
-    onReact: (NowPlayingReactionType) -> Unit,
+    onReact: (NowPlayingReactionType, Offset) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    RegisterSheetBackdrop()
     val reveal = remember { Animatable(0f) }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var dismissing by remember { mutableStateOf(false) }
+    val density = LocalDensity.current
+    val types = remember { NowPlayingReactionType.values().toList() }
+    val centers = remember { mutableStateMapOf<NowPlayingReactionType, Offset>() }
+    var draggedEmoji by remember { mutableStateOf<NowPlayingReactionType?>(null) }
     LaunchedEffect(Unit) {
+        reveal.snapTo(0f)
         reveal.animateTo(
             targetValue = 1f,
             animationSpec = spring(
                 dampingRatio = 0.58f,
-                stiffness = 320f,
+                stiffness = 380f,
                 visibilityThreshold = 0.001f,
             ),
         )
     }
+    fun dismissAnimated() {
+        if (dismissing) return
+        dismissing = true
+        scope.launch {
+            reveal.animateTo(0f, tween(150))
+            onDismiss()
+        }
+    }
+    fun reactAnimated(type: NowPlayingReactionType, origin: Offset) {
+        if (dismissing) return
+        dismissing = true
+        scope.launch {
+            reveal.animateTo(0f, tween(115))
+            onReact(type, origin)
+        }
+    }
+    var popupOrigin by remember { mutableStateOf(Offset.Zero) }
+    Box(modifier) {
+    Popup(
+        popupPositionProvider = remember { object : PopupPositionProvider {
+            override fun calculatePosition(anchorBounds: IntRect, windowSize: IntSize,
+                layoutDirection: LayoutDirection, popupContentSize: IntSize): IntOffset {
+                val x = (anchorBounds.left + (anchorBounds.width - popupContentSize.width) / 2)
+                    .coerceIn(0, (windowSize.width - popupContentSize.width).coerceAtLeast(0))
+                val y = anchorBounds.top.coerceIn(0, (windowSize.height - popupContentSize.height).coerceAtLeast(0))
+                popupOrigin = Offset(x.toFloat(), y.toFloat())
+                return IntOffset(x, y)
+            }
+        } },
+        onDismissRequest = { dismissAnimated() },
+        properties = PopupProperties(focusable = true, dismissOnBackPress = true, dismissOnClickOutside = true),
+    ) {
+    val popupGlassColor = MaterialTheme.colorScheme.surfaceContainerHigh
     Surface(
         shape = RoundedCornerShape(30.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        shadowElevation = 22.dp,
-        modifier = modifier.graphicsLayer {
-            val p = reveal.value.coerceIn(0f, 1.08f)
-            alpha = p.coerceIn(0f, 1f)
-            val scale = 0.82f + 0.18f * p
-            scaleX = scale
-            scaleY = scale
-        },
+        color = Color.Transparent,
+        shadowElevation = 0.dp,
+        modifier = Modifier
+            .orbGlassSurface(
+                popupGlassColor,
+                cornerRadius = 30.dp,
+                backdropBlur = 56.dp,
+                overlayStrength = true,
+            )
+            .graphicsLayer {
+                val p = reveal.value.coerceIn(0f, 1.2f)
+                alpha = p.coerceIn(0f, 1f)
+                val scale = 0.82f + 0.18f * p
+                scaleX = scale
+                scaleY = scale
+                translationY = (1f - p.coerceIn(0f, 1f)) * 10.dp.toPx()
+            }.shadow(
+            elevation = 8.dp,
+            shape = RoundedCornerShape(30.dp),
+            clip = false,
+            ambientColor = Color.Black.copy(alpha = 0.65f),
+            spotColor = Color.Black.copy(alpha = 0.90f),
+        ),
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
+                .pointerInput(busy) {
+                    if (busy) return@pointerInput
+                    var position = Offset.Zero
+                    fun selectAt(point: Offset) {
+                        val step = with(density) { 48.dp.toPx() }
+                        val index = kotlin.math.floor(point.x / step).toInt()
+                        val next = if (point.y in 0f..size.height.toFloat()) types.getOrNull(index) else null
+                        if (next != draggedEmoji) {
+                            draggedEmoji = next
+                            if (next != null) com.music.orb.ui.components.OrbHaptics.perform(
+                                context, com.music.orb.ui.components.OrbHaptics.Kind.NAVIGATION)
+                        }
+                    }
+                    detectDragGestures(
+                        onDragStart = { position = it; selectAt(position) },
+                        onDragCancel = { draggedEmoji = null },
+                        onDragEnd = {
+                            draggedEmoji?.let { type -> centers[type]?.let { reactAnimated(type, popupOrigin + it) } }
+                            draggedEmoji = null
+                        },
+                        onDrag = { change, delta ->
+                            change.consume()
+                            position += delta
+                            selectAt(position)
+                        },
+                    )
+                },
             horizontalArrangement = Arrangement.spacedBy(2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             NowPlayingReactionType.values().forEach { type ->
+                var emojiCenter by remember(type) { mutableStateOf(Offset.Zero) }
                 Box(
                     modifier = Modifier
                         .size(46.dp)
+                        .onGloballyPositioned { emojiCenter = it.boundsInRoot().center; centers[type] = emojiCenter }
                         .clip(CircleShape)
                         .background(
-                            if (type == selected) MaterialTheme.colorScheme.primaryContainer
+                            if (type == (draggedEmoji ?: selected)) MaterialTheme.colorScheme.primaryContainer
                             else Color.Transparent,
                         )
-                        .clickable(enabled = !busy) { onReact(type) },
+                        .clickable(enabled = !busy) { reactAnimated(type, popupOrigin + emojiCenter) },
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(text = type.emoji, style = MaterialTheme.typography.titleLarge)
+                    val scale by animateFloatAsState(if (type == draggedEmoji) 1.22f else 1f,
+                        spring(dampingRatio = 0.62f, stiffness = 420f), label = "reactionDragScale")
+                    Text(text = type.emoji, style = MaterialTheme.typography.titleLarge,
+                        modifier = Modifier.graphicsLayer { scaleX = scale; scaleY = scale })
                 }
             }
         }
+    }
+    }
     }
 }
 
@@ -2945,7 +4995,7 @@ private fun LiveReactionSummary(
             )
             .combinedClickable(
                 enabled = !busy,
-                onClick = { },
+                onClick = onOpenPicker,
                 onLongClick = onOpenPicker,
             )
             .padding(horizontal = if (summary.isEmpty()) 11.dp else 8.dp, vertical = 5.dp),

@@ -18,7 +18,12 @@ import kotlinx.serialization.json.Json
 object LastPlayed {
 
     /** A restored queue: the tracks, which one was current, and how far in. */
-    class Snapshot(val songs: List<Song>, val index: Int, val positionMs: Long)
+    class Snapshot(
+        val songs: List<Song>,
+        val index: Int,
+        val positionMs: Long,
+        val albumSequentialFlags: List<Boolean>,
+    )
 
     private lateinit var prefs: SharedPreferences
     private val json = Json { ignoreUnknownKeys = true }
@@ -27,7 +32,12 @@ object LastPlayed {
         prefs = context.getSharedPreferences("bitchord_last_played", Context.MODE_PRIVATE)
     }
 
-    fun save(songs: List<Song>, index: Int, positionMs: Long) {
+    fun save(
+        songs: List<Song>,
+        index: Int,
+        positionMs: Long,
+        albumSequentialFlags: List<Boolean> = emptyList(),
+    ) {
         if (songs.isEmpty()) {
             clear()
             return
@@ -39,20 +49,26 @@ object LastPlayed {
         val start = (index - KEEP_BEHIND).coerceIn(0, maxOf(0, songs.size - MAX_TRACKS))
         val window = songs.subList(start, minOf(songs.size, start + MAX_TRACKS))
         val stored = StoredQueue(
-            tracks = window.map {
+            tracks = window.mapIndexed { offset, track ->
+                val isSequential = albumSequentialFlags.getOrNull(start + offset) == true
                 StoredTrack(
-                    it.videoId,
-                    it.title,
-                    it.artist,
-                    it.thumbnailUrl,
-                    it.fromAutoplay,
-                    it.localUri,
-                    it.localPath,
-                    it.durationText,
-                    it.isExplicit,
-                    it.sourcePlaylistId,
-                    it.sourcePlaylistTitle,
-                    it.sourcePlaylistArtworkUrl,
+                    track.videoId,
+                    track.title,
+                    track.artist,
+                    track.thumbnailUrl,
+                    track.fromAutoplay,
+                    track.localUri,
+                    track.localPath,
+                    track.durationText,
+                    track.isExplicit,
+                    track.sourcePlaylistId,
+                    track.sourcePlaylistTitle,
+                    track.sourcePlaylistArtworkUrl,
+                    track.albumId,
+                    track.albumName,
+                    track.releaseYear,
+                    track.preserveAlbumRelease,
+                    isSequential,
                 )
             },
             index = (index - start).coerceIn(0, window.lastIndex),
@@ -91,10 +107,15 @@ object LastPlayed {
                     sourcePlaylistId = it.sourcePlaylistId,
                     sourcePlaylistTitle = it.sourcePlaylistTitle,
                     sourcePlaylistArtworkUrl = it.sourcePlaylistArtworkUrl,
+                    albumId = it.albumId,
+                    albumName = it.albumName,
+                    releaseYear = it.releaseYear,
+                    preserveAlbumRelease = it.preserveAlbumRelease,
                 )
             },
             index = stored.index.coerceIn(0, stored.tracks.lastIndex),
             positionMs = stored.positionMs.coerceAtLeast(0L),
+            albumSequentialFlags = stored.tracks.map { it.albumSequential },
         )
     }
 
@@ -135,6 +156,12 @@ object LastPlayed {
         val sourcePlaylistId: String? = null,
         val sourcePlaylistTitle: String? = null,
         val sourcePlaylistArtworkUrl: String? = null,
+        val albumId: String? = null,
+        val albumName: String? = null,
+        val releaseYear: Int? = null,
+        val preserveAlbumRelease: Boolean = false,
+        /** Playback intent survives restarts, rather than being guessed from track album IDs. */
+        val albumSequential: Boolean = false,
     )
 
     @Serializable

@@ -26,9 +26,9 @@ import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Visibility
-import androidx.compose.material3.Button
+import com.music.orb.ui.components.OrbGlassButton as Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
+import com.music.orb.ui.components.OrbGlassFilterChip as FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -123,6 +123,7 @@ private fun LegacyOrbProfileScreen(
                 favoriteArtistsVisibility = it.favoriteArtistsVisibility,
                 favoriteAlbumsVisibility = it.favoriteAlbumsVisibility,
                 favoriteSongsVisibility = it.favoriteSongsVisibility,
+                recentRatingsVisibility = it.recentRatingsVisibility,
             )
         }
         following = runCatching { SocialRepository.followingProfiles() }.getOrDefault(emptyList())

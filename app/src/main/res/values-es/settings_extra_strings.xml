@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_header_storage">Sistema</string>
+    <string name="settings_prioritize_album_versions">Priorizar versiones del álbum</string>
+    <string name="settings_prioritize_album_versions_subtitle">Prioriza las grabaciones oficiales del álbum frente a versiones single o remix cuando esté disponible la misma canción.</string>
+</resources>

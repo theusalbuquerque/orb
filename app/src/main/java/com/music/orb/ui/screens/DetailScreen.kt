@@ -1,12 +1,22 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+
 package com.music.orb.ui.screens
 
+import java.util.Locale
+import com.music.orb.data.settings.AlbumRatingStore
+import com.music.orb.data.social.CommunityRatingRepository
+import com.music.orb.data.spotify.LinkedLikesSync
 import android.content.res.Configuration
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -29,7 +39,9 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.statusBarsIgnoringVisibility
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
@@ -43,23 +55,31 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.DownloadDone
 import androidx.compose.material.icons.rounded.Downloading
+import androidx.compose.material.icons.rounded.PlaylistAdd
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.Info
+import androidx.compose.material.icons.rounded.Star
+import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.MoreVert
-import androidx.compose.material3.AlertDialog
+import com.music.orb.ui.components.CollectionActionsSheet
+import com.music.orb.ui.components.SongShareSheet
+import com.music.orb.ui.components.OrbConfirmationDialog as AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.pulltorefresh.PullToRefreshState
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.material3.Surface
+import com.music.orb.ui.components.OrbGlassTextButton as TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -69,10 +89,17 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.Rect
@@ -80,6 +107,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -96,8 +125,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.HazeTint
-import dev.chrisbanes.haze.hazeEffect
 import dev.chrisbanes.haze.hazeSource
 import com.music.orb.R
 import com.music.orb.data.WikipediaArtistInfoRepository
@@ -120,10 +147,18 @@ import com.music.orb.ui.components.ExplicitTitle
 import com.music.orb.ui.components.DownloadStatusGlyph
 import com.music.orb.ui.components.ArtworkBottomEdgeField
 import com.music.orb.ui.components.artworkSurfaceForegrounds
+import com.music.orb.ui.components.ArtworkMergeBand
+import com.music.orb.ui.components.ARTWORK_LANDSCAPE_FLOW_WIDTH
+import com.music.orb.ui.components.ARTWORK_LANDSCAPE_FLOW_OVERLAP
+import com.music.orb.ui.components.artworkLandscapeFlowMask
+import com.music.orb.ui.components.landscapeArtworkFade
+import com.music.orb.ui.components.ARTWORK_MERGE_BAND
+import com.music.orb.ui.components.OrbHaptics
 import com.music.orb.ui.components.bestForegroundForArtworkSurface
 import com.music.orb.ui.components.rememberArtworkBottomEdgeField
 import com.music.orb.ui.components.rememberArtworkRightEdgeField
 import com.music.orb.ui.components.ReleaseBadges
+import com.music.orb.ui.components.AlbumRatingBadge
 import com.music.orb.ui.components.rememberCollectionBadges
 import com.music.orb.ui.components.rememberTrackLosslessBadgeState
 import com.music.orb.ui.components.CompactMediaBadges
@@ -136,12 +171,19 @@ import com.music.orb.ui.components.ShimmerBox
 import com.music.orb.ui.components.SongRow
 import com.music.orb.ui.components.thumbnailBorder
 import com.music.orb.ui.components.detailSkeleton
-import com.music.orb.ui.icons.BitChordIcons
+import com.music.orb.ui.components.orbBadgeGlassSurface
+import com.music.orb.ui.components.orbGlassSurface
+import com.music.orb.ui.components.orbNowPlayingStyleGlass
+import com.music.orb.ui.components.orbExpressiveGlassContentColor
+import com.music.orb.ui.icons.OrbIcons
 import com.music.orb.ui.player.CanvasArtworkPlayer
 import com.music.orb.ui.player.NowPlayingLaunchOriginRegistry
 import com.music.orb.ui.theme.ArtworkPalette
 import com.music.orb.ui.theme.SystemBarIcons
 import com.music.orb.ui.theme.rememberArtworkPalette
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -158,7 +200,7 @@ private val SLEEVE_SHAPE = RoundedCornerShape(12.dp)
 private val PILL_SHAPE = RoundedCornerShape(12.dp)
 private val HEADER_GUTTER = PAGE_GUTTER + 14.dp
 private val RELEASE_BADGE_FOOTPRINT = 32.dp
-private val RELEASE_BADGE_HEIGHT = 18.dp
+private val RELEASE_BADGE_HEIGHT = 14.5.dp
 
 // Album / playlist header spacing approved for release pages.
 private val HEADER_DROP = 150.dp
@@ -172,8 +214,7 @@ private val ARTIST_HEADER_DROP = 75.dp
 // the Now Playing treatment: only the colours touching the artwork's lower edge
 // are continued downward, then progressively blurred into one solid surface.
 // No enlarged/duplicated artwork is drawn behind the page content.
-private val DETAIL_MERGE_BAND = 360.dp
-private val DETAIL_MERGE_BLUR = 44.dp
+private val DETAIL_MERGE_BAND = ARTWORK_MERGE_BAND
 private val DETAIL_COLOR_FLOW_HEIGHT = 250.dp
 private val DETAIL_COLOR_FLOW_OVERLAP = 76.dp
 
@@ -186,8 +227,8 @@ private val DETAIL_TABLET_ARTWORK_MIN = 320.dp
 private val DETAIL_TABLET_CONTENT_MIN = 360.dp
 private val DETAIL_TABLET_GAP = 32.dp
 private val DETAIL_TABLET_END_GUTTER = 20.dp
-private val DETAIL_TABLET_COLOR_FLOW_WIDTH = 250.dp
-private val DETAIL_TABLET_COLOR_FLOW_OVERLAP = DETAIL_COLOR_FLOW_OVERLAP
+private val DETAIL_TABLET_COLOR_FLOW_WIDTH = ARTWORK_LANDSCAPE_FLOW_WIDTH
+private val DETAIL_TABLET_COLOR_FLOW_OVERLAP = ARTWORK_LANDSCAPE_FLOW_OVERLAP
 private val DETAIL_TABLET_MERGE_OVERLAP = DETAIL_MERGE_BAND * 0.46f
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -199,9 +240,12 @@ fun DetailScreen(
     onSongSwipe: (Song) -> Unit,
     onSongAddToQueue: (Song) -> Unit = onSongSwipe,
     onSongPlayNext: (Song) -> Unit = onSongSwipe,
+    onCollectionPlayNext: (List<Song>) -> Unit = { tracks -> tracks.asReversed().forEach(onSongPlayNext) },
+    onCollectionAddToQueue: (List<Song>) -> Unit = { tracks -> tracks.forEach(onSongAddToQueue) },
     onShuffle: (List<Song>) -> Unit,
     onSectionItemClick: (ShelfItem) -> Unit,
     onDownloadAll: (List<Song>) -> Unit,
+    onDownloadPlaylist: ((List<Song>) -> Unit)? = null,
     onArtistClick: (String, String) -> Unit,
     onAddSuggested: (Song) -> Unit,
     contentPadding: PaddingValues,
@@ -220,6 +264,32 @@ fun DetailScreen(
     onToggleArtistBlock: (() -> Unit)? = null,
 ) {
     val songs = (page.songs as? UiState.Success)?.data.orEmpty()
+    var albumInfoExpanded by remember(page.browseId) { mutableStateOf(false) }
+    var albumRateRequest by remember(page.browseId) { mutableIntStateOf(0) }
+    // The community score belongs to the screen, never to a LazyColumn item:
+    // scrolling the release header off-screen must not discard the fetched score
+    // or trigger a fresh server request when that header becomes visible again.
+    val albumRatingRevision by AlbumRatingStore.revision.collectAsStateWithLifecycle()
+    var albumCommunityRating by remember(page.browseId, page.type) { mutableStateOf<Float?>(null) }
+    LaunchedEffect(page.browseId, page.type, albumRatingRevision) {
+        if (page.type != BrowseType.ALBUM) return@LaunchedEffect
+        try {
+            val updated = CommunityRatingRepository.albumAverage(page.browseId)
+            // Keep the last displayed score during transient offline/RPC failures.
+            // In particular, never blank the badge while a background refresh runs.
+            if (updated != null || albumCommunityRating == null) {
+                albumCommunityRating = updated
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // Ratings are saved separately; a public-average fetch failure does
+            // not mean the user's personal album rating failed to persist.
+        }
+    }
+    // Window coordinates of the visible star in the release badge. The rating
+    // sheet needs this anchor even when the expandable album info is collapsed.
+    var releaseRatingStarBoundsOnScreen by remember(page.browseId) { mutableStateOf<Rect?>(null) }
     val isArtist = page.type == BrowseType.ARTIST
     val directionalQueueSwipe = page.type == BrowseType.ALBUM || page.type == BrowseType.PLAYLIST
 
@@ -288,7 +358,7 @@ fun DetailScreen(
     val detailSurfaceColor = detailBottomEdgeField.solidColor
     val isReleaseCollection = page.type == BrowseType.ALBUM || page.type == BrowseType.PLAYLIST
     val absoluteContentColor = bestForegroundForArtworkSurface(detailSurfaceColor)
-    val releaseForegrounds = if (isReleaseCollection) {
+    val releaseForegrounds = if (isReleaseCollection || page.type == BrowseType.ARTIST) {
         artworkSurfaceForegrounds(detailSurfaceColor)
     } else {
         null
@@ -364,7 +434,7 @@ fun DetailScreen(
     val density = LocalDensity.current
     val artHeightPx = with(density) { artworkHeight.toPx() }
     val statusBarHeightPx = with(density) {
-        WindowInsets.statusBars
+        WindowInsets.statusBarsIgnoringVisibility
             .asPaddingValues()
             .calculateTopPadding()
             .toPx()
@@ -399,7 +469,15 @@ fun DetailScreen(
         navigationDark = navigationBarDarkIcons,
     )
 
-    Box(modifier.fillMaxSize()) {
+    PullToRefresh(
+        refreshing = refreshing,
+        onRefresh = onRefresh,
+        state = pullState,
+        pageColor = detailSurfaceColor,
+        indicatorColor = palette.accent,
+        modifier = modifier.fillMaxSize(),
+    ) {
+    Box(Modifier.fillMaxSize()) {
         PageBackground(
             page = page,
             palette = palette,
@@ -426,12 +504,6 @@ fun DetailScreen(
             tabletArtworkSize = tabletArtworkSize,
         )
 
-        PullToRefresh(
-            refreshing = refreshing,
-            onRefresh = onRefresh,
-            state = pullState,
-            modifier = Modifier.fillMaxSize(),
-        ) {
         LazyColumn(
             state = listState,
             modifier = Modifier
@@ -440,7 +512,10 @@ fun DetailScreen(
                     start = tabletContentStart,
                     end = if (isTabletLandscape) DETAIL_TABLET_END_GUTTER else 0.dp,
                 ),
-            contentPadding = PaddingValues(bottom = contentPadding.calculateBottomPadding()),
+            contentPadding = PaddingValues(
+                top = if (isTabletLandscape) WindowInsets.statusBarsIgnoringVisibility.asPaddingValues().calculateTopPadding() + 88.dp else 0.dp,
+                bottom = contentPadding.calculateBottomPadding(),
+            ),
         ) {
             item(key = "header") {
                 if (isArtist) {
@@ -464,12 +539,37 @@ fun DetailScreen(
                         onPlay = { onSongClick(songs, 0) },
                         onShuffle = { onShuffle(songs) },
                         onDownload = onDownloadAll.takeUnless { page.browseId.startsWith("local:") },
+                        onDownloadPlaylist = onDownloadPlaylist.takeIf { page.type == BrowseType.PLAYLIST },
                         onArtistClick = onArtistClick,
                         onToggleLibrary = onToggleLibrary,
                         albumPlaybackBlocked = albumPlaybackBlocked,
                         onToggleAlbumPlaybackBlock = onToggleAlbumPlaybackBlock,
+                        onAlbumInfo = { albumInfoExpanded = !albumInfoExpanded },
+                        onRateAlbum = { albumRateRequest++ },
+                        onRatingBadgePosition = { releaseRatingStarBoundsOnScreen = it },
+                        albumRating = albumCommunityRating,
+                        onCollectionPlayNext = onCollectionPlayNext,
+                        onCollectionAddToQueue = onCollectionAddToQueue,
                         listState = listState,
                     )
+                }
+            }
+
+            if (page.type == BrowseType.ALBUM) {
+                item(key = "album_info") {
+                    AnimatedVisibility(
+                        visible = albumInfoExpanded,
+                        enter = expandVertically() + fadeIn(),
+                        exit = shrinkVertically() + fadeOut(),
+                    ) {
+                        AlbumInfoPanel(
+                            page = page,
+                            artist = page.headerArtists.firstOrNull()?.name ?: songs.firstOrNull()?.artist.orEmpty(),
+                            palette = palette,
+                            blocked = albumPlaybackBlocked,
+                            onToggleBlock = onToggleAlbumPlaybackBlock,
+                        )
+                    }
                 }
             }
 
@@ -484,7 +584,7 @@ fun DetailScreen(
                             actionModifier = detailItemTopSegmentModifier(
                                 listState = listState,
                                 itemKey = "actions",
-                                segmentHeight = 50.dp,
+                                segmentHeight = 56.dp,
                             ),
                             palette = palette,
                             onPlay = { onSongClick(songs, 0) },
@@ -577,6 +677,8 @@ fun DetailScreen(
                                     subtitleColor = palette.onBackgroundVariant,
                                     showSearchBadges = true,
                                     searchBadgesPreResolved = true,
+                                    badgePageColor = palette.background,
+                                    transparentDetailBadges = true,
                                 )
                             }
                         } else {
@@ -606,6 +708,8 @@ fun DetailScreen(
                                         subtitleColor = palette.onBackgroundVariant,
                                         showSearchBadges = true,
                                         searchBadgesPreResolved = true,
+                                        badgePageColor = palette.background,
+                                        transparentDetailBadges = true,
                                     )
                                 }
                             } else {
@@ -624,6 +728,8 @@ fun DetailScreen(
                                     subtitleColor = palette.onBackgroundVariant,
                                     showSearchBadges = true,
                                     searchBadgesPreResolved = true,
+                                    badgePageColor = palette.background,
+                                    transparentDetailBadges = true,
                                 )
                             }
                         }
@@ -687,6 +793,21 @@ fun DetailScreen(
                     }
                 }
             }
+        }
+        // Keep the album rating dialog composition independent from LazyColumn
+        // item visibility, so the Action Button can open it even when the
+        // information section is collapsed or scrolled out of composition.
+        if (page.type == BrowseType.ALBUM) {
+            AlbumInfoPanel(
+                page = page,
+                artist = page.headerArtists.firstOrNull()?.name ?: songs.firstOrNull()?.artist.orEmpty(),
+                palette = palette,
+                blocked = albumPlaybackBlocked,
+                onToggleBlock = onToggleAlbumPlaybackBlock,
+                showDetails = false,
+                rateRequest = albumRateRequest,
+                ratingLandingTargetOnScreen = releaseRatingStarBoundsOnScreen,
+            )
         }
         }
     }
@@ -848,12 +969,23 @@ private fun ReleaseHeader(
     onPlay: () -> Unit,
     onShuffle: () -> Unit,
     onDownload: ((List<Song>) -> Unit)?,
+    onDownloadPlaylist: ((List<Song>) -> Unit)?,
     onArtistClick: (String, String) -> Unit,
     onToggleLibrary: (() -> Unit)?,
     albumPlaybackBlocked: Boolean,
     onToggleAlbumPlaybackBlock: (() -> Unit)?,
+    onAlbumInfo: () -> Unit,
+    onRateAlbum: () -> Unit,
+    onRatingBadgePosition: (Rect) -> Unit,
+    albumRating: Float?,
+    onCollectionPlayNext: (List<Song>) -> Unit,
+    onCollectionAddToQueue: (List<Song>) -> Unit,
     listState: LazyListState,
 ) {
+    val context = LocalContext.current
+    val ratingAnchorView = LocalView.current
+    var actionsVisible by remember(page.browseId) { mutableStateOf(false) }
+    var shareVisible by remember(page.browseId) { mutableStateOf(false) }
     val (subtitleCredit, meta) =
         page.headerLines(trackCount, songsCountText, albumLabel, playlistLabel, artistLabel)
     val firstSong = songs.firstOrNull()
@@ -866,8 +998,9 @@ private fun ReleaseHeader(
     }
     val isCollection =
         page.type == BrowseType.ALBUM || page.type == BrowseType.PLAYLIST
-    val context = LocalContext.current
     val downloadScope = rememberCoroutineScope()
+    val offlinePlaylists by com.music.orb.download.OfflinePlaylistStore.playlists.collectAsStateWithLifecycle()
+    val isOfflinePlaylistSaved = page.type == BrowseType.PLAYLIST && offlinePlaylists.any { it.browseId == page.browseId }
     var collectionDownloadConfirm by remember(page.browseId) { mutableStateOf<CollectionDownloadConfirm?>(null) }
     val badges = rememberCollectionBadges(
         type = page.type,
@@ -890,7 +1023,8 @@ private fun ReleaseHeader(
         songs.asSequence().map(Song::videoId).filter(String::isNotBlank).distinct().toList()
     }
     val collectionDownloadInProgress = isCollection && collectionTrackIds.any { id ->
-        activeDownloads[id] is DownloadState.Queued || activeDownloads[id] is DownloadState.Running
+        activeDownloads[id] is DownloadState.Queued || activeDownloads[id] is DownloadState.Resolving ||
+            activeDownloads[id] is DownloadState.Running
     }
     val collectionFullyDownloaded = isCollection &&
         collectionTrackIds.isNotEmpty() &&
@@ -960,15 +1094,55 @@ private fun ReleaseHeader(
                             .padding(horizontal = HEADER_GUTTER),
                         contentAlignment = Alignment.Center,
                     ) {
-                        ReleaseBadges(
-                            isExplicit = badges.isExplicit,
-                            isLossless = badges.isLossless,
-                            isHiResLossless = badges.isHiResLossless,
-                            isHiQuality = badges.isHiQuality,
-                            color = palette.onBackgroundVariant,
-                            centered = true,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            ReleaseBadges(
+                                isExplicit = badges.isExplicit,
+                                isLossless = badges.isLossless,
+                                isHiResLossless = badges.isHiResLossless,
+                                isHiQuality = badges.isHiQuality,
+                                color = palette.onBackground,
+                                plainExplicit = page.type == BrowseType.ALBUM,
+                                glassPageColor = palette.background,
+                                transparentLikeNowPlaying = true,
+                            )
+                            if (page.type == BrowseType.ALBUM || albumRating != null) {
+                                Surface(
+                                    shape = RoundedCornerShape(5.dp),
+                                    color = Color.Transparent,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(5.dp))
+                                        .orbBadgeGlassSurface(
+                                            palette.background,
+                                            cornerRadius = 5.dp,
+                                            contentColorHint = palette.onBackground,
+                                            transparentLikeNowPlaying = true,
+                                        ),
+                                    contentColor = palette.onBackground,
+                                ) {
+                                    Row(Modifier.height(RELEASE_BADGE_HEIGHT).padding(horizontal = 5.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                        verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Rounded.Star, contentDescription = null,
+                                            modifier = Modifier.size(12.dp)
+                                                .onGloballyPositioned { coordinates ->
+                                                    val bounds = coordinates.boundsInWindow()
+                                                    val screenOrigin = IntArray(2)
+                                                    ratingAnchorView.rootView.getLocationOnScreen(screenOrigin)
+                                                    // Capture exactly the on-screen 12dp star,
+                                                    // including size, for the rating flight.
+                                                    onRatingBadgePosition(Rect(
+                                                        bounds.left + screenOrigin[0],
+                                                        bounds.top + screenOrigin[1],
+                                                        bounds.right + screenOrigin[0],
+                                                        bounds.bottom + screenOrigin[1],
+                                                    ))
+                                                })
+                                        Text(albumRating?.let { String.format(Locale.getDefault(), "%.1f", it) } ?: "—",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 12.sp))
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -992,86 +1166,66 @@ private fun ReleaseHeader(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(
-                                    horizontal = if (onToggleAlbumPlaybackBlock != null) 12.dp else HEADER_GUTTER,
+                                    horizontal = if (page.type == BrowseType.PLAYLIST) 10.dp else if (onToggleAlbumPlaybackBlock != null) 12.dp else HEADER_GUTTER,
                                 ),
                             horizontalArrangement = Arrangement.spacedBy(
-                                if (onToggleAlbumPlaybackBlock != null) 8.dp else 10.dp,
+                                if (page.type == BrowseType.PLAYLIST) 6.dp else if (onToggleAlbumPlaybackBlock != null) 8.dp else 10.dp,
                                 Alignment.CenterHorizontally,
                             ),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            if (library != null) {
+                            if (page.type == BrowseType.ALBUM) {
                                 CircleIconButton(
-                                    icon = if (library.saved) BitChordIcons.Check else BitChordIcons.Plus,
+                                    icon = if (library?.saved == true) OrbIcons.Check else OrbIcons.Plus,
                                     contentDescription = stringResource(
-                                        if (library.saved) R.string.song_action_remove_from_library
+                                        if (library?.saved == true) R.string.song_action_remove_from_library
                                         else R.string.song_action_add_to_library,
                                     ),
                                     palette = palette,
+                                    glass = true,
+                                    controlSize = 40.dp,
+                                    enabled = onToggleLibrary != null && page.library != null,
+                                    selected = library?.saved == true,
                                     onClick = { onToggleLibrary?.invoke() },
                                 )
                             }
                             CircleIconButton(
-                                icon = BitChordIcons.Shuffle,
-                                contentDescription = "Shuffle",
+                                icon = OrbIcons.Shuffle,
+                                contentDescription = stringResource(R.string.btn_shuffle),
                                 palette = palette,
+                                glass = true,
+                                controlSize = if (page.type == BrowseType.PLAYLIST) 46.dp else 44.dp,
                                 onClick = onShuffle,
                             )
                             PlayPill(
                                 palette = palette,
+                                glass = true,
                                 onClick = onPlay,
-                                horizontalPadding = when {
-                                    onToggleAlbumPlaybackBlock != null -> 18.dp
-                                    library != null && onDownload != null -> 24.dp
-                                    else -> 32.dp
+                                modifier = Modifier.width(if (page.type == BrowseType.PLAYLIST) 112.dp else 104.dp),
+                                controlHeight = if (page.type == BrowseType.PLAYLIST) 56.dp else 52.dp,
+                                horizontalPadding = 10.dp,
+                            )
+                            if (page.type == BrowseType.ALBUM) {
+                                CircleIconButton(
+                                    icon = Icons.Rounded.Info,
+                                    contentDescription = stringResource(R.string.album_info),
+                                    palette = palette,
+                                    glass = true,
+                                    controlSize = 44.dp,
+                                    onClick = { OrbHaptics.perform(context, OrbHaptics.Kind.ACTION); onAlbumInfo() },
+                                )
+                            }
+                            CircleIconButton(
+                                icon = Icons.Rounded.MoreVert,
+                                contentDescription = stringResource(R.string.collection_actions_more),
+                                palette = palette,
+                                glass = true,
+                                controlSize = 40.dp,
+                                onClick = {
+                                    OrbHaptics.perform(context, OrbHaptics.Kind.ACTION)
+                                    actionsVisible = true
                                 },
                             )
-                            onDownload?.let { download ->
-                                val downloadIcon = when {
-                                    collectionFullyDownloaded -> Icons.Rounded.DownloadDone
-                                    collectionDownloadInProgress -> Icons.Rounded.Downloading
-                                    else -> BitChordIcons.Download
-                                }
-                                val downloadDescription = when {
-                                    collectionFullyDownloaded -> stringResource(R.string.song_action_saved_to_downloads)
-                                    collectionDownloadInProgress -> stringResource(R.string.song_action_downloading)
-                                    else -> "Download all"
-                                }
-                                CircleIconButton(
-                                    icon = downloadIcon,
-                                    contentDescription = downloadDescription,
-                                    palette = palette,
-                                    // A second tap is meaningful: while active it
-                                    // offers cancellation; when complete it offers
-                                    // removal. Do not disable the affordance in
-                                    // either state.
-                                    enabled = true,
-                                    onClick = {
-                                        collectionDownloadConfirm = when {
-                                            collectionDownloadInProgress -> CollectionDownloadConfirm.CANCEL
-                                            collectionFullyDownloaded -> CollectionDownloadConfirm.REMOVE
-                                            else -> {
-                                                download(songs)
-                                                null
-                                            }
-                                        }
-                                    },
-                                )
-                            }
-                            if (page.type == BrowseType.ALBUM && onToggleAlbumPlaybackBlock != null) {
-                                CircleIconButton(
-                                    icon = Icons.Rounded.Block,
-                                    contentDescription = stringResource(
-                                        if (albumPlaybackBlocked) {
-                                            R.string.album_allow_playback
-                                        } else {
-                                            R.string.album_do_not_play
-                                        },
-                                    ),
-                                    palette = palette,
-                                    onClick = onToggleAlbumPlaybackBlock,
-                                )
-                            }
                         }
                     } else {
                         // Draw the loading controls *inside the exact slot* occupied
@@ -1079,8 +1233,10 @@ private fun ReleaseHeader(
                         // this slot and then drew a second skeleton below the header,
                         // which made the shadows jump upward when loading finished.
                         ReleaseActionsPlaceholder(
-                            showLibrary = onToggleLibrary != null,
-                            showDownload = onDownload != null,
+                            showLibrary = onToggleLibrary != null && page.type == BrowseType.ALBUM,
+                            showDownload = false,
+                            showPlaylistDownload = false,
+                            isAlbum = page.type == BrowseType.ALBUM,
                         )
                     }
                 }
@@ -1088,10 +1244,72 @@ private fun ReleaseHeader(
         }
     }
 
+    if (actionsVisible) {
+        val artistLink = page.headerArtists.firstOrNull()
+        val artistId = artistLink?.artistId ?: firstSong?.artistId
+        val artistName = artistLink?.name ?: firstSong?.artist.orEmpty()
+        CollectionActionsSheet(
+            page = page,
+            pageSurfaceColor = palette.background,
+            pagePrimaryTextColor = palette.onBackground,
+            pageSecondaryTextColor = palette.onBackgroundVariant,
+            savedInLibrary = page.library?.saved == true,
+            libraryActionAvailable = onToggleLibrary != null && page.library != null,
+            ratingAvailable = onToggleLibrary != null,
+            artistAvailable = !artistId.isNullOrBlank() && artistName.isNotBlank(),
+            onRate = { actionsVisible = false; onRateAlbum() },
+            onDownload = {
+                actionsVisible = false
+                if (page.type == BrowseType.PLAYLIST && onDownloadPlaylist != null) {
+                    onDownloadPlaylist(songs)
+                } else {
+                    onDownload?.invoke(songs)
+                }
+            },
+            onToggleLibrary = { actionsVisible = false; onToggleLibrary?.invoke() },
+            onPlayNext = { actionsVisible = false; if (songs.isNotEmpty()) onCollectionPlayNext(songs) },
+            onAddToQueue = { actionsVisible = false; if (songs.isNotEmpty()) onCollectionAddToQueue(songs) },
+            onOpenArtist = {
+                actionsVisible = false
+                if (!artistId.isNullOrBlank()) onArtistClick(artistId, artistName)
+            },
+            onShare = { actionsVisible = false; shareVisible = true },
+            onDismiss = { actionsVisible = false },
+        )
+    }
+    if (shareVisible) {
+        val sharingSong = Song(
+            videoId = page.browseId,
+            title = page.title,
+            artist = credit,
+            thumbnailUrl = page.thumbnailUrl,
+            albumName = if (page.type == BrowseType.ALBUM) albumLabel else playlistLabel,
+            isExplicit = page.isExplicit,
+        )
+        val collectionLink = if (page.type == BrowseType.PLAYLIST) {
+            "https://music.youtube.com/playlist?list=${android.net.Uri.encode(page.browseId.removePrefix("VL"))}"
+        } else {
+            "https://music.youtube.com/browse/${android.net.Uri.encode(page.browseId)}"
+        }
+        SongShareSheet(
+            song = sharingSong,
+            onDismiss = { shareVisible = false },
+            shareLinkOverride = collectionLink,
+            floatingTitleOverride = stringResource(
+                if (page.type == BrowseType.ALBUM) R.string.collection_share_album
+                else R.string.collection_share_playlist,
+            ),
+        )
+    }
+
     collectionDownloadConfirm?.let { action ->
         val cancelInProgress = action == CollectionDownloadConfirm.CANCEL
         AlertDialog(
             onDismissRequest = { collectionDownloadConfirm = null },
+            modifier = Modifier.orbGlassSurface(palette.background, cornerRadius = 28.dp),
+            containerColor = Color.Transparent,
+            tonalElevation = 0.dp,
+            shape = RoundedCornerShape(28.dp),
             title = {
                 Text(
                     stringResource(
@@ -1148,6 +1366,12 @@ private fun ArtistHeader(
     artHeight: Dp,
     listState: LazyListState,
 ) {
+    // The header is a public artist score, never the local device's personal ratings.
+    val revision by AlbumRatingStore.revision.collectAsStateWithLifecycle()
+    val average by produceState<Float?>(null, page.title, revision) {
+        value = runCatching { CommunityRatingRepository.artistAverage(page.title) }.getOrNull()
+    }
+
     Box(Modifier.fillMaxWidth()) {
         // Artist content needs less vertical drop than album / playlist
         // headers. Only the list content moves up; the hero artwork itself is
@@ -1174,16 +1398,63 @@ private fun ArtistHeader(
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
-            page.monthlyAudience?.takeIf { it.isNotBlank() }?.let { audience ->
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = localizedYouTubeMetadata(audience),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = palette.onBackgroundVariant,
-                    textAlign = TextAlign.Center,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+            Spacer(Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                val artistBadgeContent = palette.onBackground
+                page.monthlyAudience?.takeIf { it.isNotBlank() }?.let { audience ->
+                    Box(
+                        modifier = Modifier
+                            .weight(1f, fill = false)
+                            .height(RELEASE_BADGE_HEIGHT)
+                            .clip(RoundedCornerShape(5.dp))
+                            .orbBadgeGlassSurface(
+                                palette.background,
+                                cornerRadius = 5.dp,
+                                contentColorHint = artistBadgeContent,
+                                transparentLikeNowPlaying = true,
+                            )
+                            .padding(horizontal = 5.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = localizedYouTubeMetadata(audience),
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 12.sp),
+                            color = artistBadgeContent,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+                Row(
+                    modifier = Modifier
+                        .height(RELEASE_BADGE_HEIGHT)
+                        .clip(RoundedCornerShape(5.dp))
+                        .orbBadgeGlassSurface(
+                            palette.background,
+                            cornerRadius = 5.dp,
+                            contentColorHint = artistBadgeContent,
+                            transparentLikeNowPlaying = true,
+                        )
+                        .padding(horizontal = 5.dp),
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        Icons.Rounded.Star,
+                        contentDescription = null,
+                        tint = artistBadgeContent,
+                        modifier = Modifier.size(12.dp),
+                    )
+                    Text(
+                        average?.let { String.format(Locale.getDefault(), "%.1f", it) } ?: "—",
+                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 12.sp),
+                        color = artistBadgeContent,
+                    )
+                }
             }
         }
     }
@@ -1213,8 +1484,7 @@ private fun PageBackground(
             .hazeSource(hazeState),
     ) {
         // The entire page settles into the colour sampled from the physical
-        // artwork edge. The artwork itself is never enlarged/cropped to make
-        // this surface: only the generated edge field continues into content.
+        // artwork edge. A generated edge field continues into the content pane.
         Box(
             Modifier
                 .matchParentSize()
@@ -1223,17 +1493,19 @@ private fun PageBackground(
 
         if (isTabletLandscape) {
             // Large-screen landscape mirrors the media layouts in the reference:
-            // one maximised, complete artwork pane and one independent content
+            // one full-height artwork pane and one independent content
             // pane. The cover is fixed while the list on the right scrolls.
             Box(
                 Modifier
                     .align(Alignment.TopStart)
-                    .size(tabletArtworkSize),
+                    .width(tabletArtworkSize)
+                    .fillMaxHeight()
+                    .landscapeArtworkFade(),
             ) {
                 AsyncImage(
                     model = artworkUrl,
                     contentDescription = null,
-                    contentScale = ContentScale.Fit,
+                    contentScale = ContentScale.Crop,
                     alignment = Alignment.TopStart,
                     modifier = Modifier.matchParentSize(),
                 )
@@ -1257,19 +1529,13 @@ private fun PageBackground(
                     contentScale = ContentScale.FillBounds,
                     modifier = Modifier
                         .width(DETAIL_TABLET_COLOR_FLOW_WIDTH)
-                        .height(tabletArtworkSize)
+                        .fillMaxHeight()
                         .offset(x = tabletArtworkSize - DETAIL_TABLET_COLOR_FLOW_OVERLAP)
                         .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
                         .drawWithContent {
                             drawContent()
                             drawRect(
-                                brush = Brush.horizontalGradient(
-                                    0.00f to Color.Transparent,
-                                    0.16f to Color.White.copy(alpha = 0.30f),
-                                    0.30f to Color.White.copy(alpha = 0.82f),
-                                    0.42f to Color.White,
-                                    1.00f to Color.White,
-                                ),
+                                brush = artworkLandscapeFlowMask(),
                                 blendMode = BlendMode.DstIn,
                             )
                         },
@@ -1361,13 +1627,10 @@ private fun MergeBand(
     isTabletPortrait: Boolean,
     tabletArtworkSize: Dp,
 ) {
-    val reduceDynamicBlur by AppSettings.reduceDynamicBlur.collectAsStateWithLifecycle()
-    if (reduceDynamicBlur) return
-
     val geometry = if (isTabletLandscape) {
         Modifier
             .width(DETAIL_MERGE_BAND)
-            .height(tabletArtworkSize)
+            .fillMaxHeight()
             .offset(x = tabletArtworkSize - DETAIL_TABLET_MERGE_OVERLAP)
     } else {
         Modifier
@@ -1389,35 +1652,11 @@ private fun MergeBand(
             }
     }
 
-    Box(
-        geometry.hazeEffect(hazeState) {
-            canDrawArea = { true }
-            blurRadius = DETAIL_MERGE_BLUR
-            noiseFactor = 0f
-            tints = listOf(HazeTint(Color.Transparent))
-            backgroundColor = surfaceColor
-            mask = if (isTabletLandscape) {
-                Brush.horizontalGradient(
-                    0.00f to Color.Transparent,
-                    0.10f to Color.Black.copy(alpha = 0.18f),
-                    0.26f to Color.Black.copy(alpha = 0.72f),
-                    0.42f to Color.Black,
-                    0.72f to Color.Black,
-                    0.90f to Color.Black.copy(alpha = 0.46f),
-                    1.00f to Color.Transparent,
-                )
-            } else {
-                Brush.verticalGradient(
-                    0.00f to Color.Transparent,
-                    0.10f to Color.Black.copy(alpha = 0.18f),
-                    0.26f to Color.Black.copy(alpha = 0.72f),
-                    0.42f to Color.Black,
-                    0.72f to Color.Black,
-                    0.90f to Color.Black.copy(alpha = 0.46f),
-                    1.00f to Color.Transparent,
-                )
-            }
-        },
+    ArtworkMergeBand(
+        surfaceColor = surfaceColor,
+        hazeState = hazeState,
+        horizontal = isTabletLandscape,
+        modifier = geometry,
     )
 }
 
@@ -1467,19 +1706,29 @@ private fun ArtistActionsPlaceholder(
 private fun ReleaseActionsPlaceholder(
     showLibrary: Boolean,
     showDownload: Boolean,
+    showPlaylistDownload: Boolean = false,
+    isAlbum: Boolean = false,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = HEADER_GUTTER)
+            .padding(horizontal = if (!isAlbum) 10.dp else HEADER_GUTTER)
             .graphicsLayer { alpha = 0.40f },
-        horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
+        horizontalArrangement = Arrangement.spacedBy(if (!isAlbum) 6.dp else 10.dp, Alignment.CenterHorizontally),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (showLibrary) ShimmerBox(Modifier.size(50.dp), CircleShape)
-        ShimmerBox(Modifier.size(50.dp), CircleShape)
-        ShimmerBox(Modifier.width(130.dp).height(50.dp), CircleShape)
-        if (showDownload) ShimmerBox(Modifier.size(50.dp), CircleShape)
+        if (showLibrary) ShimmerBox(Modifier.size(40.dp), CircleShape)
+        ShimmerBox(Modifier.size(if (isAlbum) 44.dp else 46.dp), CircleShape)
+        ShimmerBox(
+            Modifier.width(if (isAlbum) 104.dp else 112.dp)
+                .height(if (isAlbum) 52.dp else 56.dp),
+            CircleShape,
+        )
+        if (isAlbum) {
+            ShimmerBox(Modifier.size(44.dp), CircleShape)
+            ShimmerBox(Modifier.size(40.dp), CircleShape)
+        } else ShimmerBox(Modifier.size(40.dp), CircleShape)
+        if (showPlaylistDownload) ShimmerBox(Modifier.size(40.dp), CircleShape)
     }
 }
 
@@ -1516,19 +1765,24 @@ private fun ArtistActionArea(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         CircleIconButton(
-            icon = BitChordIcons.Shuffle,
-            contentDescription = "Shuffle",
+            icon = OrbIcons.Shuffle,
+            contentDescription = stringResource(R.string.btn_shuffle),
             palette = palette,
+            controlSize = 46.dp,
             onClick = onShuffle,
         )
         PlayPill(
             palette = palette,
+            modifier = Modifier.width(104.dp),
+            controlHeight = 56.dp,
+            horizontalPadding = 10.dp,
             onClick = onPlay,
         )
         CircleIconButton(
             icon = Icons.Rounded.Info,
             contentDescription = stringResource(R.string.artist_info),
             palette = palette,
+            controlSize = 46.dp,
             onClick = { expanded = !expanded },
         )
     }
@@ -1566,57 +1820,24 @@ private fun ArtistInfoPanel(
         info == null -> stringResource(R.string.artist_info_unavailable)
         else -> ""
     }
-    var typedText by remember(info?.extract) {
-        mutableStateOf(if (info == null) staticText else "")
-    }
-    var typingFinished by remember(info?.extract) { mutableStateOf(info == null) }
-
-    LaunchedEffect(info?.extract, loading) {
-        val biography = info?.extract
-        if (biography.isNullOrBlank()) {
-            typedText = staticText
-            typingFinished = true
-            return@LaunchedEffect
-        }
-
-        typedText = ""
-        typingFinished = false
-        // Reveal a few characters at a time: visibly typewritten, but still
-        // quick enough that even a long Wikipedia intro is readable in about a
-        // second rather than making the user wait through a character-by-character crawl.
-        val chunkSize = (biography.length / 160).coerceIn(2, 6)
-        var end = 0
-        while (end < biography.length) {
-            end = (end + chunkSize).coerceAtMost(biography.length)
-            typedText = biography.substring(0, end)
-            if (end < biography.length) delay(6L)
-        }
-        typingFinished = true
-    }
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(start = HEADER_GUTTER, end = HEADER_GUTTER, top = 16.dp),
     ) {
-        Text(
-            text = if (info != null) typedText else staticText,
-            style = MaterialTheme.typography.bodyMedium,
+        StableTypewriterText(
+            text = info?.extract ?: staticText,
+            animate = !loading && info != null,
             color = palette.onBackground,
         )
-        AnimatedVisibility(
-            visible = info != null && typingFinished,
-            enter = fadeIn(),
-            exit = fadeOut(),
-        ) {
-            Column {
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    text = stringResource(R.string.artist_info_source),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = palette.onBackgroundVariant,
-                )
-            }
+        if (info != null) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = stringResource(R.string.artist_info_source),
+                style = MaterialTheme.typography.labelSmall,
+                color = palette.onBackgroundVariant,
+            )
         }
         if (onToggleArtistLike != null || onToggleArtistBlock != null) {
             Spacer(Modifier.height(16.dp))
@@ -1659,18 +1880,27 @@ private fun ArtistPreferenceIconButton(
     palette: ArtworkPalette,
     onClick: () -> Unit,
 ) {
-    val surface = if (selected) palette.onBackground else palette.onBackground.copy(alpha = 0.10f)
-    val content = if (selected) bestForegroundForArtworkSurface(surface) else palette.onBackground
+    // Release-page actions inherit the same foreground used by the page title/body.
+    // Expressive Glass defines the material, while the page palette defines the glyph.
+    val content = palette.onBackground
+    val iconTint = if (selected) Color.Red else content
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.92f else 1f,
+        animationSpec = spring(dampingRatio = 0.72f, stiffness = 420f),
+        label = "artistPreferenceGlassScale",
+    )
     Box(
         modifier = Modifier
             .size(46.dp)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(RoundedCornerShape(14.dp))
-            .background(surface)
-            .border(0.5.dp, palette.onBackground.copy(alpha = 0.22f), RoundedCornerShape(14.dp))
-            .clickable(onClick = onClick),
+            .albumGlassSurface(palette.background, cornerRadius = 14.dp, transparentLikeNowPlaying = true)
+            .clickable(interactionSource = interactionSource, indication = null, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(icon, contentDescription = contentDescription, tint = content, modifier = Modifier.size(20.dp))
+        Icon(icon, contentDescription = contentDescription, tint = iconTint, modifier = Modifier.size(20.dp))
     }
 }
 
@@ -1683,15 +1913,27 @@ private fun ArtistPreferenceButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val surface = if (selected) palette.onBackground else palette.onBackground.copy(alpha = 0.10f)
-    val content = if (selected) bestForegroundForArtworkSurface(surface) else palette.onBackground
+    // Keep action labels/icons chromatically continuous with the artist page text.
+    val content = palette.onBackground
+    val buttonShape = if (selected) CircleShape else RoundedCornerShape(14.dp)
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.96f else 1f,
+        animationSpec = spring(dampingRatio = 0.74f, stiffness = 390f),
+        label = "artistPreferencePillGlassScale",
+    )
     Row(
         modifier = modifier
             .height(46.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .background(surface)
-            .border(0.5.dp, palette.onBackground.copy(alpha = 0.14f), RoundedCornerShape(14.dp))
-            .clickable(onClick = onClick)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .clip(buttonShape)
+            .albumGlassSurface(
+                palette.background,
+                cornerRadius = if (selected) null else 14.dp,
+                transparentLikeNowPlaying = true,
+            )
+            .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
             .padding(horizontal = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center,
@@ -1708,30 +1950,34 @@ private fun PlayPill(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     horizontalPadding: Dp = 32.dp,
+    controlHeight: Dp = 50.dp,
+    glass: Boolean = true,
 ) {
-    // Primary playback control always uses the strongest accessible contrast
-    // against the artwork-derived page surface: white on dark pages, black on
-    // light pages. Its glyph/text then use the opposite foreground.
-    val buttonSurface = palette.onBackground
-    val buttonContent = bestForegroundForArtworkSurface(buttonSurface)
+    // Retain the private caller signature while all detail pages share the
+    // same lightweight transparent glass as Now Playing.
+    @Suppress("UNUSED_VARIABLE") val keepGlassParameter = glass
+    val buttonContent = palette.onBackground
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.96f else 1f,
+        animationSpec = spring(dampingRatio = 0.70f, stiffness = 410f),
+        label = "releasePlayExpressiveGlassScale",
+    )
 
     Row(
         modifier = modifier
-            .height(50.dp)
+            .height(controlHeight)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(CircleShape)
-            .background(buttonSurface)
-            .border(
-                width = 0.5.dp,
-                color = buttonContent.copy(alpha = 0.12f),
-                shape = CircleShape,
-            )
-            .clickable(onClick = onClick)
+            .albumGlassSurface(palette.background, transparentLikeNowPlaying = true)
+            .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
             .padding(horizontal = horizontalPadding),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
-            imageVector = BitChordIcons.Play,
+            imageVector = OrbIcons.Play,
             contentDescription = null,
             tint = buttonContent,
             modifier = Modifier.size(18.dp),
@@ -1740,6 +1986,8 @@ private fun PlayPill(
         Text(
             text = stringResource(R.string.album_play),
             style = MaterialTheme.typography.titleMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
             color = buttonContent,
         )
     }
@@ -1751,26 +1999,34 @@ private fun CircleIconButton(
     contentDescription: String,
     palette: ArtworkPalette,
     enabled: Boolean = true,
+    selected: Boolean = false,
+    controlSize: Dp = 50.dp,
+    glass: Boolean = true,
     onClick: () -> Unit,
 ) {
-    // Secondary actions remain visually subordinate while still using the
-    // correct black/white foreground for the final artwork-derived surface.
+    // Retain transparent glass even for selected/blocked toggles.
+    @Suppress("UNUSED_VARIABLE") val keepGlassParameter = glass
     val buttonContent = palette.onBackground
-    val buttonSurface = buttonContent.copy(
-        alpha = if (bestForegroundForArtworkSurface(buttonContent) == Color.Black) 0.14f else 0.10f,
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.90f else 1f,
+        animationSpec = spring(dampingRatio = 0.68f, stiffness = 440f),
+        label = "releaseIconExpressiveGlassScale",
     )
 
     Box(
         modifier = Modifier
-            .size(50.dp)
+            .size(controlSize)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(CircleShape)
-            .background(buttonSurface)
-            .border(
-                width = 0.5.dp,
-                color = buttonContent.copy(alpha = 0.12f),
-                shape = CircleShape,
-            )
-            .clickable(enabled = enabled, onClick = onClick),
+            .albumGlassSurface(palette.background, transparentLikeNowPlaying = true)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                enabled = enabled,
+                onClick = onClick,
+            ),
         contentAlignment = Alignment.Center,
     ) {
         Icon(
@@ -1862,7 +2118,9 @@ private fun CompactSongRow(
                         isLossless = quality.isLossless,
                         isHiResLossless = quality.isHiResLossless,
                         isHiQuality = quality.isHiQuality,
-                        color = palette.onBackgroundVariant,
+                        color = palette.onBackground,
+                        glassPageColor = palette.background,
+                        transparentLikeNowPlaying = true,
                     )
                 }
             }
@@ -1896,7 +2154,7 @@ private fun CompactSongRow(
         ) {
             Icon(
                 Icons.Rounded.MoreVert,
-                contentDescription = "More",
+                contentDescription = stringResource(R.string.collection_actions_more),
                 tint = palette.onBackgroundVariant,
                 modifier = Modifier.size(20.dp),
             )
@@ -1953,6 +2211,7 @@ private fun SuggestedSongRow(
                 color = palette.onBackground,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+                badgePageColor = palette.background,
             )
             Spacer(Modifier.height(2.dp))
             Text(
@@ -1974,7 +2233,7 @@ private fun SuggestedSongRow(
         ) {
             Icon(
                 Icons.Rounded.Add,
-                contentDescription = "Add to playlist",
+                contentDescription = stringResource(R.string.song_action_add_to_playlist),
                 tint = palette.accent,
                 modifier = Modifier.size(20.dp),
             )
@@ -2021,6 +2280,7 @@ private fun SectionCard(
             color = palette.onBackground,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
+            badgePageColor = palette.background,
         )
         Text(
             text = localizedYouTubeMetadata(item.subtitle),
@@ -2037,13 +2297,28 @@ private fun SectionCard(
                     .padding(top = 6.dp),
                 contentAlignment = Alignment.TopStart,
             ) {
-                ReleaseBadges(
-                    isExplicit = badges.isExplicit,
-                    isLossless = badges.isLossless,
-                    isHiResLossless = badges.isHiResLossless,
-                    isHiQuality = badges.isHiQuality,
-                    color = palette.onBackgroundVariant,
-                )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    ReleaseBadges(
+                        isExplicit = badges.isExplicit,
+                        isLossless = badges.isLossless,
+                        isHiResLossless = badges.isHiResLossless,
+                        isHiQuality = badges.isHiQuality,
+                        color = palette.onBackground,
+                        glassPageColor = palette.background,
+                        transparentLikeNowPlaying = true,
+                    )
+                    if (item.type == BrowseType.ALBUM) {
+                        AlbumRatingBadge(
+                            albumId = item.browseId,
+                            glassPageColor = palette.background,
+                            contentColorOverride = palette.onBackground,
+                            transparentLikeNowPlaying = true,
+                        )
+                    }
+                }
             }
         }
     }
@@ -2260,4 +2535,24 @@ private fun String?.toSeconds(): Int {
         3 -> parts[0] * 3600 + parts[1] * 60 + parts[2]
         else -> 0
     }
+}
+
+/** Keep the share frame opacity, with a subtle tint from the actual page surface. */
+/** Content follows the actual neutral-dominant Expressive Glass surface. */
+@Composable
+internal fun albumGlassContentColor(pageColor: Color): Color =
+    orbExpressiveGlassContentColor(pageColor)
+
+/**
+ * Release and artist pages opt into the light transparent glass seen in Now Playing.
+ * Other callers (e.g. profile) keep their previous Expressive Glass material.
+ */
+internal fun Modifier.albumGlassSurface(
+    pageColor: Color,
+    cornerRadius: Dp? = null,
+    transparentLikeNowPlaying: Boolean = false,
+): Modifier = if (transparentLikeNowPlaying) {
+    orbNowPlayingStyleGlass(contentColor = bestForegroundForArtworkSurface(pageColor))
+} else {
+    orbGlassSurface(pageColor = pageColor, cornerRadius = cornerRadius, drawRim = false)
 }

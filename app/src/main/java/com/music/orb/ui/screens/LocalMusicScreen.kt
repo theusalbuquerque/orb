@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+
 package com.music.orb.ui.screens
 
 import androidx.activity.compose.BackHandler
@@ -23,7 +25,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.statusBarsIgnoringVisibility
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -39,19 +41,20 @@ import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.PlaylistPlay
 import androidx.compose.material.icons.rounded.Shuffle
-import androidx.compose.material3.AlertDialog
+import com.music.orb.ui.components.OrbConfirmationDialog as AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.OutlinedButton
+import com.music.orb.ui.components.OrbGlassOutlinedButton as OutlinedButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshState
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import com.music.orb.ui.components.OrbGlassTextButton as TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -68,12 +71,20 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import androidx.compose.ui.graphics.Color
+import com.music.orb.ui.components.orbOverlayGlassBaseColor
+import com.music.orb.ui.components.orbGlassSurface
 import com.music.orb.R
 import com.music.orb.data.LocalMediaRepository
+import com.music.orb.download.OfflinePlaylist
+import com.music.orb.download.OfflineAlbumStore
+import com.music.orb.download.orderedOfflineItems
+import com.music.orb.download.OfflinePlaylistStore
 import com.music.orb.data.model.ROW_ART_PX
 import com.music.orb.data.model.Song
 import com.music.orb.data.model.artworkAt
 import com.music.orb.ui.components.MessageState
+import com.music.orb.ui.components.OrbBouncyPillSelector
 import com.music.orb.ui.components.PullToRefresh
 import com.music.orb.ui.components.PAGE_GUTTER
 import com.music.orb.ui.components.ROW_DIVIDER_INSET
@@ -82,6 +93,7 @@ import com.music.orb.ui.components.SongRow
 private const val LOCAL_TAB_SONGS = 0
 private const val LOCAL_TAB_ARTISTS = 1
 private const val LOCAL_TAB_ALBUMS = 2
+private const val LOCAL_TAB_PLAYLISTS = 3
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -104,6 +116,19 @@ fun LocalMusicScreen(
     var drillDownLabel by remember { mutableStateOf<String?>(null) }
     var drillDownSongs by remember { mutableStateOf<List<Song>>(emptyList()) }
     var showRemoveAllDownloadsDialog by remember { mutableStateOf(false) }
+    val offlinePlaylists by OfflinePlaylistStore.playlists.collectAsState()
+    val offlineAlbums by OfflineAlbumStore.albums.collectAsState()
+    val savedDownloadUris by com.music.orb.download.Downloads.saved.collectAsState()
+    // The requested YouTube ID and the resolved FLAC source ID can refer to the
+    // same downloaded file. Map both aliases so album/playlist folder order is stable.
+    val downloadedById = remember(songs, savedDownloadUris) {
+        val byId = songs.associateBy(Song::videoId).toMutableMap()
+        val byUri = songs.mapNotNull { song -> song.localUri?.let { it to song } }.toMap()
+        savedDownloadUris.forEach { (id, uri) ->
+            byUri[uri]?.let { byId.putIfAbsent(id, it) }
+        }
+        byId
+    }
 
     val inDrillDown = drillDownLabel != null
 
@@ -119,18 +144,20 @@ fun LocalMusicScreen(
     // player / navigation stack instead of overlapping it.
     val inheritedBottom = contentPadding.calculateBottomPadding()
     val shuffleFabBottom = if (inheritedBottom > 60.dp) inheritedBottom - 44.dp else 16.dp
-    val topBarHeight = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 52.dp
+    val topBarHeight = WindowInsets.statusBarsIgnoringVisibility.asPaddingValues().calculateTopPadding() + 60.dp + 18.dp
 
     PullToRefresh(
         refreshing = refreshing,
         onRefresh = onRefresh,
         state = pullState,
+        indicatorTopPadding = topBarHeight,
         modifier = modifier,
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
             Column(modifier = Modifier.fillMaxSize()) {
                 LocalMediaModeSelector(
                     selectedTab = selectedTab,
+                    showPlaylists = isDownloadsPage,
                     onSelect = { tab ->
                         selectedTab = tab
                         drillDownLabel = null
@@ -162,19 +189,21 @@ fun LocalMusicScreen(
                 AnimatedContent(
                     targetState = if (inDrillDown) "drill:$drillDownLabel" else "tab:$selectedTab",
                     transitionSpec = {
-                        if (targetState.startsWith("drill:")) {
+                        val transition = if (targetState.startsWith("drill:")) {
                             (slideInHorizontally { it } + fadeIn()) togetherWith
                                     (slideOutHorizontally { -it / 3 } + fadeOut())
                         } else {
                             (slideInHorizontally { -it / 3 } + fadeIn()) togetherWith
                                     (slideOutHorizontally { it } + fadeOut())
                         }
+                        transition.using(null)
                     },
                     label = "local_music_content",
                     modifier = Modifier.fillMaxSize(),
                 ) { key ->
                     when {
-                        songs.isEmpty() && emptyMessage != null -> {
+                        songs.isEmpty() && emptyMessage != null &&
+                            !(isDownloadsPage && selectedTab == LOCAL_TAB_PLAYLISTS && offlinePlaylists.isNotEmpty()) -> {
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
@@ -228,18 +257,64 @@ fun LocalMusicScreen(
                             )
                         }
 
+                        key == "tab:$LOCAL_TAB_PLAYLISTS" && isDownloadsPage -> {
+                            PlaylistsTab(
+                                playlists = offlinePlaylists,
+                                downloadedById = downloadedById,
+                                onPlaylistClick = { playlist, playlistSongs ->
+                                    if (playlistSongs.isNotEmpty()) {
+                                        drillDownLabel = playlist.title
+                                        drillDownSongs = playlistSongs.map { song ->
+                                            song.copy(
+                                                sourcePlaylistId = playlist.browseId,
+                                                sourcePlaylistTitle = playlist.title,
+                                                sourcePlaylistArtworkUrl = playlist.artworkUrl,
+                                            )
+                                        }
+                                    }
+                                },
+                                contentPadding = bodyContentPadding,
+                            )
+                        }
+
                         else -> {
-                            val albums = remember(songs) {
-                                songs.filter { it.albumName != null }
-                                    .groupBy { it.albumName!! }
-                                    .entries
-                                    .sortedBy { it.key.lowercase() }
+                            val albums = remember(songs, offlineAlbums, downloadedById) {
+                                val savedFolderTracks = mutableSetOf<String>()
+                                val fromAlbumButtons = offlineAlbums.mapNotNull { folder ->
+                                    val tracks = orderedOfflineItems(folder.trackIds, downloadedById)
+                                    if (tracks.isEmpty()) null else {
+                                        tracks.forEach { savedFolderTracks.add(it.localUri ?: it.videoId) }
+                                        java.util.AbstractMap.SimpleEntry(folder.title, tracks)
+                                    }
+                                }
+                                // Legacy or individually downloaded songs remain discoverable.
+                                val otherAlbums = songs.filter { song ->
+                                    !song.albumName.isNullOrBlank() &&
+                                        (song.localUri ?: song.videoId) !in savedFolderTracks
+                                }.groupBy { it.albumName!! }.map { (name, tracks) ->
+                                    java.util.AbstractMap.SimpleEntry(name, tracks)
+                                }
+                                (fromAlbumButtons + otherAlbums).sortedBy { it.key.lowercase() }
                             }
                             AlbumsTab(
                                 albums = albums,
                                 onAlbumClick = { album, albumSongs ->
                                     drillDownLabel = album
-                                    drillDownSongs = albumSongs
+                                    // Selecting a downloaded album folder is still an
+                                    // authored album Play, never a playlist or radio mix.
+                                    val offlineAlbumId = offlineAlbums.firstOrNull { entry ->
+                                        entry.title == album &&
+                                            entry.trackIds.any { it in downloadedById }
+                                    }?.browseId
+                                    drillDownSongs = if (isDownloadsPage) {
+                                        albumSongs.map { song ->
+                                            song.copy(
+                                                albumId = offlineAlbumId ?: "local:downloaded-album:$album",
+                                                albumName = album,
+                                                preserveAlbumRelease = true,
+                                            )
+                                        }
+                                    } else albumSongs
                                 },
                                 contentPadding = bodyContentPadding,
                             )
@@ -249,21 +324,32 @@ fun LocalMusicScreen(
             }
 
             if (songs.isNotEmpty() && !inDrillDown) {
-                FloatingActionButton(
-                    onClick = { onShuffle(songs) },
-                    shape = RoundedCornerShape(18.dp),
-                    containerColor = MaterialTheme.colorScheme.tertiaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                val shuffleShape = RoundedCornerShape(22.dp)
+                Box(
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
-                        .padding(
-                            end = 20.dp,
-                            bottom = shuffleFabBottom,
-                        ),
+                        .padding(end = 20.dp, bottom = shuffleFabBottom)
+                        .size(58.dp)
+                        .clip(shuffleShape)
+                        // Opaque-enough secondary glass to read against artwork,
+                        // retaining the same frosted material as the bottom bar.
+                        .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.80f))
+                        .orbGlassSurface(
+                            pageColor = MaterialTheme.colorScheme.secondaryContainer,
+                            cornerRadius = 22.dp,
+                            drawRim = false,
+                            overlayStrength = true,
+                            overlayOpacity = 0.58f,
+                            backdropBlur = 56.dp,
+                            manageDialogBackdrop = false,
+                        )
+                        .clickable(onClickLabel = stringResource(R.string.btn_shuffle)) { onShuffle(songs) },
+                    contentAlignment = Alignment.Center,
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.Shuffle,
-                        contentDescription = stringResource(R.string.btn_shuffle),
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSecondaryContainer,
                         modifier = Modifier.size(26.dp),
                     )
                 }
@@ -274,6 +360,10 @@ fun LocalMusicScreen(
     if (showRemoveAllDownloadsDialog) {
         AlertDialog(
             onDismissRequest = { showRemoveAllDownloadsDialog = false },
+            modifier = Modifier.orbGlassSurface(orbOverlayGlassBaseColor(), cornerRadius = 28.dp),
+            containerColor = Color.Transparent,
+            tonalElevation = 0.dp,
+            shape = RoundedCornerShape(28.dp),
             icon = { Icon(Icons.Rounded.DeleteSweep, contentDescription = null) },
             title = { Text(stringResource(R.string.downloads_remove_all_title)) },
             text = { Text(stringResource(R.string.downloads_remove_all_message)) },
@@ -586,7 +676,7 @@ private fun DrillDownSongList(
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.ArrowBack,
-                        contentDescription = "Back",
+                        contentDescription = stringResource(R.string.song_action_back),
                         tint = MaterialTheme.colorScheme.onBackground,
                     )
                 }
@@ -683,75 +773,118 @@ private fun DrillDownSongList(
 @Composable
 private fun LocalMediaModeSelector(
     selectedTab: Int,
+    showPlaylists: Boolean,
     onSelect: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Surface(
-        color = MaterialTheme.colorScheme.surfaceContainer,
-        shape = RoundedCornerShape(24.dp),
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = PAGE_GUTTER, vertical = 10.dp),
-    ) {
-        Row(
-            modifier = Modifier.padding(4.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            LocalModeButton(
-                icon = Icons.Rounded.MusicNote,
-                label = stringResource(R.string.local_tab_songs),
-                selected = selectedTab == LOCAL_TAB_SONGS,
-                onClick = { onSelect(LOCAL_TAB_SONGS) },
-            )
-            LocalModeButton(
-                icon = Icons.Rounded.Person,
-                label = stringResource(R.string.local_tab_artists),
-                selected = selectedTab == LOCAL_TAB_ARTISTS,
-                onClick = { onSelect(LOCAL_TAB_ARTISTS) },
-            )
-            LocalModeButton(
-                icon = Icons.Rounded.Album,
-                label = stringResource(R.string.local_tab_albums),
-                selected = selectedTab == LOCAL_TAB_ALBUMS,
-                onClick = { onSelect(LOCAL_TAB_ALBUMS) },
-            )
-        }
-    }
+    val tabs = listOf(LOCAL_TAB_SONGS, LOCAL_TAB_ARTISTS, LOCAL_TAB_ALBUMS) +
+        if (showPlaylists) listOf(LOCAL_TAB_PLAYLISTS) else emptyList()
+    val labels = listOf(
+        stringResource(R.string.local_tab_songs),
+        stringResource(R.string.local_tab_artists),
+        stringResource(R.string.local_tab_albums),
+    ) + if (showPlaylists) listOf(stringResource(R.string.offline_playlists_tab)) else emptyList()
+    val icons = listOf(
+        Icons.Rounded.MusicNote,
+        Icons.Rounded.Person,
+        Icons.Rounded.Album,
+    ) + if (showPlaylists) listOf(Icons.Rounded.PlaylistPlay) else emptyList()
+
+    OrbBouncyPillSelector(
+        labels = labels,
+        selectedIndex = tabs.indexOf(selectedTab).coerceAtLeast(0),
+        onSelected = { index -> tabs.getOrNull(index)?.let(onSelect) },
+        icons = icons,
+        modifier = modifier.padding(vertical = 4.dp),
+    )
 }
 
 @Composable
-private fun RowScope.LocalModeButton(
-    icon: ImageVector,
-    label: String,
-    selected: Boolean,
-    onClick: () -> Unit,
+private fun PlaylistsTab(
+    playlists: List<OfflinePlaylist>,
+    downloadedById: Map<String, Song>,
+    onPlaylistClick: (OfflinePlaylist, List<Song>) -> Unit,
+    contentPadding: PaddingValues,
 ) {
-    val shape = RoundedCornerShape(20.dp)
-    Surface(
-        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainer,
-        contentColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-        shape = shape,
-        tonalElevation = if (selected) 2.dp else 0.dp,
-        modifier = Modifier
-            .weight(1f)
-            .height(44.dp)
-            .clip(shape)
-            .clickable(onClick = onClick),
+    val listState = rememberLazyListState()
+    val ordered = remember(playlists) { playlists.sortedByDescending(OfflinePlaylist::savedAtMs) }
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        state = listState,
+        contentPadding = contentPadding,
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center,
-        ) {
-            Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(6.dp))
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelLarge,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+        item {
+            SectionHeader(
+                icon = Icons.Rounded.PlaylistPlay,
+                title = stringResource(R.string.offline_playlists_tab),
+            )
+        }
+        if (ordered.isEmpty()) {
+            item { MessageState(message = stringResource(R.string.offline_playlists_empty)) }
+        }
+        items(ordered, key = { it.browseId }) { playlist ->
+            val downloaded = orderedOfflineItems(playlist.trackIds, downloadedById)
+            val total = playlist.trackIds.size
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(enabled = downloaded.isNotEmpty()) {
+                        onPlaylistClick(playlist, downloaded)
+                    }
+                    .padding(horizontal = PAGE_GUTTER, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(52.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.secondaryContainer),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    val artwork = playlist.artworkUrl ?: downloaded.firstOrNull()?.thumbnailUrl
+                    if (!artwork.isNullOrBlank()) {
+                        AsyncImage(
+                            model = artwork.artworkAt(ROW_ART_PX),
+                            contentDescription = playlist.title,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    } else {
+                        Icon(
+                            Icons.Rounded.PlaylistPlay,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.size(26.dp),
+                        )
+                    }
+                }
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = playlist.title,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = stringResource(R.string.offline_playlist_progress, downloaded.size, total),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (downloaded.isNotEmpty()) {
+                    Icon(
+                        Icons.Rounded.PlayArrow,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            HorizontalDivider(
+                modifier = Modifier.padding(start = ROW_DIVIDER_INSET),
+                thickness = 0.5.dp,
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
             )
         }
     }

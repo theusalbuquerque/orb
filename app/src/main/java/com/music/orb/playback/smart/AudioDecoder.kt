@@ -47,7 +47,7 @@ import kotlin.math.max
  */
 object AudioDecoder {
 
-    private const val TAG = "BitChordAudioDecoder"
+    private const val TAG = "OrbAudioDecoder"
     private const val TIMEOUT_US = 10_000L
 
     /** Decoded mono PCM at the container's own sample rate; the caller resamples. */

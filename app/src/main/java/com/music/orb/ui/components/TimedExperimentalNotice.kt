@@ -1,9 +1,13 @@
 package com.music.orb.ui.components
 
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.material3.AlertDialog
+import com.music.orb.ui.components.OrbConfirmationDialog as AlertDialog
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import com.music.orb.ui.components.OrbGlassTextButton as TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -32,6 +36,10 @@ fun TimedExperimentalNotice(
         // Back and outside taps remain blocked. Once unlocked, the visible
         // confirmation action is the deliberate way out of the notice.
         onDismissRequest = {},
+        modifier = Modifier.orbGlassSurface(orbOverlayGlassBaseColor(), cornerRadius = 28.dp),
+        containerColor = Color.Transparent,
+        tonalElevation = 0.dp,
+        shape = RoundedCornerShape(28.dp),
         title = { Text(title) },
         text = { Text(message) },
         dismissButton = null,

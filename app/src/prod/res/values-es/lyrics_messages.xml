@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Compatibility placeholder. Spanish Now Playing strings are defined in
+        values-es-rES/strings.xml, mirrored from the dev flavor. Keeping this
+        file empty avoids duplicate resources in the prod source set.
+    -->
+</resources>

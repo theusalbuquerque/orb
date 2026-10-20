@@ -38,7 +38,7 @@ data class CachedProfileSnapshot(
  */
 object ProfileSnapshotStore {
     private const val PREFS_NAME = "orb_profile_snapshots"
-    private const val KEY_PREFIX = "profile_v2_"
+    private const val KEY_PREFIX = "profile_v3_"
     private const val MAX_ENTRIES = 24
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private lateinit var prefs: SharedPreferences

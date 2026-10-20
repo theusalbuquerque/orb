@@ -1,0 +1,8 @@
+<resources>
+    <string name="settings_hide_status_bar_now_playing">Ocultar barra de status</string>
+    <string name="settings_hide_status_bar_now_playing_subtitle">Oculta o relógio, a bateria e os ícones do sistema enquanto o player estiver aberto.</string>
+    <string name="settings_keep_screen_on_now_playing">Tela acordada</string>
+    <string name="settings_keep_screen_on_now_playing_subtitle">Impede que a tela apague automaticamente enquanto o player estiver aberto.</string>
+    <string name="settings_allow_screen_rotation">Rotacionar tela</string>
+    <string name="settings_allow_screen_rotation_subtitle">Permite que apenas o Now Playing acompanhe a rotação do dispositivo no celular.</string>
+</resources>

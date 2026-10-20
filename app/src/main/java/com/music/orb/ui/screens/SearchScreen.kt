@@ -37,6 +37,7 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.NorthWest
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.pulltorefresh.PullToRefreshState
@@ -49,6 +50,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -69,6 +71,8 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import coil3.compose.AsyncImage
 import com.music.orb.R
+import com.music.orb.data.ArtistProfileIdentity
+import com.music.orb.data.YtMusicRepository
 import com.music.orb.data.canvas.ArtistArtworkRepository
 import com.music.orb.data.model.BrowseItem
 import com.music.orb.data.model.CARD_ART_PX
@@ -82,19 +86,24 @@ import com.music.orb.data.model.ShelfItem
 import com.music.orb.data.model.Song
 import com.music.orb.data.model.UiState
 import com.music.orb.data.settings.SearchHistoryEntry
+import com.music.orb.data.social.CommunityRatingRepository
 import com.music.orb.ui.components.MessageState
+import com.music.orb.ui.components.OrbBouncyPillSelector
 import com.music.orb.ui.components.PullToRefresh
 import com.music.orb.ui.components.PAGE_GUTTER
 import com.music.orb.ui.components.ROW_DIVIDER_INSET
 import com.music.orb.ui.components.SongRow
 import com.music.orb.ui.components.CompactMediaBadges
 import com.music.orb.ui.components.ReleaseBadges
+import com.music.orb.ui.components.AlbumRatingBadge
 import com.music.orb.ui.components.LosslessBadgeState
 import com.music.orb.ui.components.rememberCollectionBadges
 import com.music.orb.ui.components.rememberTrackLosslessBadgeState
 import com.music.orb.ui.components.thumbnailBorder
 import com.music.orb.ui.components.songListSkeleton
 import com.music.orb.ui.flavor.OrbFlavorUi
+import java.text.Normalizer
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -132,17 +141,41 @@ fun SearchScreen(
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues,
 ) {
+    val configuration = androidx.compose.ui.platform.LocalConfiguration.current
+    val discoveryColumns = if(configuration.smallestScreenWidthDp >= 600 &&
+        configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE) 4 else 2
     val focusRequester = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
+    // LazyColumn disposes off-screen cards. Keep featured metadata at screen
+    // scope so monthly audience/rating do not disappear and refetch on scroll.
+    val featuredMetadataCache = remember { mutableStateMapOf<String, SearchFeaturedMetadata>() }
     LaunchedEffect(focusTrigger, showSearchField) {
         if (showSearchField && focusTrigger > 0) focusRequester.requestFocus()
     }
     val suggesting = suggestions.isNotEmpty()
     val bodyVisible = showIdleContent || query.isNotBlank() || results != null || suggesting
+
+    // The main player can update its position twice per second. A parent
+    // recomposition must not keep filtering the entire Explore search result
+    // list or rebuilding the discovery grid for the same catalogue snapshot.
+    val presentedSearch = remember(results, filter) {
+        val rows = (results as? UiState.Success)?.data.orEmpty()
+        val featured = featuredSearchEntity(filter, rows)
+        val visible = if (featured == null) rows else rows.filterNot { result ->
+            result is SearchResult.Browse && result.item.browseId == featured.browseId
+        }
+        Triple(featured, visible, visible.filterIsInstance<SearchResult.Track>().map { it.song })
+    }
+    val discoveryRows = remember(discoverState, discoveryColumns) {
+        (discoverState as? UiState.Success)?.data.orEmpty()
+            .flatMap { it.items }
+            .chunked(discoveryColumns)
+    }
     PullToRefresh(
         refreshing = refreshing,
         onRefresh = onRefresh,
         state = pullState,
+        indicatorTopPadding = contentPadding.calculateTopPadding(),
         modifier = modifier,
     ) {
     Box(modifier = Modifier.fillMaxSize()) {
@@ -166,7 +199,10 @@ fun SearchScreen(
                         onActivated = onSearchActivated,
                         modifier = Modifier.padding(start = PAGE_GUTTER, end = PAGE_GUTTER, bottom = 4.dp),
                     )
-                    if (bodyVisible && results != null && !suggesting) {
+                    // Filters belong to committed results, never to typeahead.
+                    // While the user is still editing, Explore shows only writing
+                    // suggestions and keeps the result controls completely out.
+                    if (bodyVisible && query.isNotBlank() && results != null && !suggesting) {
                         SearchFilterTabs(filter = filter, onFilterChange = onFilterChange)
                     }
                 }
@@ -180,7 +216,7 @@ fun SearchScreen(
                 bottom = contentPadding.calculateBottomPadding(),
             ),
         ) {
-            if (!showSearchField && bodyVisible && results != null && !suggesting) {
+            if (!showSearchField && bodyVisible && query.isNotBlank() && results != null && !suggesting) {
                 item(key = "search-filter-tabs") {
                     SearchFilterTabs(filter = filter, onFilterChange = onFilterChange)
                 }
@@ -209,6 +245,8 @@ fun SearchScreen(
                         )
                     }
                     discoveryGrid(
+                        rows = discoveryRows,
+                        columns = discoveryColumns,
                         state = discoverState,
                         listState = listState,
                         topOcclusion = if (showSearchField) 0.dp else 144.dp,
@@ -221,11 +259,25 @@ fun SearchScreen(
                 results is UiState.Loading -> songListSkeleton(circular = filter == SearchFilter.ARTISTS)
                 results is UiState.Error -> item { MessageState(results.message) }
                 results is UiState.Success -> {
-                    val tracks = results.data
-                        .filterIsInstance<SearchResult.Track>()
-                        .map { it.song }
+                    val (featured, visibleRows, tracks) = presentedSearch
+
+                    featured?.let { featuredItem ->
+                        item(key = "featured:${featuredItem.type}:${featuredItem.browseId}") {
+                            SearchFeaturedEntityCard(
+                                item = featuredItem,
+                                metadataCache = featuredMetadataCache,
+                                onClick = { onBrowseClick(featuredItem) },
+                                modifier = exploreVerticalEdgeModifier(
+                                    listState = listState,
+                                    itemKey = "featured:${featuredItem.type}:${featuredItem.browseId}",
+                                    topOcclusion = if (showSearchField) 0.dp else 144.dp,
+                                ),
+                            )
+                        }
+                    }
+
                     itemsIndexed(
-                        items = results.data,
+                        items = visibleRows,
                         key = { _, row -> searchResultKey(row) },
                     ) { index, row ->
                         val rowKey = searchResultKey(row)
@@ -256,7 +308,7 @@ fun SearchScreen(
                                 )
                             }
                         }
-                        if (!OrbFlavorUi.expressive && index < results.data.lastIndex) {
+                        if (!OrbFlavorUi.expressive && index < visibleRows.lastIndex) {
                             HorizontalDivider(
                                 modifier = Modifier.padding(start = ROW_DIVIDER_INSET),
                                 thickness = 0.5.dp,
@@ -544,6 +596,8 @@ private fun RecentSearchRow(
 }
 
 private fun LazyListScope.discoveryGrid(
+    rows: List<List<ShelfItem>>,
+    columns: Int,
     state: UiState<List<HomeShelf>>,
     listState: LazyListState,
     topOcclusion: Dp,
@@ -585,8 +639,7 @@ private fun LazyListScope.discoveryGrid(
 
         is UiState.Success -> {
             val shelf = state.data.firstOrNull()
-            val suggestions = state.data.flatMap { it.items }
-            if (suggestions.isNotEmpty()) {
+            if (rows.isNotEmpty()) {
                 item(key = "discover:header") {
                     SectionHeader(
                         title = shelf?.title ?: stringResource(R.string.expressive_discover_may_like),
@@ -595,7 +648,7 @@ private fun LazyListScope.discoveryGrid(
                     )
                 }
                 items(
-                    items = suggestions.chunked(2),
+                    items = rows,
                     key = { row ->
                         "discover:" + row.joinToString("|") {
                             it.videoId ?: it.browseId ?: "${it.title}:${it.subtitle}"
@@ -620,7 +673,7 @@ private fun LazyListScope.discoveryGrid(
                                 modifier = Modifier.weight(1f),
                             )
                         }
-                        if (row.size == 1) Spacer(Modifier.weight(1f))
+                        repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
                     }
                 }
                 item(key = "discover:bottom-space") { Spacer(Modifier.height(26.dp)) }
@@ -704,13 +757,25 @@ private fun DiscoverGridCard(
             contentAlignment = Alignment.TopStart,
         ) {
             if (isCollection || isTrack) {
-                ReleaseBadges(
-                    isExplicit = badgeExplicit,
-                    isLossless = badgeLossless,
-                    isHiResLossless = badgeHiRes,
-                    isHiQuality = badgeHiQuality,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    ReleaseBadges(
+                        isExplicit = badgeExplicit,
+                        isLossless = badgeLossless,
+                        isHiResLossless = badgeHiRes,
+                        isHiQuality = badgeHiQuality,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        glassPageColor = if (OrbFlavorUi.expressive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+                    )
+                    if (item.type == BrowseType.ALBUM) {
+                        AlbumRatingBadge(
+                            albumId = item.browseId,
+                            glassPageColor = if (OrbFlavorUi.expressive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+                        )
+                    }
+                }
             }
         }
     }
@@ -810,6 +875,7 @@ private fun BrowseRow(
                         isHiResLossless = badges.isHiResLossless,
                         isHiQuality = badges.isHiQuality,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        glassPageColor = if (OrbFlavorUi.expressive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
                     )
                 }
             }
@@ -822,17 +888,299 @@ private fun BrowseRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            if (isCollection && (showExplicit || badges.isLossless || badges.isHiQuality)) {
+            if (isCollection) {
                 Spacer(Modifier.height(4.dp))
-                ReleaseBadges(
-                    isExplicit = showExplicit,
-                    isLossless = badges.isLossless,
-                    isHiResLossless = badges.isHiResLossless,
-                    isHiQuality = badges.isHiQuality,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    ReleaseBadges(
+                        isExplicit = showExplicit,
+                        isLossless = badges.isLossless,
+                        isHiResLossless = badges.isHiResLossless,
+                        isHiQuality = badges.isHiQuality,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        glassPageColor = if (OrbFlavorUi.expressive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+                    )
+                    if (item.type == BrowseType.ALBUM) {
+                        AlbumRatingBadge(
+                            albumId = item.browseId,
+                            glassPageColor = if (OrbFlavorUi.expressive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+                        )
+                    }
+                }
             }
         }
+    }
+}
+
+
+private data class SearchFeaturedMetadata(
+    val artworkUrl: String?,
+    val monthlyAudience: String? = null,
+    val artistName: String? = null,
+    val trackCount: Int? = null,
+    val rating: Float? = null,
+    val ratingResolved: Boolean = false,
+)
+
+private fun featuredSearchEntity(
+    filter: SearchFilter,
+    rows: List<SearchResult>,
+): BrowseItem? {
+    val allowed = when (filter) {
+        SearchFilter.ALL -> setOf(BrowseType.ARTIST, BrowseType.ALBUM)
+        SearchFilter.ARTISTS -> setOf(BrowseType.ARTIST)
+        SearchFilter.ALBUMS -> setOf(BrowseType.ALBUM)
+        else -> emptySet()
+    }
+    if (allowed.isEmpty()) return null
+
+    return when (filter) {
+        SearchFilter.ALL -> {
+            // The parser places YouTube Music's native Top Result at index 0.
+            // Feature it only when that top-ranked entity is an artist/album;
+            // never replace it with a literal title match from farther down.
+            (rows.firstOrNull() as? SearchResult.Browse)
+                ?.item
+                ?.takeIf { it.type in allowed }
+        }
+
+        SearchFilter.ARTISTS, SearchFilter.ALBUMS -> rows
+            .filterIsInstance<SearchResult.Browse>()
+            .firstOrNull { it.item.type in allowed }
+            ?.item
+
+        else -> null
+    }
+}
+
+private fun searchEntityKey(value: String): String = Normalizer
+    .normalize(value, Normalizer.Form.NFD)
+    .replace(Regex("\\p{M}+"), "")
+    .lowercase(Locale.ROOT)
+    .replace(Regex("[^a-z0-9]+"), " ")
+    .trim()
+
+@Composable
+private fun SearchFeaturedEntityCard(
+    item: BrowseItem,
+    metadataCache: androidx.compose.runtime.snapshots.SnapshotStateMap<String, SearchFeaturedMetadata>,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val immediateMetadata = remember(item.browseId, item.type, item.subtitle, item.thumbnailUrl) {
+        SearchFeaturedMetadata(
+            artworkUrl = item.thumbnailUrl,
+            monthlyAudience = if (item.type == BrowseType.ARTIST) {
+                monthlyAudienceFromSubtitle(item.subtitle)
+            } else null,
+            artistName = if (item.type == BrowseType.ALBUM) {
+                albumArtistFromSubtitle(item.subtitle)
+            } else null,
+        )
+    }
+    // Artist names can be repaired after initial paint. The cached summary
+    // must not keep a collaborator's rating when the browse ID's label changes.
+    val metadataKey = "${item.type}:${item.browseId}:${item.title}"
+    val cachedMetadata = metadataCache[metadataKey]
+    val metadata by produceState(
+        initialValue = cachedMetadata ?: immediateMetadata,
+        key1 = item.browseId,
+        key2 = metadataKey,
+    ) {
+        if (cachedMetadata?.ratingResolved == true) {
+            value = cachedMetadata
+            return@produceState
+        }
+        val resolved = when (item.type) {
+            BrowseType.ARTIST -> {
+                val page = YtMusicRepository.artistLandingPageForeground(item.browseId).getOrNull()
+                SearchFeaturedMetadata(
+                    artworkUrl = page?.thumbnailUrl ?: immediateMetadata.artworkUrl,
+                    // The native Top Result normally already carries the monthly
+                    // audience, so this line is present on the first frame. The
+                    // artist page remains the authoritative fallback.
+                    monthlyAudience = immediateMetadata.monthlyAudience ?: page?.monthlyAudience,
+                    rating = CommunityRatingRepository.artistAverage(
+                        page?.name?.takeIf { ArtistProfileIdentity.matches(item.title, it) }
+                            ?: item.title,
+                    ),
+                    ratingResolved = true,
+                )
+            }
+
+            BrowseType.ALBUM -> {
+                val firstPage = YtMusicRepository.browseSongsForeground(item.browseId).getOrNull()
+                var count = firstPage?.songs?.size ?: 0
+                var token = firstPage?.continuation
+                var pages = 0
+                // Album pages are normally one response, but box sets and very long
+                // releases can paginate. Count their real continuation rows so the
+                // featured card never reports only the first batch.
+                while (!token.isNullOrBlank() && pages < 12) {
+                    val continuation = token ?: break
+                    val next = YtMusicRepository.moreSongsForeground(continuation).getOrNull() ?: break
+                    count += next.songs.size
+                    token = next.continuation
+                    pages += 1
+                }
+                SearchFeaturedMetadata(
+                    artworkUrl = firstPage?.thumbnailUrl ?: immediateMetadata.artworkUrl,
+                    artistName = firstPage?.headerArtists?.firstOrNull()?.name
+                        ?: immediateMetadata.artistName,
+                    trackCount = count.takeIf { it > 0 },
+                    rating = CommunityRatingRepository.albumAverage(item.browseId),
+                    ratingResolved = true,
+                )
+            }
+
+            else -> immediateMetadata.copy(ratingResolved = true)
+        }
+        metadataCache[metadataKey] = resolved
+        value = resolved
+    }
+
+    val resolvedArtwork = metadata?.artworkUrl ?: item.thumbnailUrl
+    val shape = RoundedCornerShape(30.dp)
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = PAGE_GUTTER, vertical = 8.dp)
+            .clip(shape)
+            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+            .clickable(onClick = onClick)
+            .padding(18.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        AsyncImage(
+            model = resolvedArtwork.artworkAt(CARD_ART_PX),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .size(112.dp)
+                .clip(
+                    if (item.type == BrowseType.ARTIST) CircleShape
+                    else RoundedCornerShape(22.dp),
+                )
+                .thumbnailBorder(
+                    if (item.type == BrowseType.ARTIST) CircleShape
+                    else RoundedCornerShape(22.dp),
+                )
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+        )
+        Spacer(Modifier.width(18.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = browseTypeLabel(item.type),
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                maxLines = 1,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = item.title,
+                style = MaterialTheme.typography.headlineSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+
+            when (item.type) {
+                BrowseType.ARTIST -> metadata?.monthlyAudience
+                    ?.takeIf(String::isNotBlank)
+                    ?.let { audience ->
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = localizedYouTubeMetadata(audience),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+
+                BrowseType.ALBUM -> {
+                    val artist = metadata?.artistName?.takeIf(String::isNotBlank)
+                        ?: albumArtistFromSubtitle(item.subtitle)
+                    artist?.let {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = it,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    metadata?.trackCount?.let { trackCount ->
+                        Spacer(Modifier.height(3.dp))
+                        Text(
+                            text = stringResource(R.string.yt_ui_track_count, trackCount),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                        )
+                    }
+                }
+
+                else -> Unit
+            }
+
+            Spacer(Modifier.height(9.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Star,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(18.dp),
+                )
+                if (metadata?.ratingResolved == true) {
+                    Text(
+                        text = metadata?.rating?.let {
+                            String.format(Locale.getDefault(), "%.1f", it)
+                        } ?: "—",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                } else {
+                    CircularProgressIndicator(
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(16.dp),
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun monthlyAudienceFromSubtitle(subtitle: String): String? {
+    val parts = subtitle.split(Regex("\\s*[•·]\\s*"))
+        .map(String::trim)
+        .filter(String::isNotBlank)
+    return parts.firstOrNull { part ->
+        val normalized = searchEntityKey(part)
+        val hasMonthlyWords =
+            ("monthly" in normalized && ("audience" in normalized || "listener" in normalized)) ||
+                ("ouvinte" in normalized && "mens" in normalized) ||
+                ("oyente" in normalized && "mensual" in normalized)
+        hasMonthlyWords && part.any(Char::isDigit)
+    }
+}
+
+private fun albumArtistFromSubtitle(subtitle: String): String? {
+    val parts = subtitle.split('•').map { it.trim() }.filter { it.isNotBlank() }
+    if (parts.isEmpty()) return null
+    val typeWords = setOf("album", "single", "sencillo", "ep")
+    return parts.firstOrNull { part ->
+        val normalized = searchEntityKey(part)
+        normalized !in typeWords &&
+            !part.matches(Regex("(?:19|20)\\d{2}")) &&
+            !part.matches(Regex("\\d+\\s+(songs?|tracks?|músicas?|faixas?|canciones?)", RegexOption.IGNORE_CASE))
     }
 }
 
@@ -843,80 +1191,35 @@ private fun searchResultKey(row: SearchResult): String = when (row) {
 
 @Composable
 private fun SearchFilterTabs(filter: SearchFilter, onFilterChange: (SearchFilter) -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
-            .padding(horizontal = PAGE_GUTTER, vertical = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        SearchFilter.entries.forEach { entry ->
-            val selected = entry == filter
-            val shape = if (OrbFlavorUi.expressive) {
-                RoundedCornerShape(24.dp)
-            } else {
-                FILTER_PILL_SHAPE
-            }
-            val scale by animateFloatAsState(
-                targetValue = if (OrbFlavorUi.expressive && selected) 1.04f else 1f,
-                animationSpec = spring(
-                    dampingRatio = Spring.DampingRatioMediumBouncy,
-                    stiffness = Spring.StiffnessMediumLow,
-                ),
-                label = "searchFilterScale",
-            )
-            Box(
-                modifier = Modifier
-                    .graphicsLayer { scaleX = scale; scaleY = scale }
-                    .clip(shape)
-                    .background(
-                        when {
-                            OrbFlavorUi.expressive && selected ->
-                                MaterialTheme.colorScheme.primaryContainer
-                            OrbFlavorUi.expressive ->
-                                MaterialTheme.colorScheme.surfaceContainerHigh
-                            selected ->
-                                MaterialTheme.colorScheme.onBackground
-                            else ->
-                                MaterialTheme.colorScheme.surfaceVariant
-                        },
-                    )
-                    .clickable { onFilterChange(entry) }
-                    .padding(
-                        horizontal = if (OrbFlavorUi.expressive) 20.dp else 16.dp,
-                        vertical = if (OrbFlavorUi.expressive) 12.dp else 10.dp,
-                    ),
-            ) {
-                Text(
-                    text = searchFilterLabel(entry),
-                    style = if (OrbFlavorUi.expressive) {
-                        MaterialTheme.typography.labelLarge
-                    } else {
-                        MaterialTheme.typography.labelLarge
-                    },
-                    color = when {
-                        OrbFlavorUi.expressive && selected ->
-                            MaterialTheme.colorScheme.onPrimaryContainer
-                        OrbFlavorUi.expressive ->
-                            MaterialTheme.colorScheme.onSurface
-                        selected ->
-                            MaterialTheme.colorScheme.background
-                        else ->
-                            MaterialTheme.colorScheme.onBackground
-                    },
-                    maxLines = 1,
-                )
-            }
-        }
-    }
+    val filters = SearchFilter.entries
+    val selectedIndex = filters.indexOf(filter).coerceAtLeast(0)
+    // searchFilterLabel() is @Composable, so it cannot be passed as a normal
+    // Kotlin function reference to map(). Resolve each label directly in the
+    // composition instead; this also keeps the selector order explicit.
+    val labels = listOf(
+        searchFilterLabel(SearchFilter.ALL),
+        searchFilterLabel(SearchFilter.ARTISTS),
+        searchFilterLabel(SearchFilter.SONGS),
+        searchFilterLabel(SearchFilter.ALBUMS),
+        searchFilterLabel(SearchFilter.PLAYLISTS),
+    )
+
+    // One physical Expressive Glass capsule now travels between filters. This
+    // matches Home/Stats/BottomNav instead of swapping five independent solid
+    // chip backgrounds, and preserves horizontal centering for long labels.
+    OrbBouncyPillSelector(
+        labels = labels,
+        selectedIndex = selectedIndex,
+        onSelected = { index -> filters.getOrNull(index)?.let(onFilterChange) },
+    )
 }
 
 @Composable
 private fun searchFilterLabel(filter: SearchFilter): String = when (filter) {
+    SearchFilter.ALL -> stringResource(R.string.beta_ui_filter_all)
+    SearchFilter.ARTISTS -> stringResource(R.string.beta_ui_filter_artists)
     SearchFilter.SONGS -> stringResource(R.string.beta_ui_filter_songs)
     SearchFilter.ALBUMS -> stringResource(R.string.beta_ui_filter_albums)
-    SearchFilter.ARTISTS -> stringResource(R.string.beta_ui_filter_artists)
     SearchFilter.PLAYLISTS -> stringResource(R.string.beta_ui_filter_playlists)
 }
 

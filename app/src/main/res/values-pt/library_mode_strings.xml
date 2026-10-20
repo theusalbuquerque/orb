@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="account_library_sync_header">Integração da Biblioteca</string>
+    <string name="account_library_sync_title">Sincronização com o YouTube Music</string>
+    <string name="settings_youtube_music_library_linked">Sincronizando sua biblioteca do YouTube Music ao Orb.</string>
+    <string name="settings_youtube_music_library_unlinked">Você está usando uma biblioteca exclusiva do Orb.</string>
+    <string name="orb_library_empty">Sua biblioteca do Orb está vazia. Adicione músicas, álbuns ou singles pelas ações.</string>
+    <string name="song_action_add_to_library">Adicionar à biblioteca</string>
+    <string name="song_action_remove_from_library">Remover da biblioteca</string>
+    <string name="library_downloads_empty">Nenhuma música baixada ainda.</string>
+    <string name="downloads_remove_all">Remover todos os downloads</string>
+    <string name="downloads_remove_all_title">Remover todos os downloads?</string>
+    <string name="downloads_remove_all_message">Todas as músicas baixadas pelo Orb serão removidas deste dispositivo.</string>
+    <string name="downloads_remove_all_confirm">Remover tudo</string>
+
+    <!-- Album/playlist collection download confirmations. -->
+    <string name="collection_download_cancel_title">Cancelar download?</string>
+    <string name="collection_download_cancel_message">O download do álbum ou playlist ainda está em andamento. As faixas pendentes serão canceladas e as que já foram baixadas serão removidas.</string>
+    <string name="collection_download_cancel_confirm">Cancelar download</string>
+    <string name="collection_download_remove_title">Remover download?</string>
+    <string name="collection_download_remove_message">Este álbum ou playlist já foi baixado por completo. Remover as faixas baixadas deste dispositivo?</string>
+    <string name="collection_download_remove_confirm">Remover download</string>
+</resources>

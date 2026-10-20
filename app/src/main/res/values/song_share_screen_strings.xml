@@ -1,0 +1,6 @@
+<resources>
+    <string name="share_song_heading">Share song</string>
+    <string name="share_copy_link">Copy link</string>
+    <string name="share_more">More</string>
+    <string name="share_close">Close</string>
+</resources>

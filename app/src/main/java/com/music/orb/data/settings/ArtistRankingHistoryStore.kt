@@ -32,7 +32,7 @@ data class ArtistRankingHistorySnapshot(
 
 object ArtistRankingHistoryStore {
     private const val PREFS_NAME = "orb_artist_ranking_history"
-    private const val KEY_PREFIX = "history_v1_"
+    private const val KEY_PREFIX = "history_v2_"
 
     private lateinit var prefs: SharedPreferences
 

@@ -56,13 +56,13 @@ import dev.chrisbanes.haze.materials.HazeMaterials
 
 private val UPDATE_DIALOG_CORNER = 28.dp
 private val UPDATE_ACTION_HEIGHT = 58.dp
-internal val SCRIM_COLOR = Color.Black.copy(alpha = 0.40f)
+internal val SCRIM_COLOR = Color.Black.copy(alpha = 0.10f)
 
 private const val ORB_README_BANNER_URL =
     "https://raw.githubusercontent.com/theusalbuquerque/orb/main/app/src/main/assets/orb_banner.png"
 
 /**
- * Large software-update card inspired by the system-style BitChord surface:
+ * Large software-update card inspired by the system-style Orb surface:
  * status + progress at the top, a proper What's New area in the middle and a
  * full-width action row at the bottom. The same composable morphs from
  * available -> downloading -> ready, so an in-app download does not swap to a
@@ -86,7 +86,12 @@ fun UpdateAvailableDialog(
     secondaryActionLabel: String? = null,
     onSecondaryAction: (() -> Unit)? = null,
 ) {
+    // In-activity update dialogs are rendered as siblings of the blurred app.
+    // Registering the active modal makes MainActivity blur the background only.
+    RegisterSheetBackdrop()
     val reduceDynamicBlur by AppSettings.reduceDynamicBlur.collectAsStateWithLifecycle()
+    val popupBaseColor = orbOverlayGlassBaseColor()
+    val popupSubstrate = orbExpressiveGlassTone(popupBaseColor)
     val shape = RoundedCornerShape(UPDATE_DIALOG_CORNER)
     val status = message ?: when (mode) {
         SoftwareUpdateDialogMode.AVAILABLE -> stringResource(R.string.software_update_available_status, version)
@@ -128,15 +133,19 @@ fun UpdateAvailableDialog(
                 .widthIn(max = 430.dp)
                 .heightIn(max = 760.dp)
                 .clip(shape)
-                .then(
-                    if (reduceDynamicBlur) {
-                        Modifier.background(MaterialTheme.colorScheme.surface.copy(alpha = 0.98f))
-                    } else {
-                        Modifier.hazeEffect(
-                            state = hazeState,
-                            style = HazeMaterials.regular(MaterialTheme.colorScheme.surface),
-                        )
-                    },
+                // The translucent paint used for in-page controls is not an
+                // adequate substrate for an in-activity modal. Use a readable
+                // nearly opaque frost over the host's actual blurred backdrop.
+                .background(
+                    popupSubstrate.copy(alpha = if (reduceDynamicBlur) 0.98f else 0.91f),
+                )
+                .orbGlassSurface(
+                    pageColor = popupBaseColor,
+                    cornerRadius = UPDATE_DIALOG_CORNER,
+                    overlayStrength = true,
+                    overlayOpacity = 0.70f,
+                    manageDialogBackdrop = false,
+                    observeTapFeedback = false,
                 )
                 .clickable(
                     indication = null,
@@ -321,7 +330,7 @@ private fun UpdateHero(heroImageUrl: String?, version: String) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Image(
-                    painter = painterResource(R.drawable.ic_logo),
+                    painter = painterResource(R.drawable.orb_logo),
                     contentDescription = null,
                     modifier = Modifier.size(54.dp),
                 )

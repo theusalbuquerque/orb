@@ -81,7 +81,7 @@ val orbGoogleWebClientId = gradleProperty("ORB_GOOGLE_WEB_CLIENT_ID")
 // sem downgrade de versionCode.
 // ============================================================
 
-val appVersionName = "1.6.2"
+val appVersionName = "1.7.2"
 
 // 1  = "-beta"
 // 2  = "-beta.2"
@@ -472,7 +472,7 @@ dependencies {
 
     implementation(composeBom)
 
-    implementation(
+    implementation(          
         "androidx.compose.ui:ui"
     )
 

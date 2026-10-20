@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="artist_beta_songs">Songs</string>
+    <string name="artist_beta_albums">Albums</string>
+    <string name="artist_beta_singles">Singles &amp; EPs</string>
+    <string name="artist_beta_playlists">Playlists</string>
+    <string name="artist_beta_empty">There are no items in this category yet.</string>
+    <string name="artist_beta_rating_description">Your average album rating: %1$s out of 5.</string>
+</resources>

@@ -19,7 +19,8 @@ internal fun localizedYouTubeSectionTitle(text: String): String {
         "recently played" -> stringResource(R.string.yt_ui_recently_played)
         "listen again" -> stringResource(R.string.yt_ui_listen_again)
         "from your library" -> stringResource(R.string.yt_ui_from_your_library)
-        "albums for you" -> stringResource(R.string.yt_ui_albums_for_you)
+        "albums for you", "álbuns para você", "álbumes para ti" ->
+            stringResource(R.string.expressive_for_you_albums)
         "albums & singles", "albums and singles" ->
             stringResource(R.string.yt_ui_albums_and_singles)
         "new albums & singles", "new albums and singles" ->
@@ -57,6 +58,8 @@ internal fun localizedYouTubeSectionTitle(text: String): String {
             stringResource(R.string.expressive_albums_new)
         "your favorite albums", "seus álbuns favoritos", "tus álbumes favoritos" ->
             stringResource(R.string.expressive_albums_favorites)
+        "your albums", "seus álbuns", "tus álbumes" ->
+            stringResource(R.string.expressive_albums_yours)
         "albums you may like", "álbuns que você pode gostar", "álbumes que te pueden gustar" ->
             stringResource(R.string.expressive_albums_may_like)
         "tocadas recentemente", "reproducidas recientemente" ->
@@ -67,12 +70,18 @@ internal fun localizedYouTubeSectionTitle(text: String): String {
             stringResource(R.string.expressive_for_you_quick_picks)
         "mixes para você", "mixes para ti" ->
             stringResource(R.string.expressive_for_you_mixes)
+        "mixtapes for you", "mixtapes para você", "mixtapes para ti" ->
+            stringResource(R.string.expressive_for_you_mixtapes)
         "suas playlists", "tus playlists", "your playlists" ->
             stringResource(R.string.expressive_for_you_playlists)
         "da sua biblioteca", "de tu biblioteca" ->
             stringResource(R.string.expressive_for_you_library)
         "favoritos esquecidos", "favoritos olvidados" ->
             stringResource(R.string.expressive_for_you_forgotten)
+        "old favorites", "favoritos antigos", "favoritos antiguos" ->
+            stringResource(R.string.expressive_for_you_old_favorites)
+        "daily discoveries", "descobertas diárias", "descubrimientos diarios" ->
+            stringResource(R.string.expressive_for_you_daily_discoveries)
         "álbuns para você", "álbumes para ti" ->
             stringResource(R.string.expressive_for_you_albums)
         "recaps" -> stringResource(R.string.expressive_for_you_recaps)
@@ -96,6 +105,10 @@ internal fun localizedYouTubeSectionTitle(text: String): String {
         "top 10 global", "global top 10" ->
             stringResource(R.string.expressive_trending_top_global)
         "em alta", "en tendencia" -> stringResource(R.string.expressive_trending_now)
+        "trending songs", "musicas em alta", "músicas em alta", "canciones en tendencia" ->
+            stringResource(R.string.expressive_trending_songs)
+        "played in shorts", "tocou nos shorts", "sono en shorts", "sonó en shorts" ->
+            stringResource(R.string.expressive_trending_shorts)
         "daily charts" -> stringResource(R.string.expressive_trending_daily)
         "weekly charts" -> stringResource(R.string.expressive_trending_weekly)
 
@@ -212,7 +225,8 @@ private fun localizedYouTubeMetadataSegment(segment: String): String {
                         stringResource(R.string.yt_ui_subscriber_count, subscribers.groupValues[1])
                     } else {
                         val monthlyAudience =
-                            Regex("""^(.+?)\s+monthly audience$""", RegexOption.IGNORE_CASE).matchEntire(clean)
+                            Regex("""^(.+?)\s+monthly (?:audience|listeners?)$""", RegexOption.IGNORE_CASE)
+                                .matchEntire(clean)
                         if (monthlyAudience != null) {
                             stringResource(R.string.yt_ui_monthly_audience_count, monthlyAudience.groupValues[1])
                         } else {

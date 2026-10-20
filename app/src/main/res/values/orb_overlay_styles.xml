@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="OrbOverlayWindowAnimation">
+        <item name="android:windowEnterAnimation">@anim/orb_overlay_enter</item>
+        <item name="android:windowExitAnimation">@anim/orb_overlay_exit</item>
+    </style>
+</resources>

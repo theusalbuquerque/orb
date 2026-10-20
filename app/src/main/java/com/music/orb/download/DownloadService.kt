@@ -165,6 +165,7 @@ class DownloadService : Service() {
             .setContentText(
                 when {
                     song == null -> "Starting"
+                    state is DownloadState.Resolving -> getString(R.string.song_action_resolving_download_quality)
                     waiting > 0 -> "${song.artist} · $waiting more queued"
                     else -> song.artist
                 },

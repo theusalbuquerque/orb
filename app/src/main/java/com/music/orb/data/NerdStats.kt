@@ -205,7 +205,7 @@ object NerdStats {
         LOCAL,
     }
 
-    /** Physical evidence used by the BitChord-style analyzer. */
+    /** Physical evidence used by the Orb-style analyzer. */
     enum class AutomixAnalysisSource {
         NONE,
         STORED,
@@ -261,7 +261,7 @@ object NerdStats {
 
 
     /**
-     * Compatibility telemetry around the BitChord v1.5 engine. These methods
+     * Compatibility telemetry around the Orb v1.5 engine. These methods
      * observe preparation only; they never participate in source selection,
      * analysis, planning, or rendering.
      */

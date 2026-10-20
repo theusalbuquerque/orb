@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="premium_price_unavailable">ไม่สามารถแสดงราคารายเดือนได้</string>
+    <string name="premium_price_approximate">ราคาแปลงโดยประมาณ ธนาคารอาจใช้อัตราแลกเปลี่ยนหรือค่าธรรมเนียมต่างกัน</string>
+    <string name="premium_price_actual_brl">เรียกเก็บเป็น BRL: %1$s</string>
+</resources>

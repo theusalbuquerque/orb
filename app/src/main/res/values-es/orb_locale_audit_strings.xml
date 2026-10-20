@@ -1,0 +1,21 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<resources>
+  <string name="orb_l10n_listenbrainz_title">Token de ListenBrainz</string>
+  <string name="orb_l10n_listenbrainz_hint">Pega tu token de ListenBrainz para activar el registro de reproducciones.</string>
+  <string name="orb_l10n_api_token">Token de API</string>
+  <string name="orb_l10n_discord_title">Token de Discord</string>
+  <string name="orb_l10n_discord_hint">Pega tu token de Discord. Se guarda cifrado en este dispositivo y solo se envía a Discord.</string>
+  <string name="orb_l10n_token">Token</string>
+  <string name="orb_l10n_save">Guardar</string>
+  <string name="orb_l10n_cancel">Cancelar</string>
+  <string name="orb_l10n_checking">Comprobando…</string>
+  <string name="orb_l10n_selected">Seleccionado</string>
+  <string name="orb_l10n_playlist_generic">Lista de reproducción</string>
+  <string name="orb_l10n_playlist_open">Abrir lista</string>
+  <string name="orb_l10n_playlist_rename_action">Cambiar nombre</string>
+  <string name="orb_l10n_playlist_delete">Eliminar lista</string>
+  <string name="orb_l10n_playlist_delete_confirm" formatted="true">Eliminar \"%1$s\" — toca para confirmar</string>
+  <string name="orb_l10n_playlist_rename_title">Cambiar nombre de la lista</string>
+  <string name="orb_l10n_playlist_save_name">Guardar nombre</string>
+  <string name="orb_l10n_got_it">Entendido</string>
+</resources>

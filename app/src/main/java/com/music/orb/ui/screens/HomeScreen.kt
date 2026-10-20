@@ -1,5 +1,8 @@
 package com.music.orb.ui.screens
 
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -37,6 +40,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.remember
@@ -58,6 +62,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.geometry.Offset
@@ -67,15 +72,15 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
 import kotlin.math.abs
-import kotlin.math.sin
-import kotlin.math.PI
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.ArrowForward
 import androidx.compose.material.icons.rounded.PlayArrow
 import com.music.orb.R
 import com.music.orb.data.canvas.ArtistArtworkRepository
-import com.music.orb.ui.icons.BitChordIcons
+import com.music.orb.ui.icons.OrbIcons
 import coil3.compose.AsyncImage
 import com.music.orb.data.model.CARD_ART_PX
 import com.music.orb.data.model.ROW_ART_PX
@@ -90,11 +95,13 @@ import com.music.orb.data.model.artworkAt
 import com.music.orb.ui.components.CompactMediaBadges
 import com.music.orb.ui.components.LosslessBadgeState
 import com.music.orb.ui.components.MessageState
+import com.music.orb.ui.components.OrbHaptics
 import com.music.orb.ui.components.PAGE_GUTTER
 import com.music.orb.ui.components.PullToRefresh
 import com.music.orb.ui.components.SHELF_CARD_WIDTH
 import com.music.orb.ui.components.ExplicitTitle
 import com.music.orb.ui.components.ReleaseBadges
+import com.music.orb.ui.components.AlbumRatingBadge
 import com.music.orb.ui.components.rememberCollectionBadges
 import com.music.orb.ui.components.rememberTrackLosslessBadgeState
 import com.music.orb.ui.components.SignInBanner
@@ -104,12 +111,14 @@ import com.music.orb.ui.components.thumbnailBorder
 import com.music.orb.ui.flavor.OrbFlavorUi
 import com.music.orb.ui.player.NowPlayingLaunchOriginRegistry
 
-private val HOME_SHELF_BOTTOM_SPACING = 15.dp
+private val HOME_SHELF_BOTTOM_SPACING = 20.dp
+private val HOME_RECOMMENDATIONS_TO_NEXT_SPACING = 20.dp
 private val RELEASE_BADGE_SLOT_HEIGHT = 24.dp
 internal val PAGE_AURA_HEIGHT = 430.dp
 internal const val HOME_RECOMMENDATIONS_SHELF_TITLE = "__orb_recommendations__"
 internal const val HOME_TOP_ARTISTS_SHELF_TITLE = "__orb_top_artists__"
 internal const val HOME_FAVORITE_ALBUM_RELEASES_SHELF_TITLE = "__orb_favorite_album_releases__"
+internal const val HOME_SIMILAR_TO_SUBTITLE = "__orb_similar_to__"
 
 // Strong full-card scrim for hero cards. The lower half of the artwork is
 // progressively darkened so title, artist and badges share one legible backdrop.
@@ -164,13 +173,16 @@ fun HomeScreen(
     exploreHeaderMode: Boolean = false,
     /** Only For You uses the large editorial lead card. Other hub tabs use shelves uniformly. */
     heroFirstShelf: Boolean = true,
+    showSpotifyLibrary: Boolean = false,
 ) {
+    val communityShelfTitle = stringResource(R.string.expressive_playlists_community)
     val homeAuraEnabled by AppSettings.homeAuraEnabled.collectAsStateWithLifecycle()
 
     PullToRefresh(
         refreshing = refreshing,
         onRefresh = onRefresh,
         state = pullState,
+        indicatorTopPadding = contentPadding.calculateTopPadding(),
         modifier = modifier,
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
@@ -240,7 +252,10 @@ fun HomeScreen(
                 }
 
                 when (state) {
-                    is UiState.Loading -> feedSkeleton()
+                    is UiState.Loading -> {
+                        feedSkeleton(heroFirstShelf = heroFirstShelf, expressive = OrbFlavorUi.expressive)
+                        if (showSpotifyLibrary) item(key = "spotify-library") { SpotifyLibraryShelf(onItemClick) }
+                    }
                     is UiState.Error -> item {
                         MessageState(
                             state.message,
@@ -259,6 +274,8 @@ fun HomeScreen(
                             fullTrackBadgesInShelves = fullTrackBadgesInShelves,
                             expressive = OrbFlavorUi.expressive,
                             heroFirstShelf = heroFirstShelf,
+                            showSpotifyLibrary = showSpotifyLibrary,
+                            communityShelfTitle = communityShelfTitle,
                         )
                         if (loadingMore) feedMoreSkeleton()
                     }
@@ -464,9 +481,18 @@ private fun androidx.compose.foundation.lazy.LazyListScope.itemsIndexedShelves(
     fullTrackBadgesInShelves: Boolean,
     expressive: Boolean,
     heroFirstShelf: Boolean,
+    showSpotifyLibrary: Boolean = false,
+    communityShelfTitle: String = "",
 ) {
+    var spotifyInserted = false
     shelves.forEachIndexed { index, shelf ->
         val itemKey = shelf.title + index
+        // The title is localized at composition time, just like the community shelf.
+        if (showSpotifyLibrary && !spotifyInserted && shelf.items.isNotEmpty() &&
+            shelf.title == communityShelfTitle) {
+            item(key = "spotify-library") { SpotifyLibraryShelf(onItemClick) }
+            spotifyInserted = true
+        }
         item(key = itemKey) {
             Box(modifier = homeVerticalEdgeModifier(listState, itemKey)) {
                 if (shelf.title == HOME_FAVORITE_ALBUM_RELEASES_SHELF_TITLE) {
@@ -521,6 +547,10 @@ private fun androidx.compose.foundation.lazy.LazyListScope.itemsIndexedShelves(
             }
         }
     }
+    if (showSpotifyLibrary && !spotifyInserted) {
+        item(key = "spotify-library") { SpotifyLibraryShelf(onItemClick) }
+    }
+
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -538,7 +568,7 @@ private fun FavoriteAlbumReleaseShelf(
             start = PAGE_GUTTER,
             end = PAGE_GUTTER,
             top = 0.dp,
-            bottom = 15.dp,
+            bottom = HOME_SHELF_BOTTOM_SPACING,
         ),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -634,7 +664,7 @@ private fun ArtistProfileShelf(
 ) {
     Column(
         modifier = Modifier.padding(
-            bottom = 15.dp,
+            bottom = HOME_SHELF_BOTTOM_SPACING,
         ),
     ) {
         SectionHeader(shelf.title, shelf.subtitle, expressive = expressive)
@@ -710,7 +740,7 @@ private fun RankedShelf(
     }
     Column(
         modifier = Modifier.padding(
-            bottom = 15.dp,
+            bottom = HOME_SHELF_BOTTOM_SPACING,
         ),
     ) {
         SectionHeader(shelf.title, shelf.subtitle, expressive = expressive)
@@ -820,6 +850,18 @@ internal fun SectionHeader(
             bottom = if (expressive) 10.dp else 8.dp,
         ),
     ) {
+        val similarToArtist = subtitle == HOME_SIMILAR_TO_SUBTITLE
+        if (similarToArtist) {
+            Text(
+                text = stringResource(R.string.expressive_for_you_similar_to_label),
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(2.dp))
+        }
+
         Text(
             text = localizedYouTubeSectionTitle(title),
             style = if (expressive) {
@@ -831,7 +873,7 @@ internal fun SectionHeader(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-        if (subtitle.isNotBlank()) {
+        if (subtitle.isNotBlank() && !similarToArtist) {
             Text(
                 text = localizedYouTubeMetadata(subtitle),
                 style = if (expressive) {
@@ -858,11 +900,10 @@ private fun RotatingRecommendationShelf(
     if (shelf.items.isEmpty()) {
         Column(
             modifier = Modifier.padding(
-                bottom = 15.dp,
+                bottom = HOME_RECOMMENDATIONS_TO_NEXT_SPACING,
             ),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            SectionHeader(shelf.title, shelf.subtitle, expressive = expressive)
             BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -942,14 +983,29 @@ private fun RotatingRecommendationShelf(
     }
     val selectedIndex = selectedVirtualIndex.floorMod(itemCount)
     val selected = shelf.items[selectedIndex]
+    val context = LocalContext.current
+    var lastFeedbackVirtualIndex by remember(carouselState) {
+        mutableIntStateOf(selectedVirtualIndex)
+    }
+
+    // The Suggestions carousel behaves like a tactile picker: crossing into a
+    // new centred card produces one subtle detent. OrbHaptics gates both the
+    // haptic response and Orb's muted rolling sound behind "Respostas táteis".
+    LaunchedEffect(selectedVirtualIndex) {
+        if (selectedVirtualIndex != lastFeedbackVirtualIndex) {
+            // CAROUSEL feedback includes both the tactile detent and Orb's
+            // short rolling/ratchet tick. Both are gated by Respostas táteis.
+            OrbHaptics.perform(context, OrbHaptics.Kind.CAROUSEL)
+            lastFeedbackVirtualIndex = selectedVirtualIndex
+        }
+    }
 
     Column(
         modifier = Modifier.padding(
-            bottom = 15.dp,
+            bottom = HOME_RECOMMENDATIONS_TO_NEXT_SPACING,
         ),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        SectionHeader(shelf.title, shelf.subtitle, expressive = expressive)
 
         BoxWithConstraints(
             modifier = Modifier
@@ -1000,33 +1056,53 @@ private fun RotatingRecommendationShelf(
                     val signed = relativePosition.coerceIn(-3f, 3f)
                     val density = LocalDensity.current
 
-                    // Curva com overshoot senoidal elástico ("bouncy") à medida que o card atinge o centro
-                    val bounceFactor = if (distance <= 1f) {
-                        val progress = 1f - distance
-                        progress + 0.16f * sin(progress * PI.toFloat())
+                    // Pinterest-style stacked motion: layout position still follows
+                    // the finger, while the visual transforms chase it through the same
+                    // medium-bouncy spring used by Orb's navigation selectors. That keeps
+                    // dragging responsive but gives scale/tilt/depth a soft elastic settle.
+                    val targetScale = if (distance <= 1f) {
+                        0.88f + (1f - distance) * 0.12f
                     } else {
-                        0f
+                        (0.88f - (distance - 1f) * 0.055f).coerceIn(0.73f, 0.88f)
                     }
-                    val scale = if (distance <= 1f) {
-                        0.90f + bounceFactor * 0.10f
-                    } else {
-                        (0.90f - (distance - 1f) * 0.055f).coerceIn(0.74f, 0.90f)
+                    val targetRotationZ = (signed * 3.2f).coerceIn(-7f, 7f)
+                    val targetRotationY = (-signed * 2.4f).coerceIn(-5f, 5f)
+                    val targetTranslationX = with(density) { signed * 24.dp.toPx() }
+                    val targetTranslationY = with(density) {
+                        (distance * 4.5.dp.toPx()).coerceAtMost(13.dp.toPx())
                     }
-
-                    val alpha = (1f - distance * 0.12f).coerceIn(0.65f, 1f)
-                    val rotationZ = (signed * 4.0f).coerceIn(-8f, 8f)
-                    val rotationY = (-signed * 1.8f).coerceIn(-4f, 4f)
-                    val translationX = with(density) {
-                        signed * 26.dp.toPx()
-                    }
-                    val translationY = with(density) {
-                        val liftBounce = if (distance <= 1f) {
-                            -3.dp.toPx() * sin((1f - distance) * PI.toFloat())
-                        } else {
-                            0f
-                        }
-                        (distance * 4.dp.toPx()).coerceAtMost(12.dp.toPx()) + liftBounce
-                    }
+                    val motionSpec = spring<Float>(
+                        dampingRatio = Spring.DampingRatioMediumBouncy,
+                        stiffness = Spring.StiffnessMediumLow,
+                    )
+                    val scale by animateFloatAsState(
+                        targetValue = targetScale,
+                        animationSpec = motionSpec,
+                        label = "suggestionCardScale$virtualIndex",
+                    )
+                    val rotationZ by animateFloatAsState(
+                        targetValue = targetRotationZ,
+                        animationSpec = motionSpec,
+                        label = "suggestionCardRotationZ$virtualIndex",
+                    )
+                    val rotationY by animateFloatAsState(
+                        targetValue = targetRotationY,
+                        animationSpec = motionSpec,
+                        label = "suggestionCardRotationY$virtualIndex",
+                    )
+                    val translationX by animateFloatAsState(
+                        targetValue = targetTranslationX,
+                        animationSpec = motionSpec,
+                        label = "suggestionCardTranslationX$virtualIndex",
+                    )
+                    val translationY by animateFloatAsState(
+                        targetValue = targetTranslationY,
+                        animationSpec = motionSpec,
+                        label = "suggestionCardTranslationY$virtualIndex",
+                    )
+                    // Keep every suggestion card fully opaque. Depth is expressed only
+                    // through scale, rotation, translation and z-order; non-centred artwork
+                    // must remain at 100% opacity as requested.
                     val elevation = with(density) {
                         if (distance < 0.45f) 20.dp.toPx() else 5.dp.toPx()
                     }
@@ -1058,7 +1134,7 @@ private fun RotatingRecommendationShelf(
                                 .graphicsLayer {
                                     scaleX = scale
                                     scaleY = scale
-                                    this.alpha = alpha
+                                    this.alpha = 1f
                                     this.rotationZ = rotationZ
                                     this.rotationY = rotationY
                                     this.translationX = translationX
@@ -1122,7 +1198,7 @@ private fun HeroShelf(
 ) {
     Column(
         Modifier.padding(
-            bottom = 15.dp,
+            bottom = HOME_SHELF_BOTTOM_SPACING,
         ),
     ) {
         SectionHeader(shelf.title, shelf.subtitle, expressive = expressive)
@@ -1205,6 +1281,11 @@ private fun HeroCard(
         if (isCollection) collectionBadges.isHiResLossless else trackQuality.isHiResLossless
     val badgeHiQuality = if (isCollection) collectionBadges.isHiQuality else trackQuality.isHiQuality
     val supportsBadges = isCollection || isTrack
+    val badgeMaterialColor = if (expressive) {
+        MaterialTheme.colorScheme.primaryContainer
+    } else {
+        MaterialTheme.colorScheme.surfaceContainerHigh
+    }
 
     val heroShape = RoundedCornerShape(if (expressive) 30.dp else 18.dp)
 
@@ -1272,8 +1353,7 @@ private fun HeroCard(
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
                 badgeSpacing = 5.dp,
-                badgeSize = 13.dp,
-                badgeFontSize = 10.sp,
+                badgePageColor = badgeMaterialColor,
                 modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(if (expressive) 7.dp else 5.dp))
@@ -1297,6 +1377,7 @@ private fun HeroCard(
                         isHiResLossless = badgeHiResLossless,
                         isHiQuality = badgeHiQuality,
                         color = Color.White,
+                        glassPageColor = badgeMaterialColor,
                     )
                 }
             }
@@ -1317,7 +1398,7 @@ internal fun Shelf(
 ) {
     Column(
         Modifier.padding(
-            bottom = 15.dp,
+            bottom = HOME_SHELF_BOTTOM_SPACING,
         ),
     ) {
         SectionHeader(shelf.title, shelf.subtitle, expressive = expressive)
@@ -1427,6 +1508,14 @@ private fun ShelfCard(
     val badgeHiResLossless =
         if (isCollection) badges.isHiResLossless else trackQuality.isHiResLossless
     val badgeHiQuality = if (isCollection) badges.isHiQuality else trackQuality.isHiQuality
+    // Home and Library share ShelfCard. In Expressive mode the badge glass is
+    // themed from the app's active Material 3 tonal palette, never from an
+    // album/detail palette.
+    val badgeMaterialColor = if (expressive) {
+        MaterialTheme.colorScheme.primaryContainer
+    } else {
+        MaterialTheme.colorScheme.surfaceContainerHigh
+    }
 
     Column(
         modifier = Modifier
@@ -1447,7 +1536,7 @@ private fun ShelfCard(
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
-                        imageVector = BitChordIcons.Download,
+                        imageVector = OrbIcons.Download,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.onPrimaryContainer,
                         modifier = Modifier.size(40.dp),
@@ -1487,6 +1576,14 @@ private fun ShelfCard(
                         contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                         modifier = Modifier.fillMaxSize(),
                     )
+                    if (item.browseId?.startsWith("room:") == true && item.thumbnailUrl == null) {
+                        Icon(
+                            imageVector = if (item.browseId == "room:create") Icons.Rounded.Add else Icons.Rounded.Group,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.align(Alignment.Center).size(34.dp),
+                        )
+                    }
                     item.rank?.let { rank ->
                         Box(
                             modifier = Modifier
@@ -1531,13 +1628,25 @@ private fun ShelfCard(
                     .padding(top = 6.dp),
                 contentAlignment = Alignment.TopStart,
             ) {
-                ReleaseBadges(
-                    isExplicit = badgeExplicit,
-                    isLossless = badgeLossless,
-                    isHiResLossless = badgeHiResLossless,
-                    isHiQuality = badgeHiQuality,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    ReleaseBadges(
+                        isExplicit = badgeExplicit,
+                        isLossless = badgeLossless,
+                        isHiResLossless = badgeHiResLossless,
+                        isHiQuality = badgeHiQuality,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        glassPageColor = badgeMaterialColor,
+                    )
+                    if (item.type == BrowseType.ALBUM) {
+                        AlbumRatingBadge(
+                            albumId = item.browseId,
+                            glassPageColor = badgeMaterialColor,
+                        )
+                    }
+                }
             }
         }
     }

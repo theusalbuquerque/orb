@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="profile_photo_cannot_open">No se pudo abrir esta foto. Elige otra imagen.</string>
+    <string name="profile_photo_too_large">La foto seleccionada supera los 50 MB. Elige una imagen de hasta 50 MB.</string>
+    <string name="settings_download_fallback_lower_summary">Usar una tasa de bits inferior solo si la seleccionada no está disponible. Desactivado: no reducir la calidad.</string>
+    <string name="settings_download_fallback_lower_title">Permitir una calidad de descarga inferior</string>
+    <string name="settings_download_strict_quality_summary">Las descargas requieren la calidad seleccionada; no se descarga en calidad inferior sin permiso.</string>
+    <string name="download_prefer_offline_online_summary">Si se desactiva, se usa streaming fuera de Descargas. Sin conexión, siempre se usan los archivos guardados.</string>
+    <string name="download_prefer_offline_online_title">Usar archivos descargados incluso con conexión</string>
+    <string name="nerd_offline_automix_status">Sin conexión · análisis pausado</string>
+    <string name="nerd_offline_automix_unavailable">Automix no disponible sin conexión</string>
+</resources>

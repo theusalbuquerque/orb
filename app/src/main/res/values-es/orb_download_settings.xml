@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="settings_downloads_title">Descargas</string>
+  <string name="settings_downloads_subtitle">Calidad predeterminada y alternativa si no está disponible</string>
+  <string name="settings_download_allow_lower">Descargar en calidad inferior si no está disponible</string>
+  <string name="settings_download_allow_lower_summary">Probar calidad Alta, Media u otra inferior en lugar de fallar. Se registrará la calidad real.</string>
+  <string name="settings_download_done">Listo</string>
+    <string name="song_action_resolving_download_quality">Buscando la calidad seleccionada…</string>
+</resources>

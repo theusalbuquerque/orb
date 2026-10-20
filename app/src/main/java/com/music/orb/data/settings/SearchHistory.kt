@@ -23,7 +23,7 @@ data class SearchHistoryEntry(
 )
 
 /**
- * What's been searched for lately, kept on this device only.
+ * What's been searched for lately, cached locally and synchronized with the signed-in Orb account.
  *
  * The visible history is deliberately short: Explore is also a discovery page,
  * so recent searches must not push the recommendation grid too far down.
@@ -35,6 +35,7 @@ data class SearchHistoryEntry(
 object SearchHistory {
 
     private const val MAX_ENTRIES = 6
+    private var historyKey = KEY_HISTORY
 
     private lateinit var prefs: SharedPreferences
     private val json = Json
@@ -46,7 +47,7 @@ object SearchHistory {
 
     fun init(context: Context) {
         prefs = context.getSharedPreferences("bitchord_settings", Context.MODE_PRIVATE)
-        val raw = prefs.getString(KEY_HISTORY, null) ?: "[]"
+        val raw = prefs.getString(historyKey, null) ?: "[]"
         _recent.value = decode(raw).take(MAX_ENTRIES)
     }
 
@@ -57,7 +58,11 @@ object SearchHistory {
      * created by pressing Search. Re-recording without artwork never erases an
      * image we already know for that query.
      */
-    fun record(query: String, thumbnailUrl: String? = null) {
+    fun record(query: String, thumbnailUrl: String? = null) = AccountHistorySync.withAccount {
+        recordLocal(query, thumbnailUrl)
+    }
+
+    private fun recordLocal(query: String, thumbnailUrl: String?) {
         val term = query.trim()
         if (term.isEmpty()) return
         val previous = _recent.value.firstOrNull { it.query.equals(term, ignoreCase = true) }
@@ -67,13 +72,42 @@ object SearchHistory {
         )
         val deduped = _recent.value.filterNot { it.query.equals(term, ignoreCase = true) }
         save((listOf(entry) + deduped).take(MAX_ENTRIES))
+        AccountHistorySync.enqueue("search_record", buildJsonObject {
+            put("query", term); entry.thumbnailUrl?.let { put("thumbnailUrl", it) }
+        })
     }
 
-    fun remove(query: String) {
+    fun remove(query: String) = AccountHistorySync.withAccount {
+        AccountHistorySync.enqueue("search_remove", buildJsonObject { put("query", query.trim()) })
         save(_recent.value.filterNot { it.query.equals(query, ignoreCase = true) })
     }
 
-    fun clear() = save(emptyList())
+    fun clear() = AccountHistorySync.withAccount {
+        save(emptyList())
+        AccountHistorySync.enqueue("search_clear", buildJsonObject {})
+    }
+
+    internal fun bindAccount(userId: String?) {
+        historyKey = if (userId == null) KEY_HISTORY else "search_history_account_$userId"
+        _recent.value = decode(prefs.getString(historyKey, null) ?: "[]").take(MAX_ENTRIES)
+    }
+
+    internal fun applyCloud(operations: List<HistoryOperation>) {
+        var entries = emptyList<SearchHistoryEntry>()
+        operations.forEach { op ->
+            val query = op.payload["query"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            when (op.kind) {
+                "search_clear" -> entries = emptyList()
+                "search_remove" -> entries = entries.filterNot { it.query.equals(query, true) }
+                "search_record" -> if (query.isNotBlank()) {
+                    val previous = entries.firstOrNull { it.query.equals(query, true) }
+                    val thumbnail = op.payload["thumbnailUrl"]?.jsonPrimitive?.contentOrNull ?: previous?.thumbnailUrl
+                    entries = listOf(SearchHistoryEntry(query, thumbnail)) + entries.filterNot { it.query.equals(query, true) }
+                }
+            }
+        }
+        save(entries.take(MAX_ENTRIES))
+    }
 
     private fun decode(raw: String): List<SearchHistoryEntry> = runCatching {
         json.parseToJsonElement(raw).jsonArray.mapNotNull { element ->
@@ -111,7 +145,7 @@ object SearchHistory {
                 )
             }
         }.toString()
-        prefs.edit().putString(KEY_HISTORY, encoded).apply()
+        prefs.edit().putString(historyKey, encoded).apply()
     }
 
     private const val KEY_HISTORY = "search_history"

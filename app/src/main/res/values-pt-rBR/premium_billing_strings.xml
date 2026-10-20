@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="premium_billing_retry">Tentar novamente</string>
+    <string name="premium_billing_sign_in">Entre novamente na sua conta Orb para gerenciar sua assinatura.</string>
+    <string name="premium_billing_error">Não foi possível concluir a solicitação. Tente novamente.</string>
+    <string name="premium_payment_title">Assinar Orb Premium</string>
+    <string name="premium_payment_total">Total do pagamento</string>
+    <string name="premium_payment_zero_notice">Confirme para ativar sua assinatura. Nenhum valor será cobrado.</string>
+    <string name="premium_payment_provider_notice">Continue para a página de pagamento seguro para concluir sua assinatura.</string>
+    <string name="premium_payment_confirm">Confirmar assinatura</string>
+    <string name="premium_payment_continue">Continuar para o pagamento</string>
+    <string name="premium_payment_back">Voltar</string>
+    <string name="premium_payment_check">Verificar pagamento</string>
+    <string name="premium_payment_pending">Seu pagamento ainda não foi confirmado. Verifique novamente em instantes.</string>
+    <string name="premium_payment_success">Orb Premium ativado.</string>
+    <string name="premium_cancel_success">Renovação cancelada. Seu Orb Premium continua disponível até o fim do período já pago.</string>
+    <string name="premium_demo_badge">Cortesia de desenvolvedor · validação real do cartão, R$ 0,00</string>
+    <string name="premium_demo_cancel_message">Cancelar sua assinatura de cortesia? O registro será cancelado no servidor do Orb; não existem cobranças programadas. Seu acesso de desenvolvedor permanece ativo.</string>
+    <string name="premium_demo_cancel_success">Assinatura de cortesia cancelada no servidor. Seu acesso de desenvolvedor permanece ativo.</string>
+    <string name="premium_demo_payment_title">Validar cartão · Orb Premium</string>
+    <string name="premium_demo_payment_notice">Autorização real de cartão com valor zero (ZDA) no Mercado Pago. A página segura valida seu cartão sem cobrar. Nenhuma assinatura financeira recorrente é criada.</string>
+    <string name="premium_demo_subscribe_success">Cartão validado e assinatura de cortesia ativada.</string>
+    <string name="premium_demo_canceled">Assinatura de cortesia inativa · R$ 0,00</string>
+    <string name="premium_billing_credentials_rejected">O Mercado Pago recusou as credenciais de pagamento do Orb. Entre em contato com o suporte.</string>
+    <string name="premium_billing_request_rejected">O Mercado Pago recusou a solicitação de assinatura. Informe o código exibido ao suporte do Orb.</string>
+    <string name="premium_billing_rate_limited">Muitas tentativas de pagamento. Aguarde alguns minutos antes de tentar novamente.</string>
+    <string name="premium_billing_link_missing">O Mercado Pago não forneceu um link válido para assinar. Entre em contato com o suporte do Orb.</string>
+    <string name="premium_billing_invalid_response">O Mercado Pago retornou uma resposta inesperada. Tente novamente mais tarde.</string>
+    <string name="premium_billing_service_unavailable">O serviço de pagamento está temporariamente indisponível. Verifique a conexão ou tente mais tarde.</string>
+    <string name="premium_billing_already_active">Sua assinatura pode já estar ativa. Confira o status do Orb Premium.</string>
+</resources>

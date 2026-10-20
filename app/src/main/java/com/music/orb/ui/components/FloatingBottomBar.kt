@@ -8,7 +8,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -33,24 +32,27 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.music.orb.data.settings.AppSettings
 import com.music.orb.ui.flavor.OrbFlavorUi
+import dev.chrisbanes.haze.HazeStyle
+import dev.chrisbanes.haze.HazeTint
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeEffect
 import dev.chrisbanes.haze.materials.ExperimentalHazeMaterialsApi
@@ -61,6 +63,36 @@ data class BottomTab(
     val label: String,
     val icon: ImageVector,
 )
+
+/** The same live backdrop used by Orb's Expressive navigation, supplied by MainActivity. */
+internal val LocalOrbNavigationGlassHazeState = staticCompositionLocalOf<HazeState?> { null }
+
+/**
+ * Shared material for the navigation dock and the neutral selector capsules.
+ * Both surfaces use Haze regular(surfaceContainerHigh) and the exact same rim;
+ * the solid fallback is also shared for the reduced-blur accessibility setting.
+ */
+@OptIn(ExperimentalHazeMaterialsApi::class)
+@Composable
+internal fun Modifier.orbNavigationNeutralGlass(
+    hazeState: HazeState?,
+    reduceDynamicBlur: Boolean,
+    containerColor: Color,
+    borderColor: Color,
+    shape: Shape,
+): Modifier = this
+    .clip(shape)
+    .then(
+        if (reduceDynamicBlur || hazeState == null) {
+            Modifier.background(containerColor)
+        } else {
+            Modifier.hazeEffect(
+                state = hazeState,
+                style = HazeMaterials.regular(containerColor),
+            )
+        },
+    )
+    .border(width = 0.75.dp, color = borderColor, shape = shape)
 
 @OptIn(ExperimentalHazeMaterialsApi::class)
 @Composable
@@ -112,19 +144,13 @@ private fun ExpressiveFloatingBottomBar(
     notificationTabIndex: Int? = null,
     showNotificationDot: Boolean = false,
 ) {
+    var previewIndex by remember { mutableIntStateOf(selectedIndex) }
     val outerShape = RoundedCornerShape(36.dp)
     val indicatorShape = RoundedCornerShape(26.dp)
     val container = MaterialTheme.colorScheme.surfaceContainerHigh
-    val selectedContainerTarget = when (selectedIndex % 3) {
-        1 -> MaterialTheme.colorScheme.secondaryContainer
-        2 -> MaterialTheme.colorScheme.tertiaryContainer
-        else -> MaterialTheme.colorScheme.primaryContainer
-    }
-    val selectedContentTarget = when (selectedIndex % 3) {
-        1 -> MaterialTheme.colorScheme.onSecondaryContainer
-        2 -> MaterialTheme.colorScheme.onTertiaryContainer
-        else -> MaterialTheme.colorScheme.onPrimaryContainer
-    }
+    // Selection material follows Stats Geral/Pessoal and the header menu.
+    val selectedContainerTarget = MaterialTheme.colorScheme.primaryContainer
+    val selectedContentTarget = MaterialTheme.colorScheme.onPrimaryContainer
     val selectedContainer by animateColorAsState(
         targetValue = selectedContainerTarget,
         animationSpec = tween(180),
@@ -138,7 +164,7 @@ private fun ExpressiveFloatingBottomBar(
     val reduceDynamicBlur by AppSettings.reduceDynamicBlur.collectAsStateWithLifecycle()
 
     var dragOffset by remember { mutableFloatStateOf(0f) }
-    val haptics = LocalHapticFeedback.current
+    val context = LocalContext.current
     val density = LocalDensity.current
     val currentSelectedIndex by rememberUpdatedState(selectedIndex)
     var rowSize by remember { mutableStateOf(IntSize.Zero) }
@@ -164,7 +190,11 @@ private fun ExpressiveFloatingBottomBar(
     )
 
     var lastHapticTab by remember { mutableIntStateOf(selectedIndex) }
-    LaunchedEffect(selectedIndex) { dragOffset = 0f }
+    LaunchedEffect(selectedIndex) {
+        previewIndex = selectedIndex
+        dragOffset = 0f
+        lastHapticTab = selectedIndex
+    }
 
     Box(
         modifier = modifier
@@ -172,20 +202,11 @@ private fun ExpressiveFloatingBottomBar(
             .padding(horizontal = 16.dp)
             .padding(bottom = 8.dp)
             .fillMaxWidth()
-            .clip(outerShape)
-            .then(
-                if (reduceDynamicBlur) {
-                    Modifier.background(container)
-                } else {
-                    Modifier.hazeEffect(
-                        state = hazeState,
-                        style = HazeMaterials.regular(container),
-                    )
-                },
-            )
-            .border(
-                width = 0.75.dp,
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
+            .orbNavigationNeutralGlass(
+                hazeState = hazeState,
+                reduceDynamicBlur = reduceDynamicBlur,
+                containerColor = container,
+                borderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
                 shape = outerShape,
             )
             .padding(horizontal = 7.dp, vertical = 7.dp),
@@ -205,11 +226,12 @@ private fun ExpressiveFloatingBottomBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .onSizeChanged { rowSize = it }
-                .pointerInput(Unit) {
+                .pointerInput(tabStepPx, tabs.size, currentSelectedIndex) {
                     var totalDrag = 0f
-                    detectHorizontalDragGestures(
+                    detectOrbHorizontalDragGestures(
+                        horizontalDominance = 1.45f,
                         onDragStart = { totalDrag = 0f },
-                        onDragCancel = { dragOffset = 0f },
+                        onDragCancel = { dragOffset = 0f; previewIndex = currentSelectedIndex },
                         onDragEnd = {
                             if (tabStepPx > 0f) {
                                 val ratio = totalDrag / tabStepPx
@@ -220,11 +242,18 @@ private fun ExpressiveFloatingBottomBar(
                                 }
                                 val newIndex = (currentSelectedIndex + shift)
                                     .coerceIn(0, tabs.lastIndex)
-                                if (newIndex != currentSelectedIndex) onTabSelected(newIndex)
+                                if (newIndex != currentSelectedIndex) {
+                                    onTabSelected(newIndex)
+                                    if (lastHapticTab != newIndex) {
+                                        OrbHaptics.perform(context, OrbHaptics.Kind.NAVIGATION)
+                                        lastHapticTab = newIndex
+                                    }
+                                }
                             }
                             dragOffset = 0f
+                            previewIndex = currentSelectedIndex
                         },
-                        onHorizontalDrag = { _, delta ->
+                        onHorizontalDrag = { delta ->
                             totalDrag += delta
                             dragOffset = when {
                                 totalDrag > 0 && currentSelectedIndex == tabs.lastIndex -> totalDrag * 0.25f
@@ -235,8 +264,9 @@ private fun ExpressiveFloatingBottomBar(
                                 val approxTab = (currentSelectedIndex + dragOffset / tabStepPx)
                                     .coerceIn(0f, tabs.lastIndex.toFloat())
                                     .roundToInt()
+                                previewIndex = approxTab
                                 if (approxTab != lastHapticTab) {
-                                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    OrbHaptics.perform(context, OrbHaptics.Kind.NAVIGATION)
                                     lastHapticTab = approxTab
                                 }
                             }
@@ -249,9 +279,15 @@ private fun ExpressiveFloatingBottomBar(
             tabs.forEachIndexed { index, tab ->
                 ExpressiveBottomBarItem(
                     tab = tab,
-                    selected = index == selectedIndex,
+                    selected = index == previewIndex,
                     selectedContentColor = selectedContent,
-                    onClick = { onTabSelected(index) },
+                    onClick = {
+                        // A tap on the already-selected destination is meaningful too:
+                        // MainActivity uses it as the conventional "return to top" action.
+                        onTabSelected(index)
+                        lastHapticTab = index
+                        OrbHaptics.perform(context, OrbHaptics.Kind.NAVIGATION)
+                    },
                     modifier = Modifier.weight(1f),
                     showNotificationDot = showNotificationDot && index == notificationTabIndex,
                 )
@@ -287,11 +323,12 @@ private fun ExpressiveBottomBarItem(
         label = "expressiveTabTint",
     )
 
+    val itemShape = RoundedCornerShape(26.dp)
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = modifier
             .height(56.dp)
-            .clip(RoundedCornerShape(26.dp))
+            .clip(itemShape)
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
@@ -366,7 +403,7 @@ private fun ClassicFloatingBottomBar(
     val reduceDynamicBlur by AppSettings.reduceDynamicBlur.collectAsStateWithLifecycle()
 
     var dragOffset by remember { mutableFloatStateOf(0f) }
-    val haptics = LocalHapticFeedback.current
+    val context = LocalContext.current
     val density = LocalDensity.current
     val currentSelectedIndex by rememberUpdatedState(selectedIndex)
 
@@ -396,7 +433,10 @@ private fun ClassicFloatingBottomBar(
 
     var lastHapticTab by remember { mutableIntStateOf(selectedIndex) }
 
-    LaunchedEffect(selectedIndex) { dragOffset = 0f }
+    LaunchedEffect(selectedIndex) {
+        dragOffset = 0f
+        lastHapticTab = selectedIndex
+    }
 
     Box(
         modifier = modifier
@@ -433,9 +473,10 @@ private fun ClassicFloatingBottomBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .onSizeChanged { rowSize = it }
-                .pointerInput(Unit) {
+                .pointerInput(tabStepPx, tabs.size, currentSelectedIndex) {
                     var totalDrag = 0f
-                    detectHorizontalDragGestures(
+                    detectOrbHorizontalDragGestures(
+                        horizontalDominance = 1.45f,
                         onDragStart = { totalDrag = 0f },
                         onDragCancel = { dragOffset = 0f },
                         onDragEnd = {
@@ -449,11 +490,15 @@ private fun ClassicFloatingBottomBar(
                                 val newIndex = (currentSelectedIndex + shift).coerceIn(0, tabs.lastIndex)
                                 if (newIndex != currentSelectedIndex) {
                                     onTabSelected(newIndex)
+                                    if (lastHapticTab != newIndex) {
+                                        OrbHaptics.perform(context, OrbHaptics.Kind.NAVIGATION)
+                                        lastHapticTab = newIndex
+                                    }
                                 }
                             }
                             dragOffset = 0f
                         },
-                        onHorizontalDrag = { _, delta ->
+                        onHorizontalDrag = { delta ->
                             totalDrag += delta
                             val rawPx = when {
                                 totalDrag > 0 && currentSelectedIndex == tabs.lastIndex ->
@@ -464,13 +509,15 @@ private fun ClassicFloatingBottomBar(
                             }
                             dragOffset = rawPx
 
-                            val approxTab =
-                                (currentSelectedIndex + dragOffset / tabStepPx)
-                                    .coerceIn(0f, tabs.lastIndex.toFloat())
-                                    .roundToInt()
-                            if (approxTab != lastHapticTab) {
-                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                lastHapticTab = approxTab
+                            if (tabStepPx > 0f) {
+                                val approxTab =
+                                    (currentSelectedIndex + dragOffset / tabStepPx)
+                                        .coerceIn(0f, tabs.lastIndex.toFloat())
+                                        .roundToInt()
+                                if (approxTab != lastHapticTab) {
+                                    OrbHaptics.perform(context, OrbHaptics.Kind.NAVIGATION)
+                                    lastHapticTab = approxTab
+                                }
                             }
                         },
                     )
@@ -482,7 +529,13 @@ private fun ClassicFloatingBottomBar(
                 ClassicBottomBarItem(
                     tab = tab,
                     selected = index == selectedIndex,
-                    onClick = { onTabSelected(index) },
+                    onClick = {
+                        // A tap on the already-selected destination is meaningful too:
+                        // MainActivity uses it as the conventional "return to top" action.
+                        onTabSelected(index)
+                        lastHapticTab = index
+                        OrbHaptics.perform(context, OrbHaptics.Kind.NAVIGATION)
+                    },
                     modifier = Modifier.weight(1f),
                     showNotificationDot = showNotificationDot && index == notificationTabIndex,
                 )

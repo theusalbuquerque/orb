@@ -67,6 +67,59 @@ object QueueBuilder {
     }
 
     /**
+     * Selects a *station*, not just the most similar recording. Musical proximity
+     * is handled later by the Automix queue sorter; this stage favours new artists
+     * over another title from the seed artist or one heard repeatedly recently.
+     * History is also used as a recording-level veto across refills, not only the
+     * final 36 entries still present in Media3's queue.
+     */
+    fun extendDiverse(
+        existing: List<Song>,
+        candidates: List<Song>,
+        history: List<Song>,
+        limit: Int,
+    ): List<Song> {
+        if (limit <= 0) return emptyList()
+        val forbidden = existing + history
+        val unique = mutableListOf<Song>()
+        candidates.forEach { song ->
+            if (forbidden.none { isSameRecording(it, song) } &&
+                unique.none { isSameRecording(it, song) }
+            ) unique += song
+        }
+
+        val recentCredits = (history + existing).takeLast(24)
+        val lastCredits = (history + existing).takeLast(5)
+        val frequency = recentCredits.flatMap { artistSet(it.artist) }
+            .groupingBy { it }.eachCount()
+        val latestArtists = lastCredits.flatMap { artistSet(it.artist) }.toSet()
+        val seedArtists = existing.lastOrNull()?.artist?.let(::artistSet).orEmpty()
+        val selected = mutableListOf<Song>()
+        val selectedArtists = mutableMapOf<String, Int>()
+
+        while (selected.size < limit && unique.isNotEmpty()) {
+            val choice = unique.withIndex().minByOrNull { (rank, song) ->
+                val credits = artistSet(song.artist)
+                val exposure = credits.maxOfOrNull { frequency[it] ?: 0 } ?: 0
+                val alreadyChosen = credits.maxOfOrNull { selectedArtists[it] ?: 0 } ?: 0
+                val seedPenalty = if (credits.any { it in seedArtists }) 30 else 0
+                val recentPenalty = if (credits.any { it in latestArtists }) 20 else 0
+                // Selection penalties intentionally dominate radio order: radio's top
+                // matches otherwise reproduce the same two artists endlessly.
+                val videoPenalty = if (song.isVideo) 500 else 0
+                alreadyChosen * 1000 + exposure * 35 + seedPenalty + recentPenalty +
+                    videoPenalty + rank
+            }?.value ?: break
+            unique.remove(choice)
+            selected += choice
+            artistSet(choice.artist).forEach { artist ->
+                selectedArtists[artist] = (selectedArtists[artist] ?: 0) + 1
+            }
+        }
+        return selected
+    }
+
+    /**
      * Whether two entries are the same recording. Ids differ between the audio
      * and video cuts of a track, which is exactly the case id equality misses.
      */

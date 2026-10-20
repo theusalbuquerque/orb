@@ -36,6 +36,7 @@ import org.schabi.newpipe.extractor.downloader.Downloader
 import org.schabi.newpipe.extractor.downloader.Request
 import org.schabi.newpipe.extractor.downloader.Response
 import org.schabi.newpipe.extractor.exceptions.ReCaptchaException
+import org.schabi.newpipe.extractor.exceptions.YoutubeMusicPremiumContentException
 import org.schabi.newpipe.extractor.services.youtube.YoutubeJavaScriptPlayerManager
 import org.schabi.newpipe.extractor.stream.AudioStream
 import org.schabi.newpipe.extractor.stream.DeliveryMethod
@@ -76,7 +77,7 @@ import kotlin.math.abs
  */
 object StreamResolver {
 
-    private const val TAG = "BitChord"
+    private const val TAG = "Orb"
 
     /** Past this, an extractor fetch is worth flagging rather than just noting. */
     private const val SLOW_FETCH_MS = 2000L
@@ -89,12 +90,17 @@ object StreamResolver {
      */
     private const val FIRST_NOTE_PLAYER_REQUEST_MS = 1_000L
     private const val FIRST_NOTE_VISITOR_WARMUP_MS = 150L
+    /** Healthy NewPipe rescues land in ~1-3 s; longer than this yields to the full resolver. */
+    private const val FIRST_NOTE_EXTRACTOR_RESCUE_MS = 4_000L
     // Every unciphered identity is cheap enough to ask in the same first-note wave. The old
     // limit of three meant one bad trio could fall into the slow full resolver even while IOS or
     // another plain-URL client would have answered immediately. They race and are cancelled as
     // soon as one usable Opus/AAC carrier arrives, so this widens reliability without serial wait.
     private const val FIRST_NOTE_CLIENT_LIMIT = 6
-    private const val FIRST_NOTE_AUTH_RESCUE_MS = 1_500L
+    private const val FIRST_NOTE_AUTH_RESCUE_MS = 900L
+    /** Tight media proof: enough to reject dead signed URLs without turning validation into buffering. */
+    private const val FIRST_NOTE_MEDIA_PROBE_MS = 1_100L
+    private const val FIRST_NOTE_MEDIA_PROBE_READ_BYTES = 8L * 1024L
 
     /** See [OkHttpDownloader.execute] — the one request the extractor is not allowed to make. */
     private const val NEXT_ENDPOINT = "/youtubei/v1/next"
@@ -325,11 +331,12 @@ object StreamResolver {
         init
 
         val quality = AppSettings.effectiveAudioQuality
+        val now = SystemClock.elapsedRealtime()
         recent[videoId]
             ?.takeIf { cached ->
-                SystemClock.elapsedRealtime() - cached.at < URL_TTL_MS &&
+                now - cached.at < URL_TTL_MS &&
                     validHttpStreamUrl(videoId, cached.url, "playback cache") != null &&
-                    cached.matches(quality)
+                    cached.matches(quality, now)
             }
             ?.let { cached ->
                 // The resolver cache can outlive PlaybackService. Re-publish the
@@ -397,21 +404,36 @@ object StreamResolver {
                         pickForQualityResponse(response)
                 }
 
-            val stream = timed("$videoId immediate carrier") {
+            val fastCandidate = timed("$videoId immediate carrier") {
                 firstNoteParallelStream(
                     videoId = videoId,
                     select = ::pickImmediateCarrier,
                 )
-            } ?: withTimeoutOrNull(FIRST_NOTE_AUTH_RESCUE_MS) {
-                // One bounded signed-in browser attempt before the expensive compatibility
-                // ladder. This is especially useful on networks where anonymous device clients
-                // are being bot-checked but the user's real Music session is still accepted.
+            }
+            val stream = fastCandidate?.stream ?: withTimeoutOrNull(FIRST_NOTE_AUTH_RESCUE_MS) {
+                // Give the authenticated browser identity one short chance; a healthy response
+                // normally lands in ~300 ms. Do not let a blocked WEB_REMIX request sit ahead
+                // of the extractor for 1.5 seconds while the listener is waiting for first audio.
                 authenticatedWebRemixStream(videoId, ::pickImmediateCarrier)
+            } ?: withTimeoutOrNull(FIRST_NOTE_EXTRACTOR_RESCUE_MS) {
+                try {
+                    timed("$videoId first-note NewPipe rescue") {
+                        newPipeStream(videoId, ::pickForQuality)
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    TrackLog.d(
+                        TAG,
+                        "first-note NewPipe rescue missed $videoId: ${e.message}",
+                        about = videoId,
+                    )
+                    null
+                }
             } ?: run {
-                // Emergency only. The normal path above is deliberately broad enough that this
-                // should be rare; keep the full resolver as the final reliability net rather than
-                // turning a temporary YouTube refusal into a hard playback error.
-                TrackLog.w(TAG, "all fast first-note carriers missed for $videoId; using full resolver as rescue")
+                // Keep the complete resolver as the final reliability net if the bounded extractor
+                // rescue also misses. This is deliberately last because it is the expensive path.
+                TrackLog.w(TAG, "all fast first-note rescues missed for $videoId; using full resolver")
                 val url = resolve(videoId)
                 val mime = resolvedMimeType(videoId).orEmpty()
                 val kbps = resolvedBitrateKbps(videoId)
@@ -423,7 +445,12 @@ object StreamResolver {
             }
 
             NerdStats.onStreamPicked(videoId, stream.kbps)
-            remember(videoId, stream)
+            // On a slow cellular link the short CDN proof may time out without receiving an
+            // HTTP refusal. Such a carrier can be tried immediately, but it must NOT be
+            // persisted as a verified URL until audio has actually been rendered.
+            if (fastCandidate?.verified != false) {
+                remember(videoId, stream)
+            }
             SourceStream(
                 url = stream.url,
                 format = StreamFormat(
@@ -918,13 +945,19 @@ object StreamResolver {
      * reliability envelope while the latency is bounded by the slowest request
      * in one wave instead of the sum of all of them.
      *
-     * No stream probe is performed here: ExoPlayer is the probe. Any client that
-     * fails is recorded/stood down exactly as it is in [playerStream].
+     * A candidate is not allowed to win on its player JSON alone. The signed media URL gets one
+     * short proof using the same Range shape playback will use. This costs one small CDN round
+     * trip in the healthy case, but prevents the much worse failure mode where a 500 ms player
+     * response hands ExoPlayer a URL that 403s, sits BUFFERING for the first-audio watchdog, and
+     * only then starts the rescue hierarchy. Other client requests keep racing while that proof
+     * runs, so a refused URL loses immediately to any usable candidate already in flight.
      */
+    private data class FirstNoteCarrier(val stream: Stream, val verified: Boolean)
+
     private suspend fun firstNoteParallelStream(
         videoId: String,
         select: (JsonObject) -> Audio?,
-    ): Stream? {
+    ): FirstNoteCarrier? {
         withTimeoutOrNull(FIRST_NOTE_VISITOR_WARMUP_MS) {
             timed("$videoId ensureVisitorData(first-note-parallel)") { Innertube.ensureVisitorData() }
         }
@@ -939,7 +972,7 @@ object StreamResolver {
         if (clients.isEmpty()) return null
 
         return supervisorScope {
-            val results = Channel<Pair<PlayerClient, Stream?>>(capacity = clients.size)
+            val results = Channel<Pair<PlayerClient, FirstNoteCarrier?>>(capacity = clients.size)
             val jobs = clients.map { client ->
                 launch(Dispatchers.IO + TrackLog.about(videoId)) {
                     val stream = try {
@@ -962,14 +995,50 @@ object StreamResolver {
                                 TrackLog.d(TAG, "${client.clientName} could not unlock immediate URL for $videoId")
                                 null
                             } else {
-                                val took = SystemClock.elapsedRealtime() - started
+                                val responseMs = SystemClock.elapsedRealtime() - started
                                 TrackLog.d(
                                     TAG,
-                                    "FIRST_NOTE winner-candidate ${client.clientName} ${took}ms " +
-                                        "@ ${format.kbps}kbps",
+                                    "FIRST_NOTE winner-candidate ${client.clientName} ${responseMs}ms " +
+                                        "@ ${format.kbps}kbps; proving media URL",
                                     about = videoId,
                                 )
-                                Stream(url, format.kbps, format.mimeType)
+                                val proofStarted = SystemClock.elapsedRealtime()
+                                when (firstNoteProbe(videoId, url)) {
+                                    Probe.OK -> {
+                                        TrackLog.d(
+                                            TAG,
+                                            "FIRST_NOTE ${client.clientName} media proof " +
+                                                "${SystemClock.elapsedRealtime() - proofStarted}ms",
+                                            about = videoId,
+                                        )
+                                        FirstNoteCarrier(Stream(url, format.kbps, format.mimeType), verified = true)
+                                    }
+                                    Probe.REFUSED -> {
+                                        // Both the bounded request and its open-ended compatibility
+                                        // retry were refused. This is strong session-level evidence,
+                                        // equivalent to a real playback 403, so don't let the same
+                                        // identity win the next song too.
+                                        standDownEverywhere(client)
+                                        refused(videoId, client)
+                                        TrackLog.w(
+                                            TAG,
+                                            "FIRST_NOTE ${client.clientName} media URL refused for $videoId",
+                                            about = videoId,
+                                        )
+                                        null
+                                    }
+                                    Probe.UNREACHABLE -> {
+                                        // Timeout is not a refusal. Save this as a last-resort
+                                        // candidate *only on metered links*; prefer any other
+                                        // carrier that was actually proven by the CDN.
+                                        TrackLog.d(
+                                            TAG,
+                                            "FIRST_NOTE ${client.clientName} media proof inconclusive for $videoId",
+                                            about = videoId,
+                                        )
+                                        FirstNoteCarrier(Stream(url, format.kbps, format.mimeType), verified = false)
+                                    }
+                                }
                             }
                         }
                     } catch (e: CancellationException) {
@@ -985,19 +1054,29 @@ object StreamResolver {
                 }
             }
 
-            var winner: Stream? = null
+            val selector = FirstNoteCandidateSelector<Pair<PlayerClient, FirstNoteCarrier>>(
+                allowTentative = AppSettings.meteredConnection.value == true,
+            )
             repeat(clients.size) {
                 val (client, result) = results.receive()
-                if (result != null && winner == null) {
-                    winner = result
-                    served(client)
-                    preferred = client
-                    TrackLog.d(TAG, "FIRST_NOTE selected ${client.clientName} for $videoId", about = videoId)
+                val proven = selector.offer(result?.let { client to it }, result?.verified == true)
+                if (proven != null) {
+                    served(proven.first)
+                    preferred = proven.first
+                    TrackLog.d(TAG, "FIRST_NOTE selected verified ${proven.first.clientName} for $videoId", about = videoId)
                     jobs.forEach { if (it.isActive) it.cancel() }
-                    return@supervisorScope result
+                    return@supervisorScope proven.second
                 }
             }
-            winner
+            // All cheap CDN checks were inconclusive or refused. On cellular, a
+            // real unrefused URL is worth trying before several expensive
+            // extractor/resolver passes. The playback watchdog will reopen on
+            // failure; unlike a verified result, it does not promote the client
+            // or populate the verified URL cache.
+            selector.fallback()?.let { (client, carrier) ->
+                TrackLog.w(TAG, "FIRST_NOTE testing unconfirmed mobile carrier from ${client.clientName} for $videoId", about = videoId)
+                carrier
+            }
         }
     }
 
@@ -1488,8 +1567,10 @@ object StreamResolver {
      * one. A URL minted for a session Google has reservations about serves
      * small ranges to anybody — enough to pass a small probe — and then refuses
      * the multi-megabyte ranges actual listening is made of with a 403.
-     * [PROBE_RANGE_BYTES] matches the chunk size the player and read-ahead
-     * fetch with, so a grudging URL fails here instead of on the playback path.
+     * The probe mirrors the range size the player will actually use on the
+     * current network: 2 MiB on unmetered links and 512 KiB on metered ones.
+     * That keeps validation honest without testing a larger request than mobile
+     * playback will ever issue.
      * Sixteen kilobytes of the answer still have to actually arrive, so a
      * response that stalls after its headers is a failure too.
      *
@@ -1497,32 +1578,98 @@ object StreamResolver {
      * [PlayerClient.forStreamUrl] — so this tests the request that matters
      * rather than a more favourable version of it.
      */
-    private fun probe(url: String): Probe {
-        val builder = okhttp3.Request.Builder().url(url)
-            .header("Range", "bytes=0-${PROBE_RANGE_BYTES - 1}")
-        PlayerClient.forStreamUrl(url).mediaHeaders().forEach { (name, value) ->
-            builder.header(name, value)
+    /**
+     * A deliberately short proof for the first audible carrier. Unlike [probe], this is not a
+     * background quality gate: the listener is waiting. It mirrors the player's first bounded
+     * googlevideo request and, on a 403, immediately tries the same URL open-ended. That second
+     * shape is also the compatibility escape used by [ChunkedDataSource] and catches the class of
+     * signed URLs that reject synthetic `bytes=a-b` while still serving `bytes=a-`.
+     */
+    private fun firstNoteProbe(videoId: String, url: String): Probe {
+        val httpUrl = url.toHttpUrlOrNull() ?: return Probe.REFUSED
+        val requested = if (AppSettings.meteredConnection.value == true) {
+            METERED_PROBE_RANGE_BYTES
+        } else {
+            PROBE_RANGE_BYTES
         }
-        return try {
-            prober.newCall(builder.build()).execute().use { response ->
-                when {
-                    response.code in REFUSAL_CODES -> Probe.REFUSED
-                    response.code !in 200..299 && response.code != 416 -> Probe.UNREACHABLE
-                    // A refusal dressed as a success: an error page, or the
-                    // consent/captcha interstitial, rather than audio.
-                    response.header("Content-Type")?.startsWith("audio/") != true -> Probe.REFUSED
-                    // Headers can arrive long before a body that never does —
-                    // exactly the shaping this whole path exists to sidestep.
-                    // Insisting on the bytes is the point: a trickle that
-                    // yields its first byte and stalls is a failure too.
-                    response.body?.source()?.request(PROBE_READ_BYTES) != true -> Probe.UNREACHABLE
-                    else -> Probe.OK
-                }
+        val total = httpUrl.queryParameter("clen")?.toLongOrNull()?.takeIf { it > 0L }
+        val boundedBytes = total?.let { minOf(requested, it) } ?: requested
+
+        fun execute(range: String): Probe {
+            val builder = okhttp3.Request.Builder()
+                .url(url)
+                .header("Range", range)
+            PlayerClient.forStreamUrl(url).mediaHeaders().forEach { (name, value) ->
+                builder.header(name, value)
             }
-        } catch (e: Exception) {
-            TrackLog.w(TAG, "probe failed: ${e.message}")
-            Probe.UNREACHABLE
+            return try {
+                firstNoteProber.newCall(builder.build()).execute().use { response ->
+                    when {
+                        response.code in REFUSAL_CODES -> Probe.REFUSED
+                        response.code !in 200..299 -> Probe.UNREACHABLE
+                        response.header("Content-Type")?.startsWith("audio/") != true -> Probe.REFUSED
+                        response.body?.source()?.request(FIRST_NOTE_MEDIA_PROBE_READ_BYTES) != true ->
+                            Probe.UNREACHABLE
+                        else -> Probe.OK
+                    }
+                }
+            } catch (_: Exception) {
+                Probe.UNREACHABLE
+            }
         }
+
+        val bounded = execute("bytes=0-${boundedBytes - 1L}")
+        if (bounded != Probe.REFUSED) return bounded
+
+        val openEnded = execute("bytes=0-")
+        if (openEnded == Probe.OK) {
+            TrackLog.w(
+                TAG,
+                "FIRST_NOTE bounded media range refused; open-ended proof succeeded",
+                about = videoId,
+            )
+        }
+        return openEnded
+    }
+
+    private fun probe(url: String): Probe {
+        val httpUrl = url.toHttpUrlOrNull() ?: return Probe.REFUSED
+        val requested = if (AppSettings.meteredConnection.value == true) {
+            METERED_PROBE_RANGE_BYTES
+        } else {
+            PROBE_RANGE_BYTES
+        }
+        val total = httpUrl.queryParameter("clen")?.toLongOrNull()?.takeIf { it > 0L }
+        val boundedBytes = total?.let { minOf(requested, it) } ?: requested
+
+        fun execute(range: String): Probe {
+            val builder = okhttp3.Request.Builder().url(url).header("Range", range)
+            PlayerClient.forStreamUrl(url).mediaHeaders().forEach { (name, value) ->
+                builder.header(name, value)
+            }
+            return try {
+                prober.newCall(builder.build()).execute().use { response ->
+                    when {
+                        response.code in REFUSAL_CODES -> Probe.REFUSED
+                        response.code !in 200..299 -> Probe.UNREACHABLE
+                        response.header("Content-Type")?.startsWith("audio/") != true -> Probe.REFUSED
+                        response.body?.source()?.request(PROBE_READ_BYTES) != true -> Probe.UNREACHABLE
+                        else -> Probe.OK
+                    }
+                }
+            } catch (e: Exception) {
+                TrackLog.w(TAG, "probe failed: ${e.message}")
+                Probe.UNREACHABLE
+            }
+        }
+
+        val bounded = execute("bytes=0-${boundedBytes - 1L}")
+        if (bounded != Probe.REFUSED) return bounded
+
+        // Playback itself now uses the same compatibility escape. A client should not be
+        // retired simply because its URL rejects our accelerated bounded request if the stock
+        // open-ended shape serves audio correctly.
+        return execute("bytes=0-")
     }
 
     private val REFUSAL_CODES = setOf(403, 404, 410)
@@ -1542,17 +1689,31 @@ object StreamResolver {
             .build()
     }
 
+    private val firstNoteProber by lazy {
+        Http.client.newBuilder()
+            .callTimeout(FIRST_NOTE_MEDIA_PROBE_MS, TimeUnit.MILLISECONDS)
+            .build()
+    }
+
     private const val PROBE_TIMEOUT_SECONDS = 6L
 
     /**
      * How much the probe asks for, in one range.
      *
-     * Has to match what the real fetch asks for ([ChunkedDataSource] and
-     * [AudioCache] both fetch two-megabyte ranges), or a URL that grudges real
-     * listening-sized requests — while still serving token ones — sails through
-     * the probe and dies on the playback path instead.
+     * Unmetered playback keeps the original 2 MiB range. Metered playback uses
+     * [METERED_PROBE_RANGE_BYTES], matching ChunkedDataSource's smaller cellular
+     * request so the probe never rejects a URL merely for a range size the
+     * player itself will not use.
      */
     private const val PROBE_RANGE_BYTES = 2L * 1024 * 1024
+
+    /**
+     * Cellular playback uses smaller bounded ranges. A 512 KiB request still
+     * carries ~13 s of 320 kbps AAC (and much more Opus) while avoiding the
+     * 2 MiB range refusals seen from googlevideo on mobile sessions. The probe
+     * mirrors the real player request so a URL is tested under the same rules.
+     */
+    private const val METERED_PROBE_RANGE_BYTES = 512L * 1024L
 
     /** How much of the answer must actually arrive, to catch a stalled body. */
     private const val PROBE_READ_BYTES = 16L * 1024
@@ -1685,6 +1846,39 @@ object StreamResolver {
      * again and receive the same signed URL from [recent], recreating the
      * exact failure at the same byte boundary.
      */
+    /**
+     * Whether [error] says that the selected YouTube carrier is gated behind
+     * YouTube Music Premium rather than temporarily unavailable.
+     *
+     * NewPipe may surface this directly from fetchPage(), while Media3 wraps
+     * the same exception inside loader/source exceptions. Keep the cause walk
+     * here so every caller makes the same deterministic decision: do not retry
+     * the exact premium-only id, rematch the recording to another official
+     * audio carrier instead.
+     */
+    /** The YouTube player explicitly refused this identity; do not repeat the same request. */
+    fun isLoginRequiredFailure(error: Throwable): Boolean {
+        var cause: Throwable? = error
+        while (cause != null) {
+            if (cause.message?.contains("LOGIN_REQUIRED", ignoreCase = true) == true) return true
+            cause = cause.cause
+        }
+        return false
+    }
+
+    fun isPremiumOnlyFailure(error: Throwable): Boolean {
+        var cause: Throwable? = error
+        while (cause != null) {
+            if (cause is YoutubeMusicPremiumContentException ||
+                cause.javaClass.simpleName == "YoutubeMusicPremiumContentException"
+            ) {
+                return true
+            }
+            cause = cause.cause
+        }
+        return false
+    }
+
     fun invalidatePlaybackUrl(videoId: String) {
         if (recent.remove(videoId) != null) {
             TrackLog.d(TAG, "invalidated cached playback URL for $videoId", about = videoId)
@@ -1704,9 +1898,18 @@ object StreamResolver {
         // Keyed by videoId, and the fetch only knows the googlevideo URL it was
         // handed; the map is a latency cache of a few dozen entries, so finding
         // the way back costs nothing worth measuring.
+        if (responseCode == 403) {
+            // A 403 from the *real media request* is stronger evidence than a player-response
+            // miss. The same client identity repeatedly minted URLs that were immediately
+            // refused across different tracks on cellular, so letting it win the next track
+            // only reproduces the same stall. Bounded-range-only refusals are rescued inside
+            // ChunkedDataSource before they reach this callback; arriving here means the
+            // open-ended request failed too.
+            standDownEverywhere(client)
+        }
         recent.entries.firstOrNull { it.value.url == url }?.key?.let { videoId ->
             recent.remove(videoId)
-            standDown(videoId, client)
+            if (responseCode != 403) standDown(videoId, client)
         }
         // Independent of that lookup on purpose: standing down the preference
         // is what breaks the loop, and it must still happen if the URL has
@@ -1763,6 +1966,12 @@ object StreamResolver {
         }
     } catch (error: CancellationException) {
         throw error
+    } catch (error: YoutubeMusicPremiumContentException) {
+        TrackLog.w(
+            TAG,
+            "NewPipe says $videoId is YouTube Music Premium-only; skipping extractor retries",
+        )
+        throw error
     } catch (error: Exception) {
         TrackLog.d(TAG, "NewPipe hierarchy pass missed for $videoId: ${error.message}")
         null
@@ -1788,6 +1997,12 @@ object StreamResolver {
         }
     } catch (error: CancellationException) {
         throw error
+    } catch (error: YoutubeMusicPremiumContentException) {
+        TrackLog.w(
+            TAG,
+            "NewPipe says $videoId is YouTube Music Premium-only; skipping extractor retries",
+        )
+        throw error
     } catch (error: Exception) {
         TrackLog.d(TAG, "NewPipe AAC pass missed for $videoId: ${error.message}")
         null
@@ -1797,12 +2012,24 @@ object StreamResolver {
         videoId: String,
         select: (List<Pair<Int, AudioStream>>) -> AudioStream?,
     ): Stream {
+        // A fast first-note rescue can reach here before resolve() or downloadStream().
+        // Initialising only in those methods leaves NewPipe's global Downloader null.
+        init
         var failure: Exception? = null
         repeat(EXTRACTION_ATTEMPTS) { attempt ->
             if (attempt > 0) delay(EXTRACTION_RETRY_MS * attempt)
             try {
                 return extractStream(videoId, select)
             } catch (e: CancellationException) {
+                throw e
+            } catch (e: YoutubeMusicPremiumContentException) {
+                // This is a property of this exact YouTube id, not a flaky
+                // watch-page fetch. Retrying it three times only turns a
+                // deterministic refusal into several seconds of buffering.
+                TrackLog.w(
+                    TAG,
+                    "$videoId is YouTube Music Premium-only; aborting extractor retries",
+                )
                 throw e
             } catch (e: LinkageError) {
                 // Not a failed extraction — a method or class the extractor was
@@ -1820,10 +2047,13 @@ object StreamResolver {
                 // static method ...") reads like nothing.
                 throw IOException("Extractor cannot run on this device: $e", e)
             } catch (e: Exception) {
-                // Worth another go rather than worth giving up on: the common
-                // failure here is a shaped or cut-off watch page, which is a
-                // fact about this minute rather than about the track, and this
-                // is the last thing standing between the listener and silence.
+                // LOGIN_REQUIRED is a deterministic client/session refusal, not a
+                // transient watch-page timeout. Three identical extractor retries
+                // cannot fix it, and they keep playback stuck in BUFFERING.
+                if (isLoginRequiredFailure(e)) {
+                    TrackLog.w(TAG, "NewPipe access refused for $videoId; skip duplicate extraction attempts")
+                    throw e
+                }
                 TrackLog.w(
                     TAG,
                     "extraction attempt ${attempt + 1} of $EXTRACTION_ATTEMPTS failed for $videoId: ${e.message}",
@@ -1868,6 +2098,8 @@ object StreamResolver {
         select: (List<Pair<Int, AudioStream>>) -> AudioStream?,
     ): Stream = extractionGate.withLock {
         withContext(Dispatchers.IO) {
+            // All extractor entry points, including Hi-Q second look, need this.
+            init
             val waited = SystemClock.elapsedRealtime()
             val extractor = ServiceList.YouTube.getStreamExtractor(
                 "https://www.youtube.com/watch?v=$videoId",
@@ -1947,8 +2179,25 @@ object StreamResolver {
      * so read-ahead would have no way to know when it was finished. Resolving
      * is memoised, so asking costs nothing beyond the first time.
      */
-    suspend fun contentLength(videoId: String): Long? =
-        resolve(videoId).toHttpUrlOrNull()?.queryParameter("clen")?.toLongOrNull()
+    suspend fun contentLength(videoId: String): Long? {
+        val now = SystemClock.elapsedRealtime()
+        recent[videoId]
+            ?.takeIf { now - it.at < URL_TTL_MS }
+            ?.url
+            ?.toHttpUrlOrNull()
+            ?.queryParameter("clen")
+            ?.toLongOrNull()
+            ?.let { return it }
+
+        // Length is transport metadata, not a quality decision. Using the full AAC
+        // ladder here made analysis/read-ahead pay the complete 320 -> 250 -> Opus ->
+        // AAC fallback walk merely to discover `clen`, then resolve the same track
+        // again when the actual range opened. Reuse the first-note carrier instead.
+        return resolveImmediatePlayback(videoId).url
+            .toHttpUrlOrNull()
+            ?.queryParameter("clen")
+            ?.toLongOrNull()
+    }
 
     /** Codec/container of the fresh resolved URL, for queue warm-up diagnostics. */
     fun resolvedMimeType(videoId: String): String? =
@@ -1970,8 +2219,10 @@ object StreamResolver {
     ) {
         val isAac: Boolean get() = "mp4" in mimeType.lowercase() || "m4a" in mimeType.lowercase()
 
-        fun matches(quality: AudioQuality): Boolean = when (quality) {
-            AudioQuality.AAC -> isAac && kbps <= AudioQuality.AAC.maxKbps
+        fun matches(quality: AudioQuality, now: Long): Boolean = when (quality) {
+            AudioQuality.AAC ->
+                (isAac && kbps <= AudioQuality.AAC.maxKbps) ||
+                    (!isAac && now - at < AAC_FALLBACK_REUSE_MS)
             AudioQuality.HIGH -> true
             AudioQuality.MEDIUM, AudioQuality.LOW -> kbps <= quality.maxKbps
         }
@@ -1992,6 +2243,14 @@ object StreamResolver {
 
 
     private const val URL_TTL_MS = 20 * 60 * 1000L
+
+    /**
+     * If the AAC hierarchy just proved unavailable and fell back to Opus, do not
+     * immediately run the same expensive hierarchy again for analysis/read-ahead.
+     * A short reuse window removes duplicate 3-7 s resolves while the dedicated
+     * Hi-Q second-look path remains free to upgrade the audible track.
+     */
+    private const val AAC_FALLBACK_REUSE_MS = 2 * 60 * 1000L
 
     /** Enough for the queue in hand; this is a latency cache, not a store. */
     private const val MAX_REMEMBERED = 32

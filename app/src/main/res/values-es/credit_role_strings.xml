@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="song_credit_performed_by">Interpretación</string>
+    <string name="song_credit_written_by">Composición</string>
+    <string name="song_credit_produced_by">Producción</string>
+    <string name="song_credit_metadata_by">Metadatos musicales proporcionados por</string>
+    <string name="song_credit_composer">Composición</string>
+    <string name="song_credit_lyricist">Letra</string>
+    <string name="song_credit_vocals">Voces</string>
+    <string name="song_credit_guitar">Guitarra</string>
+    <string name="song_credit_bass">Bajo</string>
+    <string name="song_credit_drums">Batería</string>
+    <string name="song_credit_keyboards">Teclados</string>
+    <string name="song_credit_piano">Piano</string>
+    <string name="song_credit_programming">Programación</string>
+    <string name="song_credit_mixing">Mezcla</string>
+    <string name="song_credit_mastering">Masterización</string>
+    <string name="song_credit_recording">Grabación</string>
+    <string name="song_credit_publisher">Editorial</string>
+    <string name="song_credit_label">Discográfica</string>
+    <string name="song_credit_additional">Créditos adicionales</string>
+</resources>

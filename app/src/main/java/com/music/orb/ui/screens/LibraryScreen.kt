@@ -28,7 +28,7 @@ import com.music.orb.data.model.LibraryPage
 import com.music.orb.data.model.BrowseType
 import com.music.orb.data.model.ShelfItem
 import com.music.orb.data.model.UiState
-import com.music.orb.ui.icons.BitChordIcons
+import com.music.orb.ui.icons.OrbIcons
 import com.music.orb.ui.components.MessageState
 import com.music.orb.ui.components.PAGE_GUTTER
 import com.music.orb.ui.components.PullToRefresh
@@ -51,16 +51,38 @@ fun LibraryScreen(
     refreshing: Boolean,
     onRefresh: () -> Unit,
     pullState: PullToRefreshState,
+    onCreateRoom: () -> Unit = {},
+    onJoinRoom: () -> Unit = {},
+    onOpenRoom: () -> Unit = {},
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues,
 ) {
     val trimmedQuery = query.trim()
     val searching = trimmedQuery.isNotEmpty()
+    val songsTitle = stringResource(R.string.local_tab_songs)
+    val likedTitle = stringResource(R.string.library_youtube_liked_songs)
+    val playlistsTitle = stringResource(R.string.beta_ui_playlists)
+    val albumsTitle = stringResource(R.string.local_tab_albums)
+    // Building the Library's songs/liked/playlist shelves can map hundreds of
+    // rows. These lists only change when the page, query, library backend or
+    // translated section names change—not when playback advances or scrolls.
+    val visibleShelves = remember(
+        state, trimmedQuery, usingOrbLibrary,
+        songsTitle, likedTitle, playlistsTitle, albumsTitle,
+    ) {
+        (state as? UiState.Success)?.let { success ->
+            prepareLibraryShelves(
+                success.data, trimmedQuery, usingOrbLibrary,
+                songsTitle, likedTitle, playlistsTitle, albumsTitle,
+            )
+        }.orEmpty()
+    }
 
     PullToRefresh(
         refreshing = refreshing,
         onRefresh = onRefresh,
         state = pullState,
+        indicatorTopPadding = contentPadding.calculateTopPadding(),
         modifier = modifier,
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
@@ -110,7 +132,19 @@ fun LibraryScreen(
                         }
                     }
                 }
+                if (!searching) {
+                    item(key = "listening-rooms") {
+                        Box(modifier = libraryVerticalEdgeModifier(listState, "listening-rooms")) {
+                            RoomsLibrarySection(onCreateRoom, onJoinRoom, onOpenRoom)
+                        }
+                    }
+                }
                 if (!signedIn && !usingOrbLibrary) {
+                item(key = "spotify-library") {
+                    Box(modifier = libraryVerticalEdgeModifier(listState, "spotify-library")) {
+                        SpotifyLibraryShelf(onItemClick = onShelfItemClick, query = trimmedQuery)
+                    }
+                }
                     item {
                         MessageState(
                             message = stringResource(R.string.library_signin_description),
@@ -121,23 +155,36 @@ fun LibraryScreen(
                     return@LazyColumn
                 }
                 when (state) {
-                    is UiState.Loading -> librarySkeleton()
-                    is UiState.Error -> item {
-                        MessageState(state.message, actionLabel = stringResource(R.string.beta_ui_retry), onAction = onRetry)
+                    is UiState.Loading -> {
+                        librarySkeleton()
+                item(key = "spotify-library") {
+                    Box(modifier = libraryVerticalEdgeModifier(listState, "spotify-library")) {
+                        SpotifyLibraryShelf(onItemClick = onShelfItemClick, query = trimmedQuery)
+                    }
+                }
+                    }
+                    is UiState.Error -> {
+                        item { MessageState(state.message, actionLabel = stringResource(R.string.beta_ui_retry), onAction = onRetry) }
+                item(key = "spotify-library") {
+                    Box(modifier = libraryVerticalEdgeModifier(listState, "spotify-library")) {
+                        SpotifyLibraryShelf(onItemClick = onShelfItemClick, query = trimmedQuery)
+                    }
+                }
                     }
                     is UiState.Success -> {
-                        val shelves = if (searching) {
-                            state.data.shelves.mapNotNull { shelf ->
-                                val matches = shelf.items.filter { item ->
-                                    item.isLibraryAlbumOrPlaylist(shelf.title) &&
-                                        (item.title.contains(trimmedQuery, ignoreCase = true) ||
-                                            item.subtitle.contains(trimmedQuery, ignoreCase = true))
-                                }
-                                shelf.copy(items = matches).takeIf { matches.isNotEmpty() }
+                        if (state.data.incomplete) {
+                            item(key = "youtube-library-retry") {
+                                MessageState(
+                                    stringResource(R.string.library_youtube_partial_error),
+                                    actionLabel = stringResource(R.string.beta_ui_retry),
+                                    onAction = onRetry,
+                                )
                             }
-                        } else {
-                            state.data.shelves
                         }
+                        val shelves = visibleShelves
+                        fun rank(shelf: HomeShelf): Int = libraryShelfRank(
+                            shelf.title, likedTitle, playlistsTitle, albumsTitle,
+                        )
 
                         if (searching && shelves.isEmpty()) {
                             item { MessageState(stringResource(R.string.library_search_empty)) }
@@ -145,19 +192,16 @@ fun LibraryScreen(
                             item { MessageState(stringResource(R.string.orb_library_empty)) }
                         }
 
-                        if (!searching && !usingOrbLibrary && shelves.none { it.title == PLAYLISTS }) {
-                            item(key = "shelf:$PLAYLISTS") {
-                                Box(modifier = libraryVerticalEdgeModifier(listState, "shelf:$PLAYLISTS")) {
-                                PlaylistShelf(
-                                    shelf = HomeShelf(stringResource(R.string.beta_ui_playlists), emptyList()),
-                                    onItemClick = onShelfItemClick,
-                                    onItemLongPress = onShelfItemLongPress,
-                                    onNewPlaylist = onNewPlaylist,
-                                )
-                                }
-                            }
-                        }
+                        var spotifyInserted = false
                         shelves.forEach { shelf ->
+                            if (!spotifyInserted && rank(shelf) > 2) {
+                item(key = "spotify-library") {
+                    Box(modifier = libraryVerticalEdgeModifier(listState, "spotify-library")) {
+                        SpotifyLibraryShelf(onItemClick = onShelfItemClick, query = trimmedQuery)
+                    }
+                }
+                                spotifyInserted = true
+                            }
                             item(key = "shelf:${shelf.title}") {
                                 Box(modifier = libraryVerticalEdgeModifier(listState, "shelf:${shelf.title}")) {
                                 if (!searching && !usingOrbLibrary && shelf.title == PLAYLISTS) {
@@ -171,7 +215,7 @@ fun LibraryScreen(
                                     Shelf(
                                         shelf = shelf,
                                         onItemClick = onShelfItemClick,
-                                        onItemLongPress = if (usingOrbLibrary) null else onShelfItemLongPress,
+                                        onItemLongPress = onShelfItemLongPress,
                                         localizeItemLabels = true,
                                         fullTrackBadges = true,
                                         expressive = OrbFlavorUi.expressive,
@@ -180,10 +224,80 @@ fun LibraryScreen(
                                 }
                             }
                         }
+                        if (!spotifyInserted) {
+                item(key = "spotify-library") {
+                    Box(modifier = libraryVerticalEdgeModifier(listState, "spotify-library")) {
+                        SpotifyLibraryShelf(onItemClick = onShelfItemClick, query = trimmedQuery)
+                    }
+                }
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+/** Library shelf preparation is intentionally outside LazyListScope and Compose. */
+private fun libraryShelfRank(
+    title: String,
+    likedTitle: String,
+    playlistsTitle: String,
+    albumsTitle: String,
+): Int = when {
+    title == likedTitle -> 0
+    title == PLAYLISTS || title == playlistsTitle -> 1
+    title == "Albums" || title == albumsTitle -> 2
+    title == "Artists" -> 4
+    title == "Subscriptions" -> 5
+    else -> 6
+}
+
+private fun prepareLibraryShelves(
+    page: LibraryPage,
+    trimmedQuery: String,
+    usingOrbLibrary: Boolean,
+    songsTitle: String,
+    likedTitle: String,
+    playlistsTitle: String,
+    albumsTitle: String,
+): List<HomeShelf> {
+    fun asItem(song: com.music.orb.data.model.Song) = ShelfItem(
+        title = song.title,
+        subtitle = song.artist,
+        thumbnailUrl = song.thumbnailUrl,
+        videoId = song.videoId,
+        browseId = null,
+        isExplicit = song.isExplicit,
+        type = BrowseType.OTHER,
+    )
+
+    // One canonical Songs section: liked tracks first, then additional library
+    // tracks. The same video id must not appear twice in the unified shelf.
+    val songsShelf = HomeShelf(
+        title = songsTitle,
+        items = (page.likedSongs + page.librarySongs)
+            .distinctBy { it.videoId }
+            .map(::asItem),
+    )
+    val sourceShelves = page.shelves.filterNot { it.title == songsTitle || it.title == likedTitle }
+    val hasPlaylistShelf = sourceShelves.any {
+        libraryShelfRank(it.title, likedTitle, playlistsTitle, albumsTitle) == 1
+    }
+    val playlistShelf = if (trimmedQuery.isBlank() && !usingOrbLibrary && !hasPlaylistShelf) {
+        HomeShelf(PLAYLISTS, emptyList())
+    } else null
+    val ordered = (listOfNotNull(playlistShelf) + sourceShelves +
+        listOf(songsShelf).filter { it.items.isNotEmpty() }).sortedBy {
+        libraryShelfRank(it.title, likedTitle, playlistsTitle, albumsTitle)
+    }
+    if (trimmedQuery.isBlank()) return ordered
+    return ordered.mapNotNull { shelf ->
+        val matching = shelf.items.filter { item ->
+            item.title.contains(trimmedQuery, ignoreCase = true) ||
+                item.subtitle.contains(trimmedQuery, ignoreCase = true)
+        }
+        shelf.copy(items = matching).takeIf { matching.isNotEmpty() }
     }
 }
 
@@ -248,7 +362,7 @@ private fun PlaylistShelf(
         expressive = OrbFlavorUi.expressive,
         leadingCard = {
             NewShelfCard(
-                icon = BitChordIcons.Plus,
+                icon = OrbIcons.Plus,
                 label = stringResource(R.string.beta_ui_new_playlist),
                 subtitle = stringResource(R.string.beta_ui_saved_to_youtube_music),
                 onClick = onNewPlaylist,

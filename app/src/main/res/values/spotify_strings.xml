@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="spotify_session_note">Import your Spotify playlists and liked songs. Likes in Orb do not change Spotify. Your session is encrypted on this device and, when account sync is enabled, backed up to your Orb account for use on your other devices.</string>
+    <string name="spotify_connect">Connect Spotify</string>
+    <string name="spotify_connection_error">Could not connect to Spotify. Please try again.</string>
+    <string name="spotify_retry">Try again</string>
+    <string name="spotify_liked_songs">Liked Songs</string>
+    <string name="spotify_loading">Loading Spotify…</string>
+    <string name="spotify_connected">Spotify connected</string>
+    <string name="spotify_library_sync_note">Connect your Spotify library.</string>
+    <string name="spotify_disconnect">Disconnect</string>
+    <string name="spotify_login">Log in to Spotify</string>
+    <string name="spotify_login_action">Log in</string>
+    <string name="spotify_no_playable_tracks">No playable matches were found for this Spotify playlist.</string>
+    <string name="spotify_from_section">From Spotify</string>
+</resources>

@@ -10,7 +10,6 @@ import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import com.google.android.gms.auth.api.identity.AuthorizationRequest
 import com.google.android.gms.auth.api.identity.AuthorizationResult
-import com.google.android.gms.auth.api.identity.ClearTokenRequest
 import com.google.android.gms.auth.api.identity.Identity
 import com.google.android.gms.common.api.Scope
 import com.google.android.gms.tasks.Task
@@ -19,6 +18,7 @@ import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import com.music.orb.BuildConfig
 import com.music.orb.data.DebugLog as Log
 import com.music.orb.data.YtMusicRepository
+import com.music.orb.data.YouTubeChannelDirectory
 import com.music.orb.data.innertube.Innertube
 import com.music.orb.data.model.Account
 import com.music.orb.data.model.YouTubeAccountIdentity
@@ -76,12 +76,15 @@ object OrbGoogleAuth {
     private lateinit var store: AuthStore
     private val tokenMutex = Mutex()
 
-    @Volatile
-    private var oauthRejectedUntilMs: Long = 0L
-
     private val _youtubeCompatibilityRequired = MutableStateFlow(false)
     val youtubeCompatibilityRequired: StateFlow<Boolean> =
         _youtubeCompatibilityRequired.asStateFlow()
+
+    // Account identity is not proof that YouTube Music accepted private
+    // library queries. Only a verified Music browse (or a legacy session)
+    // enables the private library in MainViewModel.
+    private val _musicLibraryVerified = MutableStateFlow(false)
+    val musicLibraryVerified: StateFlow<Boolean> = _musicLibraryVerified.asStateFlow()
 
 
     private val _youtubeAccount = MutableStateFlow<Account?>(null)
@@ -93,6 +96,7 @@ object OrbGoogleAuth {
         Innertube.delegatedPageId = store.youtubePageId
         Innertube.authUserIndex = store.youtubeAuthUserIndex
         _youtubeAccount.value = store.storedYoutubeAccount()
+        _musicLibraryVerified.value = store.hasLegacyYouTubeSession
     }
 
     val configured: Boolean
@@ -111,6 +115,9 @@ object OrbGoogleAuth {
             avatarUrl = store.googleAvatarUrl,
         )
     }
+
+    /** Read only the account id when validating an integration owner. */
+    fun storedUniqueId(): String? = if (::store.isInitialized) store.googleUniqueId else null
 
     fun storedAccount(): Account? = storedIdentity()?.asAccount()
 
@@ -131,6 +138,7 @@ object OrbGoogleAuth {
         // A pre-migration cookie is useful as an Innertube compatibility path,
         // but never let a cookie belonging to account A silently follow a new
         // Credential Manager login for account B.
+        val previousGoogleUniqueId = store.googleUniqueId
         val legacyEmail = if (store.hasLegacyYouTubeSession) {
             runCatching { YtMusicRepository.account().getOrNull()?.email }
                 .getOrNull()
@@ -178,13 +186,23 @@ object OrbGoogleAuth {
         )
         AppSettings.setCurrentAccountEmail(identity.email)
 
+        val changedGoogleAccount = previousGoogleUniqueId != null &&
+            previousGoogleUniqueId != identity.uniqueId
+        if (changedGoogleAccount) {
+            _musicLibraryVerified.value = false
+            // An access token belongs to one specific Google account. Keeping
+            // it through an Orb account switch could expose the other account's
+            // YouTube channel or library until the cached token expires.
+            store.clearYoutubeAccessToken()
+        }
         if (
-            legacyEmail != null &&
-            !identity.email.isNullOrBlank() &&
-            !legacyEmail.equals(identity.email, ignoreCase = true)
+            changedGoogleAccount ||
+            (legacyEmail != null && !identity.email.isNullOrBlank() &&
+                !legacyEmail.equals(identity.email, ignoreCase = true))
         ) {
             Log.w(TAG, "Discarding legacy YouTube cookie because it belongs to another Google account")
             store.cookie = null
+            store.clearYoutubeAccessToken()
             store.clearYoutubeIdentity()
             Innertube.cookie = null
             Innertube.delegatedPageId = null
@@ -220,7 +238,7 @@ object OrbGoogleAuth {
             token = token,
             expiresAtMs = System.currentTimeMillis() + TOKEN_CACHE_MS,
         )
-        oauthRejectedUntilMs = 0L
+        _musicLibraryVerified.value = store.hasLegacyYouTubeSession
         _youtubeCompatibilityRequired.value = false
         Innertube.accountSignedIn = true
         return token
@@ -228,73 +246,111 @@ object OrbGoogleAuth {
 
 
     /**
-     * Resolve the YouTube Music profile behind the same Google authorization.
-     * This is deliberately a probe of account_menu rather than a second login:
-     * if OAuth is accepted the profile is remembered immediately; if the private
-     * endpoint refuses the bearer, Innertube flips the compatibility flag.
+     * Resolve private YouTube Music account metadata when the existing Music
+     * session works, otherwise resolve the *authorized YouTube channel* using
+     * the official YouTube Data API. The latter identifies the channel but
+     * MUST NOT be mistaken for full YouTube Music library access.
      */
     suspend fun refreshYoutubeAccount(): Account? {
         if (!::store.isInitialized || !store.isSignedIn) return null
         Innertube.delegatedPageId = store.youtubePageId
         Innertube.authUserIndex = store.youtubeAuthUserIndex
-        val account = YtMusicRepository.account().getOrNull() ?: return null
-        val resolved = if (account.handle.isBlank()) {
-            val rememberedHandle = store.storedYoutubeIdentity()?.handle.orEmpty()
-            if (rememberedHandle.isNotBlank()) account.copy(handle = rememberedHandle) else account
-        } else {
-            account
+
+        // A freshly signed-in device has a Google identity but no cached
+        // YouTube access token. Request the SAME Google account's previously
+        // granted scope silently before probing its private Music library.
+        // If Google requires new consent, AuthorizationClient returns a
+        // resolution: do NOT synchronize Google login cookies across devices.
+        val token = youtubeAccessToken()
+        Innertube.accountSignedIn = store.hasLegacyYouTubeSession || !token.isNullOrBlank()
+        // Account-menu alone is unreliable as a library capability probe:
+        // some authorised Music endpoints work while account-menu fails.
+        val musicAccessible = if (Innertube.hasAccountSession) {
+            YtMusicRepository.verifyMusicLibraryAccess().isSuccess
+        } else false
+        _musicLibraryVerified.value = musicAccessible
+        _youtubeCompatibilityRequired.value = !musicAccessible
+
+        // With a native-only OAuth session, account_menu may reject the bearer
+        // even when the private library browse worked. Avoid poisoning the
+        // token retry window just to obtain an avatar/name available from the
+        // official YouTube channel endpoint.
+        if (musicAccessible && store.hasLegacyYouTubeSession) {
+            val privateAccount = YtMusicRepository.account().getOrNull()
+            if (privateAccount != null) {
+                val rememberedHandle = store.storedYoutubeIdentity()?.handle.orEmpty()
+                val account = if (privateAccount.handle.isBlank() && rememberedHandle.isNotBlank()) {
+                    privateAccount.copy(handle = rememberedHandle)
+                } else privateAccount
+                store.saveYoutubeAccount(account)
+                _youtubeAccount.value = account
+                return account
+            }
         }
-        store.saveYoutubeAccount(resolved)
-        _youtubeAccount.value = resolved
-        _youtubeCompatibilityRequired.value = false
-        Innertube.accountSignedIn = true
-        return resolved
+        // Official YouTube Data API can still resolve the authorized channel,
+        // but does not imply the private Music library is available.
+        val fallback = store.storedYoutubeAccount() ?: if (musicAccessible) storedAccount() else null
+        if (token == null) return fallback
+        val channel = YouTubeChannelDirectory.mine(token)
+            .onFailure { Log.w(TAG, "YouTube channel lookup failed: ${it.message}") }
+            .getOrNull()?.firstOrNull()
+            ?: return fallback
+        return rememberOfficialChannel(channel, musicAccessible)
     }
 
     /**
-     * Lists the YouTube identities available under the browser-linked Google
-     * account. YouTube Music exposes primary and Brand/channel identities from
-     * account/accounts_list; no second Google login is required.
-     *
-     * A browser session is intentionally required here. OAuth can identify the
-     * default YouTube profile when accepted by Innertube, but Brand-account
-     * routing (`pageId`) comes from the private Music account surface.
+     * List channel identities without requiring legacy browser cookies.
+     * The official API reports only the channel(s) authorized by Google, not
+     * every Brand Account belonging to the e-mail address. Do not infer or
+     * fabricate additional delegated identities.
      */
     suspend fun availableYoutubeIdentities(): List<YouTubeAccountIdentity> {
-        if (!::store.isInitialized || !store.isSignedIn || !store.hasLegacyYouTubeSession) {
-            return emptyList()
-        }
-        Innertube.cookie = store.cookie
-        Innertube.delegatedPageId = store.youtubePageId
-        Innertube.authUserIndex = store.youtubeAuthUserIndex
+        if (!::store.isInitialized || !store.isSignedIn) return emptyList()
         val current = store.storedYoutubeIdentity()
-        return YtMusicRepository.accounts()
-            .getOrElse {
-                Log.w(TAG, "Could not list YouTube identities: ${it.message}")
+        if (store.hasLegacyYouTubeSession) {
+            Innertube.cookie = store.cookie
+            Innertube.delegatedPageId = store.youtubePageId
+            Innertube.authUserIndex = store.youtubeAuthUserIndex
+            val privateProfiles = YtMusicRepository.accounts().getOrElse {
+                Log.w(TAG, "Private YouTube channel list unavailable: ${it.message}")
                 emptyList()
             }
-            .map { identity ->
-                identity.copy(
-                    isSelected = current?.stableKey == identity.stableKey ||
-                        (current == null && identity.isSelected),
-                )
+            if (privateProfiles.isNotEmpty()) {
+                return privateProfiles.map { identity ->
+                    identity.copy(isSelected = current?.stableKey == identity.stableKey ||
+                        (current == null && identity.isSelected))
+                }
             }
+        }
+        val token = youtubeAccessToken() ?: return emptyList()
+        return YouTubeChannelDirectory.mine(token)
+            .onFailure { Log.w(TAG, "Authorized YouTube channels unavailable: ${it.message}") }
+            .getOrDefault(emptyList())
+            .map { channel -> channel.copy(isSelected = current?.stableKey == channel.stableKey ||
+                (current == null && channel.isSelected)) }
     }
 
     /**
-     * Changes only the YouTube channel/profile, never the Orb/Supabase user.
-     * The delegated page id is persisted and sent as X-Goog-PageId plus
-     * context.user.onBehalfOfUser on later Innertube requests.
+     * Select an identity while keeping the social Orb account unchanged. The
+     * official YouTube API channel ID is NOT a delegated Innertube page ID.
+     * Only private Music identities may change X-Goog-PageId routing.
      */
     suspend fun selectYoutubeIdentity(identity: YouTubeAccountIdentity): Account {
         check(::store.isInitialized && store.isSignedIn) { "Connect your Google account to Orb first." }
-        check(store.hasLegacyYouTubeSession) { "Link YouTube Music before choosing a channel." }
-
+        if (identity.fromOfficialApi || !store.hasLegacyYouTubeSession) {
+            val token = youtubeAccessToken() ?: error("Authorize YouTube before selecting a channel.")
+            val permitted = YouTubeChannelDirectory.mine(token).getOrThrow()
+                .firstOrNull { it.stableKey == identity.stableKey }
+                ?: error("The selected channel is not authorized for this Google account.")
+            val libraryGranted = YtMusicRepository.verifyMusicLibraryAccess().isSuccess
+            _musicLibraryVerified.value = libraryGranted
+            _youtubeCompatibilityRequired.value = !libraryGranted
+            return rememberOfficialChannel(permitted, libraryGranted)
+        }
         val previousIdentity = store.storedYoutubeIdentity()
         val previousAccount = store.storedYoutubeAccount()
         val previousPageId = store.youtubePageId
         val previousAuthUser = store.youtubeAuthUserIndex
-
         return try {
             Innertube.cookie = store.cookie
             Innertube.delegatedPageId = identity.pageId
@@ -302,16 +358,14 @@ object OrbGoogleAuth {
             val resolved = YtMusicRepository.account().getOrThrow().let { account ->
                 if (account.handle.isBlank() && identity.handle.isNotBlank()) {
                     account.copy(handle = identity.handle)
-                } else {
-                    account
-                }
+                } else account
             }
-
             store.saveYoutubeRouting(identity.pageId, previousAuthUser)
             store.saveYoutubeIdentity(identity.copy(isSelected = true))
             store.saveYoutubeAccount(resolved)
             _youtubeAccount.value = resolved
             _youtubeCompatibilityRequired.value = false
+            _musicLibraryVerified.value = true
             Innertube.accountSignedIn = true
             resolved
         } catch (error: Throwable) {
@@ -323,6 +377,28 @@ object OrbGoogleAuth {
             _youtubeAccount.value = previousAccount
             throw error
         }
+    }
+
+    private fun rememberOfficialChannel(channel: YouTubeAccountIdentity, musicAccessible: Boolean): Account {
+        // No private delegated routing can be derived from channels.list.
+        // Do not overwrite existing private channel routing when a valid
+        // Music session exists (e.g. a Brand Account chosen earlier).
+        if (!store.hasLegacyYouTubeSession) {
+            store.saveYoutubeRouting(null, 0)
+            store.saveYoutubeIdentity(channel.copy(isSelected = true))
+            Innertube.delegatedPageId = null
+            Innertube.authUserIndex = 0
+        }
+        val account = Account(
+            name = channel.name,
+            email = store.googleEmail.orEmpty(),
+            thumbnailUrl = channel.thumbnailUrl,
+            handle = channel.handle,
+        )
+        store.saveYoutubeAccount(account)
+        _youtubeAccount.value = account
+        _youtubeCompatibilityRequired.value = !musicAccessible
+        return account
     }
 
     /** Open the browser flow deliberately when channel routing cannot be resolved natively. */
@@ -340,12 +416,9 @@ object OrbGoogleAuth {
     suspend fun youtubeAccessToken(): String? {
         if (!::store.isInitialized || !store.isSignedIn) return null
         val now = System.currentTimeMillis()
-        if (now < oauthRejectedUntilMs) return null
-
         cachedYoutubeToken(now)?.let { return it }
         return tokenMutex.withLock {
             val lockedNow = System.currentTimeMillis()
-            if (lockedNow < oauthRejectedUntilMs) return@withLock null
             cachedYoutubeToken(lockedNow)?.let { return@withLock it }
 
             val result = runCatching {
@@ -363,28 +436,20 @@ object OrbGoogleAuth {
         }
     }
 
-    /** Called by Innertube when the private Music endpoint rejects a bearer. */
+    /**
+     * One private Music endpoint rejecting OAuth does NOT mean another
+     * endpoint (e.g. Liked Music) will also reject it. Never globally block
+     * the bearer: doing so made a rejected profile/stats endpoint suppress all
+     * personal library pages for ten minutes. Each authenticated-only feed
+     * now reports its own failure, leaving other sections free to load.
+     */
     suspend fun onYoutubeOAuthRejected(token: String) {
-        if (!::store.isInitialized) return
-        // One rejection is enough for this process. Retrying the same private
-        // Innertube endpoint every few minutes only adds latency; a new process
-        // (or a fresh explicit sign-in) probes OAuth again in case Google changed.
-        oauthRejectedUntilMs = Long.MAX_VALUE
-        store.clearYoutubeAccessToken()
-        // The Orb identity remains valid, but the YouTube account session does
-        // not. If a verified browser cookie exists it can keep account features
-        // alive; otherwise reads must behave as anonymous until compatibility
-        // is linked instead of pretending the account is authenticated.
-        Innertube.accountSignedIn = store.hasLegacyYouTubeSession
-        _youtubeCompatibilityRequired.value = !store.hasLegacyYouTubeSession
-        runCatching {
-            Identity.getAuthorizationClient(appContext)
-                .clearToken(ClearTokenRequest.builder().setToken(token).build())
-                .awaitResult()
-        }.onFailure {
-            Log.w(TAG, "Could not clear rejected Google token from cache: ${it.message}")
-        }
+        if (!::store.isInitialized || store.youtubeAccessToken != token) return
+        Log.w(TAG, "One private YouTube endpoint refused OAuth; other library feeds remain available")
     }
+
+    /** Google Play services refreshes this grant independently of Innertube. */
+    suspend fun youtubeMusicPrivateToken(): String? = youtubeAccessToken()
 
     /** Keep the Orb/Supabase identity, but ask the UI to repair YouTube access. */
     fun requestYoutubeCompatibility() {
@@ -401,6 +466,7 @@ object OrbGoogleAuth {
         Innertube.delegatedPageId = null
         Innertube.authUserIndex = 0
         _youtubeAccount.value = null
+        _musicLibraryVerified.value = false
         Innertube.accountSignedIn = !store.youtubeAccessToken.isNullOrBlank()
         _youtubeCompatibilityRequired.value = store.isSignedIn
     }
@@ -456,6 +522,7 @@ object OrbGoogleAuth {
             Innertube.cookie = session.cookieHeader
             Innertube.accountSignedIn = true
             _youtubeCompatibilityRequired.value = false
+            _musicLibraryVerified.value = true
         } catch (error: Throwable) {
             store.cookie = previousCookie
             Innertube.cookie = previousInnertubeCookie
@@ -494,8 +561,8 @@ object OrbGoogleAuth {
             legacyIdentity?.let(store::saveYoutubeIdentity)
             legacyAccount?.let(store::saveYoutubeAccount)
         }
-        oauthRejectedUntilMs = 0L
         _youtubeCompatibilityRequired.value = false
+        _musicLibraryVerified.value = false
         _youtubeAccount.value = legacyAccount
         Innertube.cookie = legacyCookie
         Innertube.delegatedPageId = legacyPageId

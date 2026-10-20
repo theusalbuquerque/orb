@@ -1,17 +1,26 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+
 package com.music.orb.ui.screens
 
 import android.graphics.Bitmap
+import android.graphics.Canvas as AndroidCanvas
+import android.graphics.Paint as AndroidPaint
+import android.graphics.RectF
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
+import android.content.res.Configuration
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -27,6 +36,9 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.statusBarsIgnoringVisibility
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
@@ -39,32 +51,47 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Album
 import androidx.compose.material.icons.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.CameraAlt
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Equalizer
+import androidx.compose.material.icons.rounded.Group
+import androidx.compose.material.icons.rounded.Headphones
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Person
+import androidx.compose.material.icons.rounded.PersonAdd
+import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.Visibility
-import androidx.compose.material3.Button
+import com.music.orb.ui.components.OrbGlassButton as Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.FilterChip
+import com.music.orb.ui.components.OrbGlassFilterChip as FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import com.music.orb.ui.components.OrbGlassIconButton as IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import com.music.orb.ui.components.orbOverlayGlassBaseColor
+import com.music.orb.ui.components.orbExpressiveGlassTone
+import com.music.orb.ui.components.OrbGlassContentTheme
+import com.music.orb.ui.components.orbGlassSurface
+import com.music.orb.ui.components.orbBadgeGlassSurface
 import com.music.orb.ui.components.ExpressiveSwitch as Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import com.music.orb.ui.components.OrbGlassTextButton as TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.geometry.Offset
@@ -79,6 +106,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
@@ -105,6 +133,7 @@ import coil3.request.allowHardware
 import coil3.toBitmap
 import com.music.orb.R
 import com.music.orb.data.ArtistCreditResolver
+import com.music.orb.data.YtMusicRepository
 import com.music.orb.data.canvas.ArtistArtworkRepository
 import com.music.orb.data.canvas.normalizeOrbGenre
 import com.music.orb.data.model.Account
@@ -118,6 +147,7 @@ import com.music.orb.data.social.FriendNowPlaying
 import com.music.orb.data.social.ListeningActivity
 import com.music.orb.data.social.ListeningActivityChange
 import com.music.orb.data.social.OrbProfile
+import com.music.orb.data.social.ProfileAlbumRatingRow
 import com.music.orb.data.social.ProfileSocialCounts
 import com.music.orb.data.social.SocialRepository
 import com.music.orb.data.social.reachedListenThreshold
@@ -126,7 +156,23 @@ import com.music.orb.ui.currentMonthStartInstant
 import com.music.orb.ui.rankListeningAlbums
 import com.music.orb.ui.rankListeningArtists
 import com.music.orb.ui.rankListeningTracks
+import com.music.orb.ui.components.ArtworkBottomEdgeField
+import com.music.orb.ui.components.createBottomEdgeField
+import com.music.orb.ui.components.ArtworkMergeBand
+import com.music.orb.ui.components.ARTWORK_LANDSCAPE_FLOW_WIDTH
+import com.music.orb.ui.components.ARTWORK_LANDSCAPE_FLOW_OVERLAP
+import com.music.orb.ui.components.artworkLandscapeFlowMask
+import com.music.orb.ui.components.landscapeArtworkFade
+import com.music.orb.ui.components.ARTWORK_MERGE_BAND
+import com.music.orb.ui.components.ARTWORK_MERGE_OVERLAP
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.hazeSource
+import androidx.compose.ui.unit.IntOffset
+import com.music.orb.ui.components.bestForegroundForArtworkSurface
+import com.music.orb.ui.components.rememberArtworkBottomEdgeField
+import com.music.orb.ui.components.rememberArtworkRightEdgeField
 import com.music.orb.ui.components.PAGE_GUTTER
+import com.music.orb.ui.components.OrbHaptics
 import com.music.orb.ui.theme.ArtworkPalette
 import com.music.orb.ui.theme.rememberArtworkPalette
 import java.time.Instant
@@ -135,6 +181,7 @@ import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -149,7 +196,7 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
-private const val PROFILE_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+private const val PROFILE_IMAGE_MAX_BYTES = 50 * 1024 * 1024
 private val PROFILE_USERNAME_REGEX = Regex("^[a-z0-9._]{3,30}$")
 
 private data class ImmersiveProfileTaste(
@@ -190,6 +237,15 @@ private data class ImmersiveCompatibility(
     val genres: List<String> = emptyList(),
 )
 
+private data class ProfileAlbumRatingCard(
+    val albumId: String,
+    val title: String,
+    val artist: String,
+    val artworkUrl: String?,
+    val rating: Float,
+    val updatedAt: String,
+)
+
 private enum class ProfilePeoplePage {
     FOLLOWING,
     FOLLOWERS,
@@ -221,9 +277,9 @@ data class ProfileTopBarInfo(
     val collapseOffsetPx: Float,
 )
 
-private const val PROFILE_CROP_ASPECT = 10f / 16f
+private const val PROFILE_CROP_ASPECT = 1f
 private const val PROFILE_CROP_WIDTH_PX = 1080
-private const val PROFILE_CROP_HEIGHT_PX = 1728
+private const val PROFILE_CROP_HEIGHT_PX = 1080
 private const val PROFILE_ICON_SIZE_PX = 1024
 private val PROFILE_TITLE_SHADOW = Shadow(
     color = Color.Black.copy(alpha = 0.52f),
@@ -242,6 +298,7 @@ fun OrbProfileScreen(
     initialProfile: OrbProfile? = null,
     contentPadding: PaddingValues,
     onBack: () -> Unit = {},
+    onAccountDeleted: () -> Unit = {},
     onOpenProfile: (String) -> Unit = {},
     scrollState: ScrollState = rememberScrollState(),
     onTopBarInfoChange: (ProfileTopBarInfo) -> Unit = {},
@@ -249,13 +306,14 @@ fun OrbProfileScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val shareNowPlaying by ProfilePrivacyStore.shareNowPlaying.collectAsStateWithLifecycle()
+    val listeningAudience by ProfilePrivacyStore.listeningAudience.collectAsStateWithLifecycle()
     val followingAudience by ProfilePrivacyStore.followingAudience.collectAsStateWithLifecycle()
     val followersAudience by ProfilePrivacyStore.followersAudience.collectAsStateWithLifecycle()
     val playCountAudience by ProfilePrivacyStore.playCountAudience.collectAsStateWithLifecycle()
     val favoriteArtistsAudience by ProfilePrivacyStore.favoriteArtistsAudience.collectAsStateWithLifecycle()
     val favoriteAlbumsAudience by ProfilePrivacyStore.favoriteAlbumsAudience.collectAsStateWithLifecycle()
     val favoriteSongsAudience by ProfilePrivacyStore.favoriteSongsAudience.collectAsStateWithLifecycle()
+    val recentRatingsAudience by ProfilePrivacyStore.recentRatingsAudience.collectAsStateWithLifecycle()
     val ownUserId = SocialRepository.currentUserId()
     val cachedSnapshot = remember(ownUserId) { ownUserId?.let(ProfileSnapshotStore::load) }
 
@@ -269,6 +327,7 @@ fun OrbProfileScreen(
     var tastes by remember(initialProfile?.id, ownUserId) {
         mutableStateOf(cachedSnapshot?.tastes.orEmpty().map { it.toImmersiveTaste() })
     }
+    var recentAlbumRatings by remember(ownUserId) { mutableStateOf<List<ProfileAlbumRatingCard>>(emptyList()) }
     var profileRankingActivity by remember(ownUserId) { mutableStateOf<List<ListeningActivity>>(emptyList()) }
     var profileRankingActivityLoaded by remember(ownUserId) { mutableStateOf(false) }
     var loading by remember(initialProfile?.id, ownUserId) { mutableStateOf(cachedSnapshot == null) }
@@ -291,13 +350,14 @@ fun OrbProfileScreen(
     var editing by remember { mutableStateOf(false) }
     var editName by remember { mutableStateOf("") }
     var editUsername by remember { mutableStateOf("") }
-    var editShare by remember { mutableStateOf(true) }
+    var editListeningAudience by remember { mutableStateOf(ProfileAudience.FOLLOWERS) }
     var editFollowingAudience by remember { mutableStateOf(ProfileAudience.EVERYONE) }
     var editFollowersAudience by remember { mutableStateOf(ProfileAudience.EVERYONE) }
     var editPlayCountAudience by remember { mutableStateOf(ProfileAudience.EVERYONE) }
     var editFavoriteArtistsAudience by remember { mutableStateOf(ProfileAudience.EVERYONE) }
     var editFavoriteAlbumsAudience by remember { mutableStateOf(ProfileAudience.EVERYONE) }
     var editFavoriteSongsAudience by remember { mutableStateOf(ProfileAudience.EVERYONE) }
+    var editRecentRatingsAudience by remember { mutableStateOf(ProfileAudience.NOBODY) }
     var selectedAvatar by remember { mutableStateOf<ProfileImageSelection?>(null) }
     var cropEditorUri by remember { mutableStateOf<Uri?>(null) }
     var saving by remember { mutableStateOf(false) }
@@ -305,8 +365,17 @@ fun OrbProfileScreen(
 
     val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
-            cropEditorUri = uri
-            editErrorRes = null
+            scope.launch {
+                val validation = runCatching { isProfileSourceWithinLimit(context, uri) }
+                when {
+                    validation.isFailure -> editErrorRes = R.string.profile_photo_cannot_open
+                    validation.getOrNull() == false -> editErrorRes = R.string.profile_photo_too_large
+                    else -> {
+                        cropEditorUri = uri
+                        editErrorRes = null
+                    }
+                }
+            }
         }
     }
 
@@ -331,6 +400,11 @@ fun OrbProfileScreen(
                 }
             }
             val playsTask = async { runCatching { SocialRepository.profilePlayCount(userId) } }
+            val ratingsTask = async {
+                runCatching {
+                    resolveProfileAlbumRatings(SocialRepository.albumRatingsForUser(userId, limit = 10))
+                }.getOrDefault(emptyList())
+            }
 
             profile = profileTask.await() ?: profile ?: initialProfile
             following = followingTask.await()
@@ -355,6 +429,7 @@ fun OrbProfileScreen(
                 playsTask.await().getOrDefault(playCount),
                 if (activityResult.isSuccess) qualifiedActivities.size.toLong() else 0L,
             )
+            recentAlbumRatings = ratingsTask.await()
             ProfileSnapshotStore.save(
                 userId,
                 CachedProfileSnapshot(
@@ -375,6 +450,7 @@ fun OrbProfileScreen(
                     favoriteArtistsVisibility = it.favoriteArtistsVisibility,
                     favoriteAlbumsVisibility = it.favoriteAlbumsVisibility,
                     favoriteSongsVisibility = it.favoriteSongsVisibility,
+                    recentRatingsVisibility = it.recentRatingsVisibility,
                 )
             }
             loading = false
@@ -480,13 +556,14 @@ fun OrbProfileScreen(
             name = editName,
             username = editUsername,
             usernameLockedUntil = profile.usernameLockedUntil(),
-            shareNowPlaying = editShare,
+            listeningAudience = editListeningAudience,
             followingAudience = editFollowingAudience,
             followersAudience = editFollowersAudience,
             playCountAudience = editPlayCountAudience,
             favoriteArtistsAudience = editFavoriteArtistsAudience,
             favoriteAlbumsAudience = editFavoriteAlbumsAudience,
             favoriteSongsAudience = editFavoriteSongsAudience,
+            recentRatingsAudience = editRecentRatingsAudience,
             saving = saving,
             errorRes = editErrorRes,
             bottomPadding = contentPadding.calculateBottomPadding(),
@@ -497,13 +574,25 @@ fun OrbProfileScreen(
                 editUsername = it.trimStart().removePrefix("@").lowercase().take(30)
                 editErrorRes = null
             },
-            onShareChange = { editShare = it },
+            onListeningAudienceChange = { editListeningAudience = it },
             onFollowingVisibilityChange = { editFollowingAudience = it },
             onFollowersVisibilityChange = { editFollowersAudience = it },
             onPlayCountVisibilityChange = { editPlayCountAudience = it },
             onFavoriteArtistsVisibilityChange = { editFavoriteArtistsAudience = it },
             onFavoriteAlbumsVisibilityChange = { editFavoriteAlbumsAudience = it },
             onFavoriteSongsVisibilityChange = { editFavoriteSongsAudience = it },
+            onRecentRatingsAudienceChange = { editRecentRatingsAudience = it },
+            onDeleteAccount = {
+                if (!saving) scope.launch {
+                    saving = true
+                    editErrorRes = null
+                    SocialRepository.deleteOwnAccount().fold(
+                        onSuccess = { onAccountDeleted() },
+                        onFailure = { editErrorRes = R.string.profile_delete_account_error },
+                    )
+                    saving = false
+                }
+            },
             onSave = {
                 val cleanUsername = editUsername.trim().removePrefix("@").lowercase()
                 if (editName.trim().isBlank() || !PROFILE_USERNAME_REGEX.matches(cleanUsername)) {
@@ -538,18 +627,20 @@ fun OrbProfileScreen(
                             avatarIconUrl = uploadedAvatarIcon,
                         ).getOrThrow()
                         SocialRepository.updateProfilePrivacy(
-                            nowPlayingVisibility = if (editShare) ProfileAudience.FOLLOWERS.wireValue else ProfileAudience.NOBODY.wireValue,
-                            listeningVisibility = if (editShare) ProfileAudience.FOLLOWERS.wireValue else ProfileAudience.NOBODY.wireValue,
+                            nowPlayingVisibility = editListeningAudience.wireValue,
+                            listeningVisibility = editListeningAudience.wireValue,
                             followingVisibility = editFollowingAudience.wireValue,
                             followersVisibility = editFollowersAudience.wireValue,
                             playCountVisibility = editPlayCountAudience.wireValue,
                             favoriteArtistsVisibility = editFavoriteArtistsAudience.wireValue,
                             favoriteAlbumsVisibility = editFavoriteAlbumsAudience.wireValue,
                             favoriteSongsVisibility = editFavoriteSongsAudience.wireValue,
+                            recentRatingsVisibility = editRecentRatingsAudience.wireValue,
                         ).getOrThrow()
+                        SocialRepository.setAlbumRatingsVisibility(editRecentRatingsAudience.wireValue).getOrThrow()
                     }
                     if (result.isSuccess) {
-                        ProfilePrivacyStore.setShareNowPlaying(editShare)
+                        ProfilePrivacyStore.setListeningAudience(editListeningAudience)
                         ProfilePrivacyStore.setProfileVisibilityAudiences(
                             following = editFollowingAudience,
                             followers = editFollowersAudience,
@@ -557,6 +648,7 @@ fun OrbProfileScreen(
                             favoriteArtists = editFavoriteArtistsAudience,
                             favoriteAlbums = editFavoriteAlbumsAudience,
                             favoriteSongs = editFavoriteSongsAudience,
+                            recentRatings = editRecentRatingsAudience,
                         )
                         selectedAvatar = null
                         editing = false
@@ -641,7 +733,7 @@ fun OrbProfileScreen(
         onAction = {
             editName = profile?.displayName?.takeIf { it.isNotBlank() } ?: account?.name.orEmpty()
             editUsername = profile?.username.orEmpty()
-            editShare = shareNowPlaying
+            editListeningAudience = profileSectionAudience(profile?.nowPlayingVisibility ?: profile?.listeningVisibility ?: listeningAudience.wireValue)
             editFollowingAudience = profile?.followingVisibility?.let(::profileSectionAudience) ?: followingAudience
             editFollowersAudience = profile?.followersVisibility?.let(::profileSectionAudience) ?: followersAudience
             editPlayCountAudience = profile?.playCountVisibility?.let(::profileSectionAudience) ?: playCountAudience
@@ -654,6 +746,7 @@ fun OrbProfileScreen(
             editFavoriteSongsAudience = profileSectionAudience(
                 profile?.favoriteSongsVisibility ?: profile?.favoriteContentVisibility,
             )
+            editRecentRatingsAudience = profileSectionAudience(profile?.recentRatingsVisibility ?: recentRatingsAudience.wireValue)
             selectedAvatar = null
             cropEditorUri = null
             editErrorRes = null
@@ -691,6 +784,11 @@ fun OrbProfileScreen(
             tastes = tastes.filter { it.isTrack }.take(10),
             palette = palette,
         )
+        ProfileAlbumRatingGridSection(
+            title = stringResource(R.string.profile_recent_album_ratings),
+            ratings = recentAlbumRatings,
+            palette = palette,
+        )
     }
 }
 
@@ -711,6 +809,7 @@ fun PublicProfileScreen(
     var tastes by remember(userId) {
         mutableStateOf(cachedSnapshot?.tastes.orEmpty().map { it.toImmersiveTaste() })
     }
+    var recentAlbumRatings by remember(userId) { mutableStateOf<List<ProfileAlbumRatingCard>>(emptyList()) }
     var compatibility by remember(userId) {
         mutableStateOf(
             cachedSnapshot?.compatibilityPercent?.let {
@@ -761,6 +860,11 @@ fun PublicProfileScreen(
             val publicCompatibilityTask = async {
                 runCatching { SocialRepository.profileMusicCompatibility(userId) }.getOrNull()
             }
+            val ratingsTask = async {
+                runCatching {
+                    resolveProfileAlbumRatings(SocialRepository.albumRatingsForUser(userId, limit = 10))
+                }.getOrDefault(emptyList())
+            }
 
             profile = profileTask.await() ?: profile
             val favoriteArtistsResult = favoriteArtistsTask.await()
@@ -793,6 +897,7 @@ fun PublicProfileScreen(
                 playsTask.await().getOrDefault(playCount),
             )
             following = followingTask.await().getOrDefault(following)
+            recentAlbumRatings = ratingsTask.await()
             val anyFavoriteFetchSucceeded = favoriteArtistsResult.isSuccess ||
                 favoriteAlbumsResult.isSuccess || favoriteSongsResult.isSuccess
             val initialTastes = if (anyFavoriteFetchSucceeded) {
@@ -988,6 +1093,11 @@ fun PublicProfileScreen(
         viewerFollowsTarget = following,
         targetFollowsViewer = false,
     )
+    val showRecentRatings = isOwner || canViewProfileAudience(
+        profile?.recentRatingsVisibility ?: ProfileAudience.NOBODY.wireValue,
+        viewerFollowsTarget = following,
+        targetFollowsViewer = false,
+    )
 
     ImmersiveProfilePage(
         profile = profile,
@@ -1062,6 +1172,13 @@ fun PublicProfileScreen(
                 palette = palette,
             )
         }
+        if (showRecentRatings && recentAlbumRatings.isNotEmpty()) {
+            ProfileAlbumRatingGridSection(
+                title = stringResource(R.string.profile_recent_album_ratings),
+                ratings = recentAlbumRatings,
+                palette = palette,
+            )
+        }
         if (!loading && profile == null) {
             ImmersiveMessage(stringResource(R.string.profile_not_found))
         } else if (!loading && compatibility == null && activities.isEmpty() && tastes.isEmpty() && playCount == 0L) {
@@ -1102,15 +1219,35 @@ private fun ImmersiveProfilePage(
         ?: stringResource(R.string.profile_title)
     val username = profile?.username?.takeIf { it.isNotBlank() }?.let { "@$it" }
 
-    val surfaceWash = rememberProfileBottomWash(image = image, fallback = palette.wash)
+    val configuration = LocalConfiguration.current
+    val isTabletLandscape = configuration.smallestScreenWidthDp >= 600 &&
+        configuration.orientation == Configuration.ORIENTATION_LANDSCAPE && configuration.screenWidthDp >= 840
+    val portraitPaneWidth = minOf(configuration.screenHeightDp.dp,
+        configuration.screenWidthDp.dp * 0.42f)
+    val profileEdgeField = if (isTabletLandscape) {
+        rememberArtworkRightEdgeField(image = image, fallback = palette.wash)
+    } else {
+        rememberArtworkBottomEdgeField(image = image, fallback = palette.wash)
+    }
+    val surfaceWash = profileEdgeField.solidColor
+    val profileForeground = bestForegroundForArtworkSurface(surfaceWash)
+    val profilePalette = palette.copy(
+        background = surfaceWash,
+        wash = surfaceWash,
+        elevated = profileForeground.copy(alpha = 0.14f),
+        accent = profileForeground,
+        onBackground = profileForeground,
+        onBackgroundVariant = profileForeground.copy(alpha = 0.78f),
+        divider = profileForeground.copy(alpha = 0.12f),
+    )
     var titleCollapseOffsetPx by remember(displayName, username) { mutableStateOf(Float.POSITIVE_INFINITY) }
 
     LaunchedEffect(
         displayName,
         username,
         surfaceWash,
-        palette.onBackground,
-        palette.onBackgroundVariant,
+        profilePalette.onBackground,
+        profilePalette.onBackgroundVariant,
         titleCollapseOffsetPx,
     ) {
         onTopBarInfoChange(
@@ -1118,26 +1255,70 @@ private fun ImmersiveProfilePage(
                 title = displayName,
                 subtitle = username,
                 pageColor = surfaceWash,
-                contentColor = palette.onBackground,
-                contentVariantColor = palette.onBackgroundVariant,
+                contentColor = profilePalette.onBackground,
+                contentVariantColor = profilePalette.onBackgroundVariant,
                 collapseOffsetPx = titleCollapseOffsetPx,
             ),
         )
     }
 
-    Box(
-        modifier = modifier
-            .fillMaxSize()
-            .background(surfaceWash),
+    val profileHaze = remember { HazeState() }
+    BoxWithConstraints(
+        modifier = modifier.fillMaxSize().background(surfaceWash),
     ) {
+        val photoSize = if (isTabletLandscape) portraitPaneWidth else maxWidth
+        // The confirmed image is a square 1:1 crop. The full original is kept
+        // untouched until the user positions and confirms it in the editor.
+        // Use a square hero so the saved photo fills the profile width.
+        val photoHeight = if (isTabletLandscape) maxHeight else photoSize / PROFILE_CROP_ASPECT
+        // Capture only the raw artwork and its continuation, never profile controls.
+        Box(Modifier.matchParentSize().clipToBounds().hazeSource(profileHaze).background(surfaceWash)) {
+            Box(
+                (if (isTabletLandscape) Modifier.width(photoSize).fillMaxHeight()
+                    else Modifier.fillMaxWidth().height(photoHeight)).offset {
+                    IntOffset(0, if (isTabletLandscape) 0 else -scrollState.value)
+                },
+                contentAlignment = Alignment.Center,
+            ) {
+                if (!image.isNullOrBlank()) {
+                    ProgressiveProfileArtwork(
+                        image = image,
+                        contentDescription = displayName,
+                        wash = surfaceWash,
+                        horizontalFade = isTabletLandscape,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
+                    Icon(Icons.Rounded.Person, contentDescription = null,
+                        tint = profilePalette.onBackgroundVariant, modifier = Modifier.size(132.dp))
+                }
+            }
+        }
+        val mergeGeometry = if (isTabletLandscape) {
+            Modifier.width(ARTWORK_MERGE_BAND).fillMaxHeight()
+                .offset(x = photoSize - ARTWORK_MERGE_OVERLAP)
+        } else {
+            Modifier.fillMaxWidth().height(ARTWORK_MERGE_BAND).offset {
+                IntOffset(0, (photoHeight - ARTWORK_MERGE_OVERLAP).roundToPx() - scrollState.value)
+            }
+        }
+        ArtworkMergeBand(
+            surfaceColor = surfaceWash,
+            hazeState = profileHaze,
+            horizontal = isTabletLandscape,
+            modifier = mergeGeometry,
+        )
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .padding(start = if (isTabletLandscape) portraitPaneWidth + 24.dp else 0.dp,
+                    end = if (isTabletLandscape) 24.dp else 0.dp)
                 .verticalScroll(scrollState),
         ) {
             FrostedProfileHero(
                 image = image,
-                palette = palette,
+                showArtwork = !isTabletLandscape,
+                palette = profilePalette,
                 heroWash = surfaceWash,
                 displayName = displayName,
                 username = profile?.username,
@@ -1173,6 +1354,7 @@ private fun ImmersiveProfilePage(
 @Composable
 private fun FrostedProfileHero(
     image: String?,
+    showArtwork: Boolean = true,
     palette: ArtworkPalette,
     heroWash: Color,
     displayName: String,
@@ -1201,36 +1383,13 @@ private fun FrostedProfileHero(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(PROFILE_CROP_ASPECT)
-                .background(heroWash),
+                .then(if (showArtwork) Modifier.aspectRatio(PROFILE_CROP_ASPECT)
+                    else Modifier.windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility).height(96.dp)),
         ) {
-            if (!image.isNullOrBlank()) {
-                ProgressiveProfileArtwork(
-                    image = image,
-                    contentDescription = displayName,
-                    wash = heroWash,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            } else {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(heroWash),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        Icons.Rounded.Person,
-                        contentDescription = null,
-                        tint = palette.onBackgroundVariant,
-                        modifier = Modifier.size(132.dp),
-                    )
-                }
-            }
-
-            IconButton(
+            if (showArtwork) androidx.compose.material3.IconButton(
                 onClick = onBack,
                 modifier = Modifier
-                    .statusBarsPadding()
+                    .windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility)
                     .padding(start = 12.dp, top = 8.dp)
                     .align(Alignment.TopStart),
             ) {
@@ -1241,13 +1400,12 @@ private fun FrostedProfileHero(
                 )
             }
 
-            // Profile identity/actions live on top of the final section of the portrait.
-            // Because this region is already entering the progressive frosted blur, the
-            // information reads as part of the photo instead of a separate block below it.
+        }
+        // The title and actions follow the confirmed square artwork and its fade.
+        Spacer(Modifier.height(if (showArtwork) 30.dp else 12.dp))
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .align(Alignment.BottomCenter)
                     .padding(start = PAGE_GUTTER, end = PAGE_GUTTER, bottom = 20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
@@ -1262,7 +1420,7 @@ private fun FrostedProfileHero(
                     ) {
                         Text(
                             text = displayName,
-                            style = MaterialTheme.typography.headlineLarge.copy(shadow = PROFILE_TITLE_SHADOW),
+                            style = MaterialTheme.typography.displayLarge,
                             color = palette.onBackground,
                             textAlign = TextAlign.Center,
                             maxLines = 2,
@@ -1272,7 +1430,7 @@ private fun FrostedProfileHero(
                             Spacer(Modifier.height(2.dp))
                             Text(
                                 text = "@$it",
-                                style = MaterialTheme.typography.titleMedium.copy(shadow = PROFILE_USERNAME_SHADOW),
+                                style = MaterialTheme.typography.bodyMedium,
                                 color = palette.onBackgroundVariant,
                                 textAlign = TextAlign.Center,
                             )
@@ -1287,17 +1445,13 @@ private fun FrostedProfileHero(
                     enabled = actionEnabled && !loading,
                     busy = actionBusy,
                     onClick = onAction,
-                    modifier = Modifier
-                        .fillMaxWidth(0.72f)
-                        .widthIn(max = 300.dp),
+                    modifier = Modifier.widthIn(min = 160.dp, max = 280.dp),
                 )
 
                 if (showFollowing || showFollowers || showPlayCount) {
                     Spacer(Modifier.height(16.dp))
                     Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .offset(y = 10.dp),
+                        modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceEvenly,
                     ) {
                         if (showFollowing) {
@@ -1326,7 +1480,6 @@ private fun FrostedProfileHero(
                     }
                 }
             }
-        }
     }
 }
 
@@ -1410,35 +1563,44 @@ private fun ProgressiveProfileArtwork(
     contentDescription: String,
     wash: Color,
     modifier: Modifier = Modifier,
+    horizontalFade: Boolean = false,
 ) {
-    Box(modifier = modifier.background(wash)) {
-        // Keep the first 70% of the portrait completely intact. The masks only
-        // start cross-fading into blurred copies after that point, so the subject
-        // remains fully sharp until the information overlay begins.
-        ProfileArtworkLayer(
-            image = image,
+    val edge = if (horizontalFade) {
+        rememberArtworkRightEdgeField(image = image, fallback = wash)
+    } else {
+        rememberArtworkBottomEdgeField(image = image, fallback = wash)
+    }
+    Box(modifier = modifier.background(edge.solidColor)) {
+        AsyncImage(
+            model = image,
             contentDescription = contentDescription,
-            blurRadius = 0f,
-            stops = arrayOf(
-                0.00f to 1f,
-                0.70f to 1f,
-                0.75f to 0f,
-                1.00f to 0f,
-            ),
+            // The uploaded image is already a confirmed square crop. Never
+            // fit the original portrait into this area or introduce side bars.
+            contentScale = ContentScale.Crop,
+            alignment = Alignment.TopCenter,
+            modifier = Modifier.fillMaxSize().then(if (horizontalFade) Modifier.landscapeArtworkFade() else Modifier),
         )
-        ProfileArtworkLayer(image, null, 5f, arrayOf(0.70f to 0f, 0.73f to 1f, 0.77f to 1f, 0.81f to 0f))
-        ProfileArtworkLayer(image, null, 12f, arrayOf(0.73f to 0f, 0.77f to 1f, 0.82f to 1f, 0.86f to 0f))
-        ProfileArtworkLayer(image, null, 22f, arrayOf(0.77f to 0f, 0.81f to 1f, 0.86f to 1f, 0.90f to 0f))
-        ProfileArtworkLayer(image, null, 36f, arrayOf(0.81f to 0f, 0.85f to 1f, 0.91f to 1f, 0.95f to 0f))
-        ProfileArtworkLayer(image, null, 52f, arrayOf(0.85f to 0f, 0.89f to 1f, 0.96f to 1f, 1.00f to 0.58f))
-        ProfileArtworkLayer(image, null, 72f, arrayOf(0.90f to 0f, 0.94f to 0.92f, 0.985f to 0.62f, 1.00f to 0.16f))
-
-        // The last pixels do not simply fade to a flat colour. A final enlarged,
-        // heavily blurred copy lets the bottom edge bleed sideways and downward
-        // before its alpha reaches zero. Because the surface behind it is the
-        // lower-edge palette wash, the photo looks as though its own pixels are
-        // dissolving and spreading into the rest of the page.
-        ProfileArtworkDiffusionLayer(image = image)
+        edge.edgeFlow?.let { field ->
+            Image(
+                bitmap = field,
+                contentDescription = null,
+                contentScale = ContentScale.FillBounds,
+                modifier = (if (horizontalFade) Modifier.align(Alignment.CenterEnd)
+                    .fillMaxHeight().width(ARTWORK_LANDSCAPE_FLOW_WIDTH)
+                    .offset(x = ARTWORK_LANDSCAPE_FLOW_WIDTH - ARTWORK_LANDSCAPE_FLOW_OVERLAP)
+                    else Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(250.dp).offset(y = 174.dp))
+                    .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
+                    .drawWithContent {
+                        drawContent()
+                        val stops = arrayOf(0f to Color.Transparent,
+                            0.16f to Color.White.copy(alpha = 0.30f),
+                            0.30f to Color.White.copy(alpha = 0.82f),
+                            0.42f to Color.White, 1f to Color.White)
+                        drawRect(brush = if (horizontalFade) artworkLandscapeFlowMask()
+                            else Brush.verticalGradient(*stops), blendMode = BlendMode.DstIn)
+                    },
+            )
+        }
     }
 }
 
@@ -1523,20 +1685,18 @@ private fun ProfileActionPill(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // Match the primary Play control used on artist/album pages: same 50dp
+    // pill geometry, artwork-derived frosted material and contrast calculation.
     val shape = CircleShape
-    val buttonSurface = palette.elevated.copy(alpha = if (enabled) 0.82f else 0.54f)
-    val buttonContent = palette.onBackground.copy(alpha = if (enabled) 1f else 0.58f)
+    val buttonContent = albumGlassContentColor(palette.background)
+        .copy(alpha = if (enabled) 1f else 0.48f)
     Row(
         modifier = modifier
             .height(50.dp)
             .clip(shape)
-            .background(buttonSurface)
-            .border(
-                width = 0.5.dp,
-                color = palette.onBackground.copy(alpha = 0.12f),
-                shape = shape,
-            )
-            .then(if (enabled && !busy) Modifier.clickable(onClick = onClick) else Modifier),
+            .albumGlassSurface(palette.background)
+            .then(if (enabled && !busy) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 32.dp),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1551,6 +1711,8 @@ private fun ProfileActionPill(
                 text = text,
                 style = MaterialTheme.typography.titleMedium,
                 color = buttonContent,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
     }
@@ -1569,8 +1731,15 @@ private fun CleanProfileMetric(
         modifier = Modifier
             .width(106.dp)
             .clip(shape)
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-            .padding(vertical = 4.dp),
+            .then(
+                if (onClick != null) {
+                    // Profile metrics stay visually naked; only the text is
+                    // interactive. This matches the hero typography and avoids
+                    // isolated glass tiles behind Following / Followers.
+                    Modifier.clickable(onClick = onClick)
+                } else Modifier
+            )
+            .padding(vertical = 8.dp),
     ) {
         Text(
             text = value,
@@ -1598,12 +1767,14 @@ private fun ProfilePhotoCropScreen(
 ) {
     val context = LocalContext.current
     var bitmap by remember(uri) { mutableStateOf<Bitmap?>(null) }
+    var loadFailed by remember(uri) { mutableStateOf(false) }
     var stage by remember(uri) { mutableStateOf(ProfilePhotoEditorStage.PROFILE) }
     var portraitCrop by remember(uri) { mutableStateOf(ProfileImageCrop(uri = uri)) }
     var iconCrop by remember(uri) { mutableStateOf(ProfileImageCrop(uri = uri)) }
 
     LaunchedEffect(uri) {
-        bitmap = loadProfileSourceBitmap(context, uri)
+        bitmap = runCatching { loadProfileSourceBitmap(context, uri) }.getOrNull()
+        loadFailed = bitmap == null
     }
     BackHandler {
         if (stage == ProfilePhotoEditorStage.ICON) {
@@ -1621,7 +1792,8 @@ private fun ProfilePhotoCropScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .statusBarsPadding()
+                .windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility)
+                .verticalScroll(rememberScrollState())
                 .padding(top = 64.dp, bottom = 20.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
@@ -1647,15 +1819,11 @@ private fun ProfilePhotoCropScreen(
 
             when (stage) {
                 ProfilePhotoEditorStage.PROFILE -> {
-                    EditableProfilePhotoPreview(
+                    FullProfilePhotoPositioner(
                         bitmap = bitmap,
                         crop = portraitCrop,
-                        displayName = displayName,
-                        username = username,
                         onCropChange = { portraitCrop = it },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .aspectRatio(PROFILE_CROP_ASPECT),
+                        modifier = Modifier.fillMaxWidth(),
                     )
                 }
 
@@ -1665,12 +1833,19 @@ private fun ProfilePhotoCropScreen(
                         bitmap = bitmap,
                         crop = iconCrop,
                         onCropChange = { iconCrop = it },
-                        modifier = Modifier.size(286.dp),
+                        modifier = Modifier.fillMaxWidth(),
                     )
                     Spacer(Modifier.height(24.dp))
                 }
             }
 
+            if (loadFailed) {
+                Text(
+                    text = stringResource(R.string.profile_photo_cannot_open),
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(horizontal = PAGE_GUTTER),
+                )
+            }
             Spacer(Modifier.height(18.dp))
             Text(
                 text = stringResource(
@@ -1697,12 +1872,12 @@ private fun ProfilePhotoCropScreen(
         ) {
             Row(
                 modifier = Modifier
-                    .statusBarsPadding()
+                    .windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility)
                     .height(64.dp)
                     .padding(horizontal = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(
+                androidx.compose.material3.IconButton(
                     onClick = {
                         if (stage == ProfilePhotoEditorStage.ICON) {
                             stage = ProfilePhotoEditorStage.PROFILE
@@ -1752,6 +1927,109 @@ private fun ProfilePhotoCropScreen(
     }
 }
 
+/**
+ * The profile editor intentionally shows the ENTIRE source photo. A square
+ * guide indicates what WILL be exported after the user confirms the crop.
+ * It must not use ContentScale.Crop for the editing preview: that would make
+ * a portrait source look permanently cut before any gesture takes place.
+ *
+ * The shorter dimension of the fitted source defines the square guide.
+ * Because the fitted image covers this guide at zoom=1, the existing crop
+ * fractions can be exported using renderProfileCropBitmap without black bars.
+ */
+@Composable
+private fun FullProfilePhotoPositioner(
+    bitmap: Bitmap?,
+    crop: ProfileImageCrop,
+    onCropChange: (ProfileImageCrop) -> Unit,
+    modifier: Modifier = Modifier,
+    circularGuide: Boolean = false,
+) {
+    val configuration = LocalConfiguration.current
+    val aspect = remember(bitmap) {
+        bitmap?.let { it.width.toFloat() / it.height.toFloat() }
+            ?.takeIf { it.isFinite() && it > 0f } ?: 1f
+    }
+    var viewport by remember(bitmap) { mutableStateOf(IntSize.Zero) }
+    val guideSidePx = remember(bitmap, viewport) {
+        val source = bitmap
+        if (source == null || viewport.width <= 0 || viewport.height <= 0) 0f else {
+            val fittedScale = min(
+                viewport.width.toFloat() / source.width,
+                viewport.height.toFloat() / source.height,
+            )
+            min(source.width * fittedScale, source.height * fittedScale)
+        }
+    }
+
+    BoxWithConstraints(modifier.fillMaxWidth().background(Color.Black)) {
+        // Preserve the complete original aspect ratio. Very tall photos are
+        // fitted into a scrollable-height editor, never pre-cropped to 1:1.
+        val maximumHeight = configuration.screenHeightDp.dp * 0.78f
+        val previewHeight = (maxWidth / aspect).coerceAtMost(maximumHeight)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(previewHeight)
+                .background(Color(0xFF191919))
+                .clipToBounds()
+                .onSizeChanged { viewport = it }
+                .profileCropGestures(
+                    bitmap = bitmap,
+                    areaSize = IntSize(guideSidePx.toInt(), guideSidePx.toInt()),
+                    crop = crop,
+                    onCropChange = onCropChange,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (bitmap == null) {
+                CircularProgressIndicator(color = Color.White)
+            } else {
+                // Fit shows every edge of the photograph before the user
+                // moves or zooms. No crop, resampling or upload happens here.
+                Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            scaleX = crop.zoom
+                            scaleY = crop.zoom
+                            translationX = crop.offsetXFraction * guideSidePx
+                            translationY = crop.offsetYFraction * guideSidePx
+                        },
+                )
+                Canvas(Modifier.matchParentSize()) {
+                    val side = guideSidePx.coerceAtMost(min(size.width, size.height))
+                    if (side > 0f) {
+                        val left = (size.width - side) / 2f
+                        val top = (size.height - side) / 2f
+                        // Both editors show the entire original image until saving.
+                        // Only the guide changes: square for the profile, circle
+                        // for the avatar. Never clip the source to this guide.
+                        if (circularGuide) {
+                            drawCircle(
+                                color = Color.White.copy(alpha = 0.80f),
+                                radius = (side / 2f - 1.5.dp.toPx()).coerceAtLeast(0f),
+                                center = Offset(size.width / 2f, size.height / 2f),
+                                style = Stroke(width = 1.5.dp.toPx()),
+                            )
+                        } else {
+                            drawRect(
+                                color = Color.White.copy(alpha = 0.80f),
+                                topLeft = Offset(left, top),
+                                size = androidx.compose.ui.geometry.Size(side, side),
+                                style = Stroke(width = 1.5.dp.toPx()),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun EditableProfilePhotoPreview(
     bitmap: Bitmap?,
@@ -1760,103 +2038,75 @@ private fun EditableProfilePhotoPreview(
     username: String,
     onCropChange: (ProfileImageCrop) -> Unit,
     modifier: Modifier = Modifier,
+    editable: Boolean = true,
 ) {
     var areaSize by remember { mutableStateOf(IntSize.Zero) }
-    Box(
-        modifier = modifier
-            .clipToBounds()
-            .background(Color.Black)
-            .onSizeChanged { areaSize = it }
-            .profileCropGestures(bitmap, areaSize, crop, onCropChange),
-    ) {
-        if (bitmap == null) {
-            CircularProgressIndicator(
-                color = Color.White,
-                modifier = Modifier.align(Alignment.Center),
-            )
-            return@Box
+    var edge by remember(bitmap) { mutableStateOf(ArtworkBottomEdgeField(null, Color.Black)) }
+    LaunchedEffect(bitmap, crop) {
+        val source = bitmap ?: return@LaunchedEffect
+        edge = withContext(Dispatchers.Default) {
+            val preview = renderProfileCropBitmap(source, crop, 384, 384)
+            try { createBottomEdgeField(preview, 0.985f, Color.Black) }
+            finally { if (preview !== source) preview.recycle() }
+        } ?: ArtworkBottomEdgeField(null, Color.Black)
+    }
+    val foreground = bestForegroundForArtworkSurface(edge.solidColor)
+    val haze = remember { HazeState() }
+    BoxWithConstraints(modifier.fillMaxWidth().clipToBounds().background(edge.solidColor)) {
+        val photoHeight = maxWidth / PROFILE_CROP_ASPECT
+        Box(Modifier.matchParentSize().hazeSource(haze).background(edge.solidColor)) {
+            Box(Modifier.fillMaxWidth().aspectRatio(PROFILE_CROP_ASPECT)) {
+                bitmap?.let {
+                    EditableProfileCropLayer(it, crop, areaSize, 0f, arrayOf(0f to 1f, 1f to 1f))
+                }
+            }
+            edge.edgeFlow?.let { field ->
+                Image(bitmap = field, contentDescription = null, contentScale = ContentScale.FillBounds,
+                    modifier = Modifier.fillMaxWidth().height(250.dp).offset(y = photoHeight - 76.dp)
+                        .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
+                        .drawWithContent {
+                            drawContent()
+                            drawRect(Brush.verticalGradient(
+                                0f to Color.Transparent, 0.16f to Color.White.copy(alpha = 0.30f),
+                                0.30f to Color.White.copy(alpha = 0.82f), 0.42f to Color.White,
+                                1f to Color.White), blendMode = BlendMode.DstIn)
+                        })
+            }
         }
-
-        EditableProfileCropLayer(
-            bitmap = bitmap,
-            crop = crop,
-            areaSize = areaSize,
-            blurRadius = 0f,
-            stops = arrayOf(
-                0.00f to 1f,
-                0.70f to 1f,
-                0.75f to 0f,
-                1.00f to 0f,
-            ),
-        )
-        EditableProfileCropLayer(bitmap, crop, areaSize, 7f, arrayOf(0.70f to 0f, 0.74f to 1f, 0.81f to 1f, 0.86f to 0f))
-        EditableProfileCropLayer(bitmap, crop, areaSize, 18f, arrayOf(0.75f to 0f, 0.80f to 1f, 0.88f to 1f, 0.93f to 0f))
-        EditableProfileCropLayer(bitmap, crop, areaSize, 38f, arrayOf(0.81f to 0f, 0.86f to 1f, 0.94f to 1f, 1.00f to 0.22f))
-        EditableProfileCropLayer(bitmap, crop, areaSize, 68f, arrayOf(0.88f to 0f, 0.93f to 0.82f, 1.00f to 0.22f))
-
-        Box(
-            Modifier
-                .matchParentSize()
-                .background(
-                    Brush.verticalGradient(
-                        0.00f to Color.Transparent,
-                        0.70f to Color.Transparent,
-                        0.86f to Color.Black.copy(alpha = 0.08f),
-                        1.00f to Color.Black.copy(alpha = 0.38f),
-                    ),
-                ),
-        )
-
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .align(Alignment.BottomCenter)
-                .padding(horizontal = PAGE_GUTTER, vertical = 20.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Text(
-                text = displayName.ifBlank { stringResource(R.string.profile_title) },
-                style = MaterialTheme.typography.headlineLarge.copy(shadow = PROFILE_TITLE_SHADOW),
-                color = Color.White,
-                textAlign = TextAlign.Center,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-            username.takeIf { it.isNotBlank() }?.let {
-                Text(
-                    text = "@${it.removePrefix("@")}",
-                    style = MaterialTheme.typography.titleMedium.copy(shadow = PROFILE_USERNAME_SHADOW),
-                    color = Color.White.copy(alpha = 0.82f),
-                    textAlign = TextAlign.Center,
-                )
+        ArtworkMergeBand(surfaceColor = edge.solidColor, hazeState = haze,
+            modifier = Modifier.fillMaxWidth().height(ARTWORK_MERGE_BAND)
+                .offset(y = photoHeight - ARTWORK_MERGE_OVERLAP))
+        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(Modifier.fillMaxWidth().aspectRatio(PROFILE_CROP_ASPECT)
+                .onSizeChanged { areaSize = it }
+                .then(if (editable) Modifier.profileCropGestures(bitmap, areaSize, crop, onCropChange) else Modifier)) {
+                if (bitmap == null) CircularProgressIndicator(color = foreground, modifier = Modifier.align(Alignment.Center))
             }
+            Spacer(Modifier.height(30.dp))
+            Text(displayName.ifBlank { stringResource(R.string.profile_title) },
+                style = MaterialTheme.typography.displayLarge, color = foreground,
+                textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (username.isNotBlank()) Text("@${username.removePrefix("@")}",
+                style = MaterialTheme.typography.bodyMedium,
+                color = foreground.copy(alpha = 0.78f), textAlign = TextAlign.Center)
             Spacer(Modifier.height(14.dp))
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth(0.72f)
-                    .height(50.dp)
-                    .clip(CircleShape)
-                    .background(Color.White.copy(alpha = 0.18f)),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = stringResource(R.string.profile_edit),
-                    style = MaterialTheme.typography.titleMedium,
-                    color = Color.White,
-                )
+            Row(Modifier.widthIn(min = 160.dp, max = 280.dp).height(48.dp)
+                .clip(CircleShape).background(foreground).padding(horizontal = 24.dp),
+                horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                Text(stringResource(R.string.profile_edit), style = MaterialTheme.typography.titleMedium,
+                    color = bestForegroundForArtworkSurface(foreground))
             }
-            Spacer(Modifier.height(14.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-            ) {
-                ProfilePhotoPreviewMetric("12", stringResource(R.string.profile_following))
-                ProfilePhotoPreviewMetric("24", stringResource(R.string.profile_followers))
-                ProfilePhotoPreviewMetric("1,2K", stringResource(R.string.profile_total_plays))
-            }
+            Spacer(Modifier.height(20.dp))
         }
     }
+}
+
+@Composable
+private fun ProfileSelectionPreview(crop: ProfileImageCrop, displayName: String, username: String) {
+    val context = LocalContext.current
+    var bitmap by remember(crop.uri) { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(crop.uri) { bitmap = loadProfileSourceBitmap(context, crop.uri) }
+    EditableProfilePhotoPreview(bitmap, crop, displayName, username, onCropChange = {}, editable = false)
 }
 
 @Composable
@@ -1886,34 +2136,16 @@ private fun EditableIconPhotoPreview(
     onCropChange: (ProfileImageCrop) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var areaSize by remember { mutableStateOf(IntSize.Zero) }
-    Box(
-        modifier = modifier
-            .clip(CircleShape)
-            .background(Color(0xFF171717))
-            .border(1.dp, Color.White.copy(alpha = 0.20f), CircleShape)
-            .onSizeChanged { areaSize = it }
-            .profileCropGestures(bitmap, areaSize, crop, onCropChange),
-        contentAlignment = Alignment.Center,
-    ) {
-        if (bitmap == null) {
-            CircularProgressIndicator(color = Color.White)
-        } else {
-            Image(
-                bitmap = bitmap.asImageBitmap(),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer {
-                        scaleX = crop.zoom
-                        scaleY = crop.zoom
-                        translationX = crop.offsetXFraction * areaSize.width
-                        translationY = crop.offsetYFraction * areaSize.height
-                    },
-            )
-        }
-    }
+    // The source must remain fully visible while the user adjusts the icon.
+    // The circle is a crop GUIDE only; the saved avatar is produced later,
+    // using the selected zoom and pan in renderProfileCropBitmap.
+    FullProfilePhotoPositioner(
+        bitmap = bitmap,
+        crop = crop,
+        onCropChange = onCropChange,
+        modifier = modifier,
+        circularGuide = true,
+    )
 }
 
 @Composable
@@ -1975,6 +2207,8 @@ private fun Modifier.profileCropGestures(
         val areaAspect = areaWidth / areaHeight
         val baseWidth: Float
         val baseHeight: Float
+        // ContentScale.Crop: the displayed 1:1 selection must be fully
+        // covered at all times, without stretching or letterboxing.
         if (sourceAspect > areaAspect) {
             baseHeight = areaHeight
             baseWidth = areaHeight * sourceAspect
@@ -1983,8 +2217,8 @@ private fun Modifier.profileCropGestures(
             baseHeight = areaWidth / sourceAspect
         }
 
-        val maxX = ((baseWidth * newZoom - areaWidth) / 2f).coerceAtLeast(0f)
-        val maxY = ((baseHeight * newZoom - areaHeight) / 2f).coerceAtLeast(0f)
+        val maxX = max(0f, (baseWidth * newZoom - areaWidth) / 2f)
+        val maxY = max(0f, (baseHeight * newZoom - areaHeight) / 2f)
         val nextX = (currentXFraction * areaWidth + pan.x).coerceIn(-maxX, maxX)
         val nextY = (currentYFraction * areaHeight + pan.y).coerceIn(-maxY, maxY)
 
@@ -2048,13 +2282,14 @@ private fun ProfileEditScreen(
     name: String,
     username: String,
     usernameLockedUntil: Instant?,
-    shareNowPlaying: Boolean,
+    listeningAudience: ProfileAudience,
     followingAudience: ProfileAudience,
     followersAudience: ProfileAudience,
     playCountAudience: ProfileAudience,
     favoriteArtistsAudience: ProfileAudience,
     favoriteAlbumsAudience: ProfileAudience,
     favoriteSongsAudience: ProfileAudience,
+    recentRatingsAudience: ProfileAudience,
     saving: Boolean,
     errorRes: Int?,
     bottomPadding: androidx.compose.ui.unit.Dp,
@@ -2062,15 +2297,48 @@ private fun ProfileEditScreen(
     onChoosePhoto: () -> Unit,
     onNameChange: (String) -> Unit,
     onUsernameChange: (String) -> Unit,
-    onShareChange: (Boolean) -> Unit,
+    onListeningAudienceChange: (ProfileAudience) -> Unit,
     onFollowingVisibilityChange: (ProfileAudience) -> Unit,
     onFollowersVisibilityChange: (ProfileAudience) -> Unit,
     onPlayCountVisibilityChange: (ProfileAudience) -> Unit,
     onFavoriteArtistsVisibilityChange: (ProfileAudience) -> Unit,
     onFavoriteAlbumsVisibilityChange: (ProfileAudience) -> Unit,
     onFavoriteSongsVisibilityChange: (ProfileAudience) -> Unit,
+    onRecentRatingsAudienceChange: (ProfileAudience) -> Unit,
     onSave: () -> Unit,
+    onDeleteAccount: () -> Unit,
 ) {
+    var showDeleteConfirmation by remember { mutableStateOf(false) }
+    if (showDeleteConfirmation) {
+        com.music.orb.ui.components.OrbConfirmationDialog(
+            onDismissRequest = { showDeleteConfirmation = false },
+            modifier = Modifier.orbGlassSurface(orbOverlayGlassBaseColor(), cornerRadius = 28.dp),
+            containerColor = Color.Transparent,
+            tonalElevation = 0.dp,
+            shape = RoundedCornerShape(28.dp),
+            title = { Text(stringResource(R.string.profile_delete_account)) },
+            text = { Text(stringResource(R.string.profile_delete_account_confirm_message)) },
+            confirmButton = {
+                TextButton(
+                    enabled = !saving,
+                    onClick = {
+                        showDeleteConfirmation = false
+                        onDeleteAccount()
+                    },
+                ) {
+                    Text(
+                        stringResource(R.string.profile_delete_account_confirm_action),
+                        color = MaterialTheme.colorScheme.onPrimary,
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirmation = false }) {
+                    Text(stringResource(android.R.string.cancel))
+                }
+            },
+        )
+    }
     val usernameLocked = usernameLockedUntil?.isAfter(Instant.now()) == true
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Column(
@@ -2099,10 +2367,15 @@ private fun ProfileEditScreen(
                         .background(MaterialTheme.colorScheme.primaryContainer),
                 )
             }
+            Spacer(Modifier.height(18.dp))
             TextButton(onClick = onChoosePhoto, enabled = !saving) {
                 Icon(Icons.Rounded.CameraAlt, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
                 Text(stringResource(R.string.profile_change_photo))
+            }
+            selectedAvatar?.let { selection ->
+                ProfileSelectionPreview(selection.portrait, name, username)
+                Spacer(Modifier.height(16.dp))
             }
             OutlinedTextField(
                 value = name,
@@ -2134,60 +2407,70 @@ private fun ProfileEditScreen(
                 header = stringResource(R.string.profile_privacy_header),
                 footer = stringResource(R.string.profile_privacy_footer),
             ) {
-                SettingsRow(
-                    icon = Icons.Rounded.Visibility,
-                    title = stringResource(R.string.profile_share_now_playing),
-                    subtitle = stringResource(R.string.profile_share_now_playing_subtitle),
-                    trailing = {
-                        Switch(checked = shareNowPlaying, onCheckedChange = null, enabled = !saving)
-                    },
-                    onClick = { if (!saving) onShareChange(!shareNowPlaying) },
-                )
-            }
-            SettingsGroup(
-                header = stringResource(R.string.profile_page_visibility_header),
-                footer = stringResource(R.string.profile_page_visibility_footer),
-            ) {
                 ProfileVisibilityAudienceRow(
-                    title = stringResource(R.string.profile_share_following),
-                    selected = followingAudience,
+                    icon = Icons.Rounded.Headphones,
+                    title = stringResource(R.string.profile_listening_visibility),
+                    subtitle = stringResource(R.string.profile_listening_visibility_subtitle),
+                    selected = listeningAudience,
                     enabled = !saving,
-                    onSelected = onFollowingVisibilityChange,
+                    onSelected = onListeningAudienceChange,
                 )
+                RowDivider()
                 ProfileVisibilityAudienceRow(
-                    title = stringResource(R.string.profile_share_followers),
-                    selected = followersAudience,
-                    enabled = !saving,
-                    onSelected = onFollowersVisibilityChange,
-                )
-                ProfileVisibilityAudienceRow(
-                    title = stringResource(R.string.profile_share_play_count),
-                    selected = playCountAudience,
-                    enabled = !saving,
-                    onSelected = onPlayCountVisibilityChange,
-                )
-            }
-            SettingsGroup(
-                header = stringResource(R.string.profile_favorites_visibility_header),
-                footer = stringResource(R.string.profile_favorites_visibility_footer),
-            ) {
-                ProfileVisibilityAudienceRow(
+                    icon = Icons.Rounded.Person,
                     title = stringResource(R.string.profile_favorite_artists),
                     selected = favoriteArtistsAudience,
                     enabled = !saving,
                     onSelected = onFavoriteArtistsVisibilityChange,
                 )
+                RowDivider()
                 ProfileVisibilityAudienceRow(
+                    icon = Icons.Rounded.Album,
                     title = stringResource(R.string.profile_favorite_albums),
                     selected = favoriteAlbumsAudience,
                     enabled = !saving,
                     onSelected = onFavoriteAlbumsVisibilityChange,
                 )
+                RowDivider()
                 ProfileVisibilityAudienceRow(
+                    icon = Icons.Rounded.MusicNote,
                     title = stringResource(R.string.profile_favorite_songs),
                     selected = favoriteSongsAudience,
                     enabled = !saving,
                     onSelected = onFavoriteSongsVisibilityChange,
+                )
+                RowDivider()
+                ProfileVisibilityAudienceRow(
+                    icon = Icons.Rounded.Star,
+                    title = stringResource(R.string.profile_recent_album_ratings),
+                    subtitle = stringResource(R.string.profile_recent_ratings_visibility_subtitle),
+                    selected = recentRatingsAudience,
+                    enabled = !saving,
+                    onSelected = onRecentRatingsAudienceChange,
+                )
+                RowDivider()
+                ProfileVisibilityAudienceRow(
+                    icon = Icons.Rounded.Group,
+                    title = stringResource(R.string.profile_share_following),
+                    selected = followingAudience,
+                    enabled = !saving,
+                    onSelected = onFollowingVisibilityChange,
+                )
+                RowDivider()
+                ProfileVisibilityAudienceRow(
+                    icon = Icons.Rounded.PersonAdd,
+                    title = stringResource(R.string.profile_share_followers),
+                    selected = followersAudience,
+                    enabled = !saving,
+                    onSelected = onFollowersVisibilityChange,
+                )
+                RowDivider()
+                ProfileVisibilityAudienceRow(
+                    icon = Icons.Rounded.Equalizer,
+                    title = stringResource(R.string.profile_share_play_count),
+                    selected = playCountAudience,
+                    enabled = !saving,
+                    onSelected = onPlayCountVisibilityChange,
                 )
             }
             errorRes?.let {
@@ -2199,6 +2482,20 @@ private fun ProfileEditScreen(
                     modifier = Modifier.padding(horizontal = PAGE_GUTTER, vertical = 12.dp),
                 )
             }
+            Spacer(Modifier.height(28.dp))
+            HoldToDeleteAccountButton(
+                enabled = !saving,
+                onConfirmed = { showDeleteConfirmation = true },
+            )
+            Text(
+                text = stringResource(R.string.profile_delete_account_hold_hint),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .padding(horizontal = PAGE_GUTTER, vertical = 8.dp)
+                    .widthIn(max = 260.dp),
+            )
         }
         Surface(
             color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
@@ -2206,13 +2503,22 @@ private fun ProfileEditScreen(
             modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter).zIndex(3f),
         ) {
             Row(
-                modifier = Modifier.statusBarsPadding().height(64.dp).padding(horizontal = 8.dp),
+                modifier = Modifier.windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility).height(64.dp).padding(horizontal = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = onClose, enabled = !saving) {
-                    Icon(Icons.Rounded.Close, contentDescription = stringResource(R.string.profile_cancel))
+                androidx.compose.material3.IconButton(onClick = onClose, enabled = !saving) {
+                    Icon(
+                        Icons.Rounded.Close,
+                        contentDescription = stringResource(R.string.profile_cancel),
+                        tint = MaterialTheme.colorScheme.onBackground,
+                    )
                 }
-                Text(stringResource(R.string.profile_edit_title), style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                Text(
+                    text = stringResource(R.string.profile_edit_title),
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.weight(1f),
+                )
                 TextButton(onClick = onSave, enabled = !saving) {
                     if (saving) CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                     else Text(stringResource(R.string.profile_save))
@@ -2223,34 +2529,168 @@ private fun ProfileEditScreen(
 }
 
 @Composable
+private fun HoldToDeleteAccountButton(
+    enabled: Boolean,
+    onConfirmed: () -> Unit,
+) {
+    val context = LocalContext.current
+    var holding by remember { mutableStateOf(false) }
+    val currentConfirm by rememberUpdatedState(onConfirmed)
+    val progress by animateFloatAsState(
+        targetValue = if (holding && enabled) 1f else 0f,
+        animationSpec = if (holding && enabled) {
+            tween(durationMillis = 900, easing = LinearEasing)
+        } else {
+            tween(durationMillis = 180)
+        },
+        label = "profileDeleteHoldProgress",
+    )
+
+    LaunchedEffect(holding, enabled) {
+        if (!holding || !enabled) return@LaunchedEffect
+        delay(900L)
+        if (holding && enabled) {
+            holding = false
+            OrbHaptics.perform(context, OrbHaptics.Kind.ACTION)
+            currentConfirm()
+        }
+    }
+
+    val shape = RoundedCornerShape(18.dp)
+    val foreground = MaterialTheme.colorScheme.primary
+
+    // Intentionally mirrors the compact "Sair" button used on the Account page.
+    // The progress layer is matchParentSize(), so it never changes the button's
+    // measured width while the user is holding it.
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 22.dp, bottom = 4.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .widthIn(min = 128.dp, max = 184.dp)
+                .clip(shape)
+                .orbGlassSurface(
+                    pageColor = orbOverlayGlassBaseColor(),
+                    cornerRadius = 18.dp,
+                    observeTapFeedback = false,
+                    manageDialogBackdrop = false,
+                )
+                .pointerInput(enabled) {
+                    if (!enabled) return@pointerInput
+                    detectTapGestures(
+                        onPress = {
+                            holding = true
+                            try {
+                                tryAwaitRelease()
+                            } finally {
+                                holding = false
+                            }
+                        },
+                    )
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .graphicsLayer {
+                        scaleX = progress.coerceIn(0f, 1f)
+                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0.5f)
+                    }
+                    .background(
+                        foreground.copy(alpha = if (enabled) 0.18f else 0.08f),
+                    ),
+            )
+            Text(
+                text = stringResource(R.string.profile_delete_account),
+                style = MaterialTheme.typography.bodyLarge,
+                color = foreground.copy(alpha = if (enabled) 1f else 0.38f),
+                maxLines = 1,
+                modifier = Modifier.padding(horizontal = 30.dp, vertical = 12.dp),
+            )
+        }
+    }
+}
+
+@Composable
 private fun ProfileVisibilityAudienceRow(
+    icon: ImageVector = Icons.Rounded.Visibility,
     title: String,
+    subtitle: String? = null,
     selected: ProfileAudience,
     enabled: Boolean,
     onSelected: (ProfileAudience) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
+    val popupPageColor = orbOverlayGlassBaseColor()
+    val popupSubstrate = orbExpressiveGlassTone(popupPageColor)
     Box(Modifier.fillMaxWidth()) {
         SettingsRow(
-            icon = Icons.Rounded.Visibility,
+            icon = icon,
             title = title,
+            subtitle = subtitle,
             value = profileAudienceLabel(selected),
             enabled = enabled,
             onClick = { if (enabled) expanded = true },
         )
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false },
+        // Align the popup to the audience value at the right, not to a 1dp
+        // anchor on the screen edge (which pushes Material's menu to the left).
+        // The one-pixel-high anchor is at the row bottom so the menu opens from
+        // the tapped field, below it when there is space.
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 16.dp)
+                .width(184.dp)
+                .height(1.dp),
         ) {
-            ProfileAudience.profileSectionChoices.forEach { audience ->
-                DropdownMenuItem(
-                    text = { Text(profileAudienceLabel(audience)) },
-                    onClick = {
-                        expanded = false
-                        onSelected(audience)
-                    },
-                    enabled = enabled,
-                )
+            OrbGlassContentTheme(popupPageColor) {
+                DropdownMenu(
+                    expanded = expanded,
+                    onDismissRequest = { expanded = false },
+                    modifier = Modifier
+                        .width(184.dp)
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(popupSubstrate.copy(alpha = 0.96f))
+                        .orbGlassSurface(
+                            pageColor = popupPageColor,
+                            cornerRadius = 20.dp,
+                            overlayStrength = true,
+                            overlayOpacity = 0.82f,
+                            manageDialogBackdrop = false,
+                            observeTapFeedback = false,
+                        ),
+                    containerColor = Color.Transparent,
+                    tonalElevation = 0.dp,
+                ) {
+                    ProfileAudience.profileSectionChoices.forEach { audience ->
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = profileAudienceLabel(audience),
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                            },
+                            trailingIcon = if (selected == audience) {
+                                {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Check,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onSurface,
+                                    )
+                                }
+                            } else null,
+                            onClick = {
+                                expanded = false
+                                onSelected(audience)
+                            },
+                            enabled = enabled,
+                        )
+                    }
+                }
             }
         }
     }
@@ -2269,7 +2709,11 @@ private fun ProfileAudienceEditor(
             .fillMaxWidth()
             .padding(horizontal = PAGE_GUTTER, vertical = 8.dp)
             .clip(RoundedCornerShape(24.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainer)
+            .orbGlassSurface(
+                pageColor = orbOverlayGlassBaseColor(),
+                cornerRadius = 24.dp,
+                manageDialogBackdrop = false,
+            )
             .padding(16.dp),
     ) {
         Text(
@@ -2300,6 +2744,27 @@ private fun ProfileAudienceEditor(
                 )
             }
         }
+    }
+}
+
+/** Flat action inside the shared glass popup; no per-item button background. */
+@Composable
+private fun ProfilePeopleMenuAction(
+    label: String,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
     }
 }
 
@@ -2419,13 +2884,20 @@ private fun ProfilePeopleListPage(
                                     )
                                 }
                             }
+                            // The popup itself provides the glass container. Its actions
+                            // are flat, transparent rows rather than nested button surfaces.
                             DropdownMenu(
                                 expanded = menuExpanded,
                                 onDismissRequest = { menuExpanded = false },
+                                modifier = Modifier.orbGlassSurface(
+                                    orbOverlayGlassBaseColor(),
+                                    cornerRadius = 18.dp,
+                                ),
+                                containerColor = Color.Transparent,
                             ) {
                                 if (followsPerson) {
-                                    DropdownMenuItem(
-                                        text = { Text(stringResource(R.string.profile_action_unfollow)) },
+                                    ProfilePeopleMenuAction(
+                                        label = stringResource(R.string.profile_action_unfollow),
                                         onClick = {
                                             menuExpanded = false
                                             scope.launch {
@@ -2437,8 +2909,8 @@ private fun ProfilePeopleListPage(
                                     )
                                 }
                                 if (followedByPerson) {
-                                    DropdownMenuItem(
-                                        text = { Text(stringResource(R.string.profile_action_remove_follower)) },
+                                    ProfilePeopleMenuAction(
+                                        label = stringResource(R.string.profile_action_remove_follower),
                                         onClick = {
                                             menuExpanded = false
                                             scope.launch {
@@ -2449,8 +2921,8 @@ private fun ProfilePeopleListPage(
                                         },
                                     )
                                 }
-                                DropdownMenuItem(
-                                    text = { Text(stringResource(R.string.profile_action_block)) },
+                                ProfilePeopleMenuAction(
+                                    label = stringResource(R.string.profile_action_block),
                                     onClick = {
                                         menuExpanded = false
                                         scope.launch {
@@ -2477,10 +2949,10 @@ private fun ProfilePeopleListPage(
         }
 
         // Global header rule: back is only the arrow, never a filled circle.
-        IconButton(
+        androidx.compose.material3.IconButton(
             onClick = onBack,
             modifier = Modifier
-                .statusBarsPadding()
+                .windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility)
                 .padding(start = 12.dp, top = 8.dp)
                 .align(Alignment.TopStart),
         ) {
@@ -2688,6 +3160,167 @@ private fun FavoriteSongCell(
     }
 }
 
+private suspend fun resolveProfileAlbumRatings(
+    rows: List<ProfileAlbumRatingRow>,
+): List<ProfileAlbumRatingCard> = supervisorScope {
+    rows.take(10).map { row ->
+        async {
+            val page = runCatching { YtMusicRepository.browseSongs(row.albumId).getOrThrow() }.getOrNull()
+            val firstSong = page?.songs?.firstOrNull()
+            val title = page?.title?.takeIf { it.isNotBlank() }
+                ?: firstSong?.albumName?.takeIf { it.isNotBlank() }
+                ?: row.albumId
+            val artist = page?.headerArtists
+                ?.map { it.name.trim() }
+                ?.filter { it.isNotBlank() }
+                ?.distinct()
+                ?.joinToString(", ")
+                ?.takeIf { it.isNotBlank() }
+                ?: firstSong?.artist.orEmpty()
+            ProfileAlbumRatingCard(
+                albumId = row.albumId,
+                title = title,
+                artist = artist,
+                artworkUrl = page?.thumbnailUrl ?: firstSong?.thumbnailUrl,
+                rating = row.ratingTenths.coerceIn(0, 50) / 10f,
+                updatedAt = row.updatedAt,
+            )
+        }
+    }.awaitAll()
+}
+
+@Composable
+private fun ProfileAlbumRatingGridSection(
+    title: String,
+    ratings: List<ProfileAlbumRatingCard>,
+    palette: ArtworkPalette,
+) {
+    if (ratings.isEmpty()) return
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 28.dp),
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.headlineMedium,
+            color = palette.onBackground,
+            modifier = Modifier.padding(horizontal = PAGE_GUTTER, vertical = 8.dp),
+        )
+        val visible = ratings.take(10)
+        repeat((visible.size + 1) / 2) { row ->
+            val left = visible.getOrNull(row * 2) ?: return@repeat
+            val right = visible.getOrNull(row * 2 + 1)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = PAGE_GUTTER, vertical = 6.dp)
+                    .height(72.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                ProfileAlbumRatingCell(left, palette, Modifier.weight(1f))
+                Box(
+                    modifier = Modifier
+                        .padding(horizontal = 8.dp)
+                        .width(0.5.dp)
+                        .fillMaxHeight()
+                        .background(palette.onBackground.copy(alpha = 0.16f)),
+                )
+                if (right != null) {
+                    ProfileAlbumRatingCell(right, palette, Modifier.weight(1f))
+                } else {
+                    Spacer(Modifier.weight(1f))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProfileAlbumRatingCell(
+    rating: ProfileAlbumRatingCard,
+    palette: ArtworkPalette,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier.fillMaxHeight(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        val artModifier = Modifier
+            .size(56.dp)
+            .clip(RoundedCornerShape(9.dp))
+        if (rating.artworkUrl.isNullOrBlank()) {
+            Box(
+                modifier = artModifier.background(palette.elevated),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Album,
+                    contentDescription = null,
+                    tint = palette.onBackgroundVariant,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
+        } else {
+            AsyncImage(
+                model = rating.artworkUrl.artworkAt(192),
+                contentDescription = rating.title,
+                contentScale = ContentScale.Crop,
+                modifier = artModifier,
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Text(
+                text = rating.title,
+                style = MaterialTheme.typography.titleSmall,
+                color = palette.onBackground,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            rating.artist.takeIf { it.isNotBlank() }?.let { artist ->
+                Text(
+                    text = artist,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = palette.onBackgroundVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Spacer(Modifier.height(3.dp))
+            Row(
+                modifier = Modifier
+                    .height(14.5.dp)
+                    .clip(RoundedCornerShape(5.dp))
+                    .orbBadgeGlassSurface(
+                        pageColor = palette.background,
+                        cornerRadius = 5.dp,
+                        drawRim = false,
+                    )
+                    .padding(horizontal = 5.dp),
+                horizontalArrangement = Arrangement.spacedBy(3.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Star,
+                    contentDescription = null,
+                    tint = palette.onBackground,
+                    modifier = Modifier.size(12.dp),
+                )
+                Text(
+                    text = String.format(Locale.getDefault(), "%.1f", rating.rating),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = palette.onBackground,
+                    maxLines = 1,
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun ImmersiveCompatibilityCard(
     compatibility: ImmersiveCompatibility,
@@ -2791,7 +3424,15 @@ private fun ImmersiveLastPlayedCard(value: ListeningActivity) {
 private fun ImmersiveMediaCard(header: String, artwork: String?, title: String, artist: String) {
     SettingsGroup(header = header) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(20.dp))
+                .orbGlassSurface(
+                    pageColor = orbOverlayGlassBaseColor(),
+                    cornerRadius = 20.dp,
+                    manageDialogBackdrop = false,
+                )
+                .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (artwork.isNullOrBlank()) {
@@ -2813,7 +3454,16 @@ private fun ImmersiveMediaCard(header: String, artwork: String?, title: String, 
 @Composable
 private fun ImmersiveMessage(text: String) {
     Box(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = PAGE_GUTTER, vertical = 14.dp).clip(RoundedCornerShape(24.dp)).background(MaterialTheme.colorScheme.surfaceContainerLow).padding(18.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = PAGE_GUTTER, vertical = 14.dp)
+            .clip(RoundedCornerShape(24.dp))
+            .orbGlassSurface(
+                pageColor = orbOverlayGlassBaseColor(),
+                cornerRadius = 24.dp,
+                manageDialogBackdrop = false,
+            )
+            .padding(18.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(text, textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -2826,7 +3476,7 @@ private suspend fun loadProfileSourceBitmap(
 ): Bitmap? {
     val request = ImageRequest.Builder(context)
         .data(uri)
-        // Large enough for the 1080x1728 portrait export while avoiding a
+        // Large enough for the 1080x1080 profile export while avoiding a
         // full-resolution phone photo living in Compose memory. Coil also
         // respects the source orientation, unlike the old raw BitmapFactory
         // path that could make portrait photos appear rotated/stretched.
@@ -2837,6 +3487,71 @@ private suspend fun loadProfileSourceBitmap(
     return (result as? SuccessResult)?.image?.toBitmap()
 }
 
+/**
+ * The original image remains intact while the user positions it in a square
+ * selection viewport. After confirmation, both profile photo and icon are
+ * exported in 1:1. Geometry matches ContentScale.Crop + graphicsLayer in UI.
+ * The output always fills the square with real image pixels (no black bars).
+ */
+private fun renderProfileCropBitmap(
+    bitmap: Bitmap,
+    crop: ProfileImageCrop,
+    targetWidthPx: Int,
+    targetHeightPx: Int,
+): Bitmap {
+    require(bitmap.width > 0 && bitmap.height > 0) { "Unable to decode profile image" }
+    require(targetWidthPx > 0 && targetHeightPx > 0) { "Invalid profile image target." }
+
+    val width = targetWidthPx.toFloat()
+    val height = targetHeightPx.toFloat()
+    val fillScale = max(width / bitmap.width, height / bitmap.height)
+    val zoom = crop.zoom.coerceIn(1f, 4f)
+    val drawWidth = bitmap.width * fillScale * zoom
+    val drawHeight = bitmap.height * fillScale * zoom
+    val dx = (crop.offsetXFraction * width).coerceIn(
+        -max(0f, (drawWidth - width) / 2f), max(0f, (drawWidth - width) / 2f),
+    )
+    val dy = (crop.offsetYFraction * height).coerceIn(
+        -max(0f, (drawHeight - height) / 2f), max(0f, (drawHeight - height) / 2f),
+    )
+
+    val result = Bitmap.createBitmap(targetWidthPx, targetHeightPx, Bitmap.Config.ARGB_8888)
+    val canvas = AndroidCanvas(result)
+    // No empty margins: the square is covered by the confirmed photo selection.
+    canvas.drawBitmap(
+        bitmap,
+        null,
+        RectF(
+            (width - drawWidth) / 2f + dx,
+            (height - drawHeight) / 2f + dy,
+            (width + drawWidth) / 2f + dx,
+            (height + drawHeight) / 2f + dy,
+        ),
+        AndroidPaint(AndroidPaint.FILTER_BITMAP_FLAG),
+    )
+    return result
+}
+
+/** Checks actual source bytes before decoding, including providers with unknown size. */
+private suspend fun isProfileSourceWithinLimit(
+    context: android.content.Context,
+    uri: Uri,
+): Boolean = withContext(Dispatchers.IO) {
+    val input = context.contentResolver.openInputStream(uri)
+        ?: error("Unable to open the selected profile image")
+    input.use { stream ->
+        val buffer = ByteArray(64 * 1024)
+        var total = 0L
+        while (true) {
+            val read = stream.read(buffer)
+            if (read < 0) break
+            total += read
+            if (total > PROFILE_IMAGE_MAX_BYTES.toLong()) return@withContext false
+        }
+        true
+    }
+}
+
 private suspend fun readProfileImage(
     context: android.content.Context,
     crop: ProfileImageCrop,
@@ -2845,47 +3560,15 @@ private suspend fun readProfileImage(
 ): Pair<ByteArray, String> = withContext(Dispatchers.IO) {
     val bitmap = loadProfileSourceBitmap(context, crop.uri)
         ?: error("Unable to read profile image")
-    require(bitmap.width > 0 && bitmap.height > 0) { "Unable to decode profile image" }
-
-    require(targetWidthPx > 0 && targetHeightPx > 0) { "Invalid profile image target." }
-    val targetWidth = targetWidthPx.toFloat()
-    val targetHeight = targetHeightPx.toFloat()
-    val baseScale = max(
-        targetWidth / bitmap.width.toFloat(),
-        targetHeight / bitmap.height.toFloat(),
-    )
-    val displayScale = baseScale * crop.zoom.coerceIn(1f, 4f)
-    val visibleWidth = (targetWidth / displayScale).coerceAtMost(bitmap.width.toFloat())
-    val visibleHeight = (targetHeight / displayScale).coerceAtMost(bitmap.height.toFloat())
-
-    // The editor stores translation as a fraction of the crop viewport. Moving
-    // the picture right/down means the viewport samples farther left/up.
-    val translatedX = crop.offsetXFraction * targetWidth
-    val translatedY = crop.offsetYFraction * targetHeight
-    val centerX = bitmap.width / 2f - translatedX / displayScale
-    val centerY = bitmap.height / 2f - translatedY / displayScale
-    val left = (centerX - visibleWidth / 2f)
-        .coerceIn(0f, bitmap.width - visibleWidth)
-    val top = (centerY - visibleHeight / 2f)
-        .coerceIn(0f, bitmap.height - visibleHeight)
-
-    val cropped = Bitmap.createBitmap(
-        bitmap,
-        left.toInt(),
-        top.toInt(),
-        visibleWidth.toInt().coerceAtLeast(1),
-        visibleHeight.toInt().coerceAtLeast(1),
-    )
-    val output = Bitmap.createScaledBitmap(
-        cropped,
-        targetWidthPx,
-        targetHeightPx,
-        true,
-    )
+    val output = renderProfileCropBitmap(bitmap, crop, targetWidthPx, targetHeightPx)
     val stream = ByteArrayOutputStream()
-    check(output.compress(Bitmap.CompressFormat.JPEG, 92, stream)) { "Unable to encode profile image" }
+    try {
+        check(output.compress(Bitmap.CompressFormat.JPEG, 92, stream)) { "Unable to encode profile image" }
+    } finally {
+        if (output !== bitmap) output.recycle()
+    }
     val bytes = stream.toByteArray()
-    require(bytes.size <= PROFILE_IMAGE_MAX_BYTES) { "Profile images can be at most 5 MB." }
+    require(bytes.size <= PROFILE_IMAGE_MAX_BYTES) { "Profile images can be at most 50 MB." }
     bytes to "image/jpeg"
 }
 

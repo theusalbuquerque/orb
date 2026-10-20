@@ -1,4 +1,9 @@
 package com.music.orb.ui.screens
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.interaction.MutableInteractionSource
 
 import android.content.Intent
 import androidx.compose.animation.AnimatedVisibility
@@ -29,6 +34,9 @@ import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import com.music.orb.ui.components.ExpressiveSwitch as Switch
+import com.music.orb.ui.components.orbGlassSurface
+import com.music.orb.ui.components.orbOverlayGlassBaseColor
+import com.music.orb.ui.components.orbExpressiveGlassContentColor
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -44,6 +52,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -485,7 +494,7 @@ private fun NoticeCard(text: String, onDismiss: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                text = "Got it",
+                text = stringResource(R.string.orb_l10n_got_it),
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.primary,
                 modifier = Modifier
@@ -621,19 +630,38 @@ private fun RichPresencePreview(
 /** Discord's flat, full-width secondary button. */
 @Composable
 private fun PresenceButton(label: String, enabled: Boolean, onClick: () -> Unit) {
+    val source = remember { MutableInteractionSource() }
+    val pressed by source.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed && enabled) 0.96f else 1f,
+        animationSpec = spring(dampingRatio = 0.70f, stiffness = 520f),
+        label = "discordPresenceGlassPress",
+    )
+    val glassColor = orbOverlayGlassBaseColor()
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
-            .background(MaterialTheme.colorScheme.outline.copy(alpha = if (enabled) 0.9f else 0.4f))
-            .clickable(enabled = enabled, onClick = onClick)
-            .padding(vertical = 9.dp),
+            .graphicsLayer { scaleX = scale; scaleY = scale; alpha = if (enabled) 1f else 0.54f }
+            .clip(RoundedCornerShape(14.dp))
+            .orbGlassSurface(
+                pageColor = glassColor,
+                cornerRadius = 14.dp,
+                observeTapFeedback = false,
+                manageDialogBackdrop = false,
+            )
+            .clickable(
+                enabled = enabled,
+                interactionSource = source,
+                indication = null,
+                onClick = onClick,
+            )
+            .padding(vertical = 10.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             text = label,
             style = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp),
-            color = MaterialTheme.colorScheme.onBackground.copy(alpha = if (enabled) 1f else 0.5f),
+            color = orbExpressiveGlassContentColor(glassColor).copy(alpha = if (enabled) 1f else 0.54f),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )

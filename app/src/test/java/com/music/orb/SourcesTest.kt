@@ -2,6 +2,8 @@ package com.music.orb
 
 import com.music.orb.data.NerdStats
 import com.music.orb.data.model.Song
+import com.music.orb.data.sources.DownloadQualityTarget
+import com.music.orb.data.sources.LosslessTier
 import com.music.orb.data.sources.ModuleSource
 import com.music.orb.data.sources.SourceRegistry
 import com.music.orb.data.sources.SourceResolver
@@ -42,6 +44,31 @@ class SourcesTest {
     fun `plain video ids are not source keys`() {
         assertNull(SourceRegistry.parseTrackKey("dQw4w9WgXcQ"))
         assertNull(SourceRegistry.parseTrackKey(""))
+    }
+
+    @Test
+    fun `off the wall never resolves to a medley or partial artist credit`() {
+        val original = TrackMatcher.Target(
+            title = "Off the Wall", artist = "Michael Jackson",
+            durationSec = 240, albumName = "Off the Wall", releaseYear = 1979,
+        )
+        assertNull(TrackMatcher.score(
+            Song(videoId = "cover", title = "Off the Wall (Medley)",
+                artist = "Michael!", thumbnailUrl = null, durationText = "4:00", albumName = "Michael!"), original,
+        ))
+        assertNull(TrackMatcher.score(
+            Song(videoId = "bad-artist", title = "Off the Wall",
+                artist = "Michael!", thumbnailUrl = null, durationText = "4:00", albumName = "Off the Wall"), original,
+        ))
+        assertNull(TrackMatcher.score(
+            Song(videoId = "bad-album", title = "Off the Wall",
+                artist = "Michael Jackson", thumbnailUrl = null, durationText = "4:00", albumName = "Greatest Hits"), original,
+        ))
+        assertNull(TrackMatcher.score(
+            Song(videoId = "bad-year", title = "Off the Wall",
+                artist = "Michael Jackson", thumbnailUrl = null, durationText = "4:00",
+                albumName = "Off the Wall", releaseYear = 2026), original,
+        ))
     }
 
     // ---- Format reporting ---------------------------------------------------
@@ -102,6 +129,48 @@ class SourcesTest {
 
         val silent = NerdStats.Snapshot(mimeType = "audio/mp4a-latm", bitrateKbps = null, sampleRateHz = null, channels = null)
         assertFalse(silent.isHiQuality)
+    }
+
+    @Test
+    fun `download target keeps ordinary lossless from inflating to hi res`() {
+        val target = DownloadQualityTarget(
+            codec = "flac",
+            sampleRateHz = 44_100,
+            bitDepth = 16,
+            losslessTier = LosslessTier.LOSSLESS,
+        )
+        val exact = StreamFormat(codec = "flac", sampleRateHz = 44_100, bitDepth = 16)
+        val hiRes = StreamFormat(codec = "flac", sampleRateHz = 96_000, bitDepth = 24)
+
+        assertTrue(SourceResolver.preferForDownload(exact, hiRes, target))
+        assertFalse(SourceResolver.preferForDownload(hiRes, exact, target))
+    }
+
+    @Test
+    fun `download target chooses the lossy bitrate closest to playback`() {
+        val target = DownloadQualityTarget(codec = "aac", kbps = 250)
+        val aac256 = StreamFormat(codec = "aac", kbps = 256)
+        val aac320 = StreamFormat(codec = "aac", kbps = 320)
+
+        assertTrue(SourceResolver.preferForDownload(aac256, aac320, target))
+        assertFalse(SourceResolver.preferForDownload(aac320, aac256, target))
+    }
+
+    @Test
+    fun `download target prefers matching hi res before ordinary lossless`() {
+        val target = DownloadQualityTarget(
+            codec = "flac",
+            sampleRateHz = 96_000,
+            bitDepth = 24,
+            losslessTier = LosslessTier.HI_RES_LOSSLESS,
+        )
+        val exact = StreamFormat(codec = "flac", sampleRateHz = 96_000, bitDepth = 24)
+        val larger = StreamFormat(codec = "flac", sampleRateHz = 192_000, bitDepth = 24)
+        val ordinary = StreamFormat(codec = "flac", sampleRateHz = 44_100, bitDepth = 16)
+
+        assertTrue(SourceResolver.preferForDownload(exact, ordinary, target))
+        assertTrue(SourceResolver.preferForDownload(exact, larger, target))
+        assertFalse(SourceResolver.preferForDownload(ordinary, exact, target))
     }
 
     // ---- Cross-source matching ---------------------------------------------
@@ -236,6 +305,49 @@ class SourcesTest {
     }
 
     @Test
+    fun `off the wall cannot resolve to Michael musical medley`() {
+        val target = TrackMatcher.Target(
+            title = "Off the Wall",
+            artist = "Michael Jackson",
+            durationSec = 245,
+            albumName = "Off the Wall",
+            sourceVideoId = "official-off-the-wall",
+        )
+        val musicalMedley = Song(
+            videoId = "external-michael-musical",
+            title = "Off the Wall",
+            artist = "Michael!",
+            thumbnailUrl = null,
+            durationText = "4:05",
+            albumName = "Michael! The Non-Stop Movie Medley",
+            releaseYear = 2026,
+        )
+        assertNull(TrackMatcher.score(musicalMedley, target))
+        assertFalse(TrackMatcher.verifiedForSubstitution(musicalMedley, target))
+    }
+
+    @Test
+    fun `lossless lookup rejects an alternate remix and a cover`() {
+        val target = TrackMatcher.Target(
+            title = "Off the Wall",
+            artist = "Michael Jackson",
+            durationSec = 245,
+            albumName = "Off the Wall",
+        )
+        val remix = Song(
+            videoId = "remix", title = "Off the Wall (Remix)",
+            artist = "Michael Jackson", thumbnailUrl = null,
+            durationText = "4:05", albumName = "Off the Wall",
+        )
+        val cover = Song(
+            videoId = "cover", title = "Off the Wall", artist = "Michael!",
+            thumbnailUrl = null, durationText = "4:05", albumName = "Off the Wall",
+        )
+        assertFalse(TrackMatcher.verifiedForSubstitution(remix, target))
+        assertFalse(TrackMatcher.verifiedForSubstitution(cover, target))
+    }
+
+    @Test
     fun `strict substitution accepts the official album family`() {
         val target = TrackMatcher.Target(
             title = "California Gurls (feat. Snoop Dogg)",
@@ -255,6 +367,29 @@ class SourcesTest {
             releaseYear = 2010,
         )
         assertTrue(TrackMatcher.verifiedForSubstitution(officialReissue, target))
+    }
+
+    @Test
+    fun `accepts a reissue year when title artists duration and album family agree`() {
+        val target = TrackMatcher.Target(
+            title = "California Gurls",
+            artist = "Katy Perry, Snoop Dogg",
+            durationSec = 234,
+            albumName = "Teenage Dream",
+            releaseYear = 2010,
+        )
+        val reissue = Song(
+            videoId = "src:tidal::reissue",
+            title = "California Gurls",
+            artist = "Katy Perry, Snoop Dogg",
+            thumbnailUrl = null,
+            durationText = "3:54",
+            albumName = "Teenage Dream (Deluxe Edition)",
+            releaseYear = 2020,
+        )
+        assertTrue(TrackMatcher.verifiedForSubstitution(reissue, target))
+        val unrelated = reissue.copy(albumName = "Best Karaoke Covers")
+        assertFalse(TrackMatcher.verifiedForSubstitution(unrelated, target))
     }
 
     @Test

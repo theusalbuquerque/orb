@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- First splash frame rendered by Android before Compose initializes.
+     Uses the SAME vector contour and ink as OrbAnimatedSplash. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="288dp"
+    android:height="288dp"
+    android:viewportWidth="288"
+    android:viewportHeight="288">
+    <group
+        android:scaleX="0.22"
+        android:scaleY="0.22"
+        android:translateX="36.0"
+        android:translateY="-69.6">
+        <path
+            android:fillColor="#080808"
+            android:pathData="M 484,889 L 512,891 L 529,897 L 542,905 L 560,923 L 564,930 L 571,945 L 573,962 L 575,963 L 575,980 L 573,981 L 573,990 L 568,1005 L 554,1025 L 532,1043 L 512,1051 L 498,1053 L 468,1051 L 451,1044 L 435,1033 L 417,1011 L 412,1001 L 407,977 L 408,956 L 412,941 L 428,916 L 442,904 L 455,897 L 484,889 Z" />
+    </group>
+</vector>

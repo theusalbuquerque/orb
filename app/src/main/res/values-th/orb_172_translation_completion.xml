@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="expressive_greeting_overnight">สวัสดี</string>
+    <string name="account_youtube_library_partial">เชื่อมต่อช่อง YouTube แล้ว แต่ยังไม่สามารถเข้าถึงคลัง YouTube Music ส่วนตัวได้</string>
+    <string name="download_prefer_offline_online_summary">หากปิดไว้ ระบบจะสตรีมตามปกตินอกหน้าดาวน์โหลด เมื่อออฟไลน์จะใช้ไฟล์ที่บันทึกไว้เสมอ</string>
+    <string name="download_prefer_offline_online_title">ใช้ไฟล์เสียงที่ดาวน์โหลดไว้แม้ขณะออนไลน์</string>
+    <string name="nerd_offline_automix_status">ออฟไลน์ · หยุดการวิเคราะห์ชั่วคราว</string>
+    <string name="nerd_offline_automix_unavailable">ไม่สามารถใช้ Automix ขณะออฟไลน์</string>
+    <string name="profile_photo_cannot_open">ไม่สามารถเปิดรูปภาพนี้ได้ โปรดเลือกรูปอื่น</string>
+    <string name="profile_photo_too_large">รูปภาพที่เลือกมีขนาดเกิน 50 MB โปรดเลือกรูปขนาดไม่เกิน 50 MB</string>
+    <string name="settings_download_fallback_lower_summary">ลองใช้บิตเรตที่ต่ำลงเมื่อคุณภาพที่เลือกใช้ไม่ได้เท่านั้น ปิดไว้เพื่อไม่ลดคุณภาพ</string>
+    <string name="settings_download_fallback_lower_title">อนุญาตให้ดาวน์โหลดด้วยคุณภาพที่ต่ำลง</string>
+    <string name="settings_download_strict_quality_summary">การดาวน์โหลดต้องใช้คุณภาพที่เลือกไว้ จะไม่ดาวน์โหลดคุณภาพที่ต่ำลงหากไม่ได้รับอนุญาต</string>
+</resources>

@@ -73,6 +73,39 @@ object WikipediaArtistInfoRepository {
         localized
     }
 
+    /** Album summaries must identify both the release and its credited artist. */
+    suspend fun albumSummary(album: String, artist: String): ArtistInfo? = withContext(Dispatchers.IO) {
+        if (album.isBlank() || artist.isBlank()) return@withContext null
+        val locale = Locale.getDefault()
+        val preferred = wikipediaLanguage(locale)
+        val key = "album|$preferred|${album.lowercase(Locale.ROOT)}|${artist.lowercase(Locale.ROOT)}"
+        cache[key]?.let { return@withContext it }
+        for (language in (listOf(preferred, "en", "pt", "es")).distinct()) {
+            val query = encode("\"$album\" \"$artist\" album")
+            val url = "https://$language.wikipedia.org/w/api.php?action=query&generator=search" +
+                "&gsrsearch=$query&gsrnamespace=0&gsrlimit=6&prop=extracts%7Cpageprops" +
+                "&exintro=1&explaintext=1&format=json&formatversion=2"
+            val target = normalizeWords(album)
+            val artistWords = normalizeWords(artist).split(' ').filter { it.length > 2 }
+            val source = runCatching { requestPages(url, language) }.getOrNull().orEmpty()
+                .firstOrNull { page ->
+                    val title = normalizeWords(page.optString("title")).substringBefore(" (")
+                    val intro = normalizeWords(page.optString("extract").take(900))
+                    !page.optBoolean("missing") && page.optJSONObject("pageprops")?.has("disambiguation") != true &&
+                        (title == target || title.startsWith("$target ")) &&
+                        artistWords.isNotEmpty() && artistWords.all { it in intro } &&
+                        Regex("\\b(album|álbum|disco|ep)\\b").containsMatchIn(intro)
+                }?.toArtistInfo(album, language) ?: continue
+            val localized = if (language == preferred) source else {
+                val translated = runCatching { translateExtract(source.extract, language, translationLanguage(locale)) }.getOrNull()
+                if (translated.isNullOrBlank()) source else source.copy(extract = briefExtract(translated), language = preferred)
+            }
+            cache[key] = localized
+            return@withContext localized
+        }
+        null
+    }
+
     /**
      * Prefer an exact Wikipedia title/redirect before doing a full-text search.
      *

@@ -18,7 +18,6 @@ import com.music.orb.playback.DolbyAtmos
 import com.music.orb.playback.LastPlayed
 import com.music.orb.data.ArtistCreditResolver
 import com.music.orb.data.innertube.Innertube
-import com.music.orb.data.scrobbling.LastFM
 import com.music.orb.data.settings.AppSettings
 import com.music.orb.data.settings.HomeSuggestionStore
 import com.music.orb.data.settings.ArtistRankingHistoryStore
@@ -58,7 +57,7 @@ class BitChordApplication : Application(), SingletonImageLoader.Factory {
         // compatibility path for private Music endpoints that reject OAuth.
         Innertube.accountSignedIn =
             authStore.hasLegacyYouTubeSession || !authStore.youtubeAccessToken.isNullOrBlank()
-        Innertube.oauthAccessTokenProvider = { OrbGoogleAuth.youtubeAccessToken() }
+        Innertube.oauthAccessTokenProvider = { OrbGoogleAuth.youtubeMusicPrivateToken() }
         Innertube.oauthRejectedHandler = { token -> OrbGoogleAuth.onYoutubeOAuthRejected(token) }
         Innertube.legacySessionRejectedHandler = { OrbGoogleAuth.onLegacyYoutubeSessionRejected() }
         SocialSessionManager.start(this)
@@ -94,12 +93,15 @@ class BitChordApplication : Application(), SingletonImageLoader.Factory {
         PlaylistListeningStore.init(this)
         ProfilePrivacyStore.init(this)
         RecentPlaybackStore.init(this)
+        com.music.orb.data.settings.AccountHistorySync.init(this)
         AlbumExclusionStore.init(this)
         HomeSuggestionStore.init(this)
         LastPlayed.init(this)
         // What's already saved to Downloads, so the song menu can say so
         // without a media-store query per row.
         Downloads.init(this)
+        com.music.orb.download.OfflinePlaylistStore.init(this)
+        com.music.orb.download.OfflineAlbumStore.init(this)
         // One cache directory can only be opened once per process, and
         // PlaybackService shares this one — so it's opened here, not there.
         AudioCache.init(this)
@@ -112,8 +114,7 @@ class BitChordApplication : Application(), SingletonImageLoader.Factory {
             AudioCache.clear()
             // Artwork remains valid across app updates; keep its disk cache.
         }
-        // Initialize LastFM with saved settings if available
-        initLastfm()
+        com.music.orb.data.scrobbling.LastfmScrobbleQueue.scheduleIfPending(this)
     }
 
     /**
@@ -145,20 +146,6 @@ class BitChordApplication : Application(), SingletonImageLoader.Factory {
             // it scrolls; a short fade reads as them developing.
             .crossfade(200)
             .build()
-
-    private fun initLastfm() {
-        val sessionKey = AppSettings.lastfmSessionKey.value
-        if (sessionKey.isBlank()) return
-        val endpoint = AppSettings.lastfmEndpoint.value.ifBlank { LastFM.DEFAULT_API_ENDPOINT }
-        val apiKey = AppSettings.lastfmApiKey.value.ifBlank { LastFM.FALLBACK_COMPAT_API_KEY }
-        val secret = AppSettings.lastfmSecret.value.ifBlank { LastFM.FALLBACK_COMPAT_SECRET }
-        LastFM.configure(
-            endpoint = endpoint,
-            apiKey = apiKey,
-            secret = secret,
-            sessionKey = sessionKey,
-        )
-    }
 
     companion object {
         lateinit var authStore: AuthStore

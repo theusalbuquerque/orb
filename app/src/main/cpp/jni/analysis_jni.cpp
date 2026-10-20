@@ -76,7 +76,7 @@ void AppendDoubles(std::string& out, const std::vector<double>& values) {
   out += ']';
 }
 
-void AppendEnergyCurve(std::string& out, const std::vector<bitchord::smart::EnergyPoint>& points) {
+void AppendEnergyCurve(std::string& out, const std::vector<orb::smart::EnergyPoint>& points) {
   out += '[';
   for (size_t index = 0; index < points.size(); ++index) {
     if (index > 0) out += ',';
@@ -89,7 +89,7 @@ void AppendEnergyCurve(std::string& out, const std::vector<bitchord::smart::Ener
   out += ']';
 }
 
-void AppendCuePoints(std::string& out, const std::vector<bitchord::smart::MixCuePoint>& points) {
+void AppendCuePoints(std::string& out, const std::vector<orb::smart::MixCuePoint>& points) {
   out += '[';
   for (size_t index = 0; index < points.size(); ++index) {
     if (index > 0) out += ',';
@@ -129,8 +129,8 @@ Java_com_music_orb_playback_smart_TrackFeatures_nativeAnalyze(
     env->GetFloatArrayRegion(samples, 0, count, input.data());
   }
 
-  const bitchord::smart::AnalysisResult result =
-      bitchord::smart::AnalyzeAudio(input, sample_rate, duration);
+  const orb::smart::AnalysisResult result =
+      orb::smart::AnalyzeAudio(input, sample_rate, duration);
 
   std::string json;
   // A whole-track energy curve dominates the output; reserving up front keeps
@@ -205,7 +205,7 @@ Java_com_music_orb_playback_smart_TrackFeatures_nativeResample(
   }
 
   const std::vector<float> resampled =
-      bitchord::smart::Resample(input, input_rate, output_rate);
+      orb::smart::Resample(input, input_rate, output_rate);
 
   const jsize produced = static_cast<jsize>(resampled.size());
   jfloatArray result = env->NewFloatArray(produced);

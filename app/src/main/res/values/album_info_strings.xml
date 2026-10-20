@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="album_info">Album information</string>
+    <string name="album_share">Share album</string>
+    <string name="album_info_loading">Loading album information…</string>
+    <string name="album_info_unavailable">A description of this album is not available yet.</string>
+    <string name="album_rate">Rate album</string>
+    <string name="album_rating_value">Your rating: %1$s / 5</string>
+    <string name="album_rating_hint">Tap or drag across the stars to rate from 0 to 5.</string>
+    <string name="album_rating_saved">Saved to your account. You can change this rating at any time.</string>
+    <string name="album_rating_syncing">Saving to your account…</string>
+    <string name="album_rating_pending">Saved on this device. Waiting for connection to sync.</string>
+    <string name="album_rating_sign_in">Sign in to rate this album and save your rating to your account.</string>
+    <string name="album_rating_unrated">Choose your rating. You can edit it whenever you like.</string>
+    <string name="album_rating_save">Save</string>
+    <string name="album_rating_cancel">Cancel</string>
+    <string name="album_rating_local_error">Could not save on this device. Try again.</string>
+    <string name="album_rating_hold_to_save">Hold to save</string>
+    <string name="collection_action_share">Share</string>
+</resources>

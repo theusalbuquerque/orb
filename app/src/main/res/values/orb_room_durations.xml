@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="rooms_duration_title">Room duration</string>
+    <string name="rooms_duration_24h">24 hours</string>
+    <string name="rooms_duration_3d">3 days</string>
+    <string name="rooms_duration_5d">5 days</string>
+    <string name="rooms_duration_7d">7 days</string>
+    <string name="rooms_duration_15d">15 days</string>
+    <string name="rooms_duration_indefinite">Indefinite</string>
+    <string name="rooms_duration_no_expiry">No expiry · Orb Premium</string>
+    <string name="rooms_duration_expired">Room expired</string>
+    <string name="rooms_duration_remaining_days">Time remaining: %1$d d %2$d h</string>
+    <string name="rooms_duration_remaining_hours">Time remaining: %1$d h %2$d min</string>
+    <string name="rooms_error_premium_only">Unlimited duration requires Orb Premium.</string>
+</resources>

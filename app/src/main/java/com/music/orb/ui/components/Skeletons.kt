@@ -171,8 +171,8 @@ private fun HeroShelfSkeleton() {
 
 /** The compact carousel of square cards used by every shelf below the first. */
 @Composable
-fun ShelfSkeleton(index: Int = 0, cardWidth: Dp = SHELF_CARD_WIDTH, cardCorner: Dp = 12.dp) {
-    Column(Modifier.padding(bottom = 26.dp)) {
+fun ShelfSkeleton(index: Int = 0, cardWidth: Dp = SHELF_CARD_WIDTH, cardCorner: Dp = 12.dp, bottomSpacing: Dp = 26.dp) {
+    Column(Modifier.padding(bottom = bottomSpacing)) {
         SectionHeaderSkeleton(index = index)
         LazyRow(
             contentPadding = PaddingValues(horizontal = PAGE_GUTTER),
@@ -185,7 +185,7 @@ fun ShelfSkeleton(index: Int = 0, cardWidth: Dp = SHELF_CARD_WIDTH, cardCorner: 
                         modifier = Modifier.width(cardWidth).aspectRatio(1f),
                         shape = RoundedCornerShape(cardCorner),
                     )
-                    Spacer(Modifier.height(12.dp))
+                    Spacer(Modifier.height(10.dp))
                     SkeletonLine(fraction = TitleWidths[card % TitleWidths.size], height = 13.dp)
                     Spacer(Modifier.height(6.dp))
                     SkeletonLine(fraction = SubtitleWidths[card % SubtitleWidths.size], height = 11.dp)
@@ -196,10 +196,14 @@ fun ShelfSkeleton(index: Int = 0, cardWidth: Dp = SHELF_CARD_WIDTH, cardCorner: 
 }
 
 /** Home and Explore while the first page of shelves is still loading. */
-fun LazyListScope.feedSkeleton(shelves: Int = 3) {
-    item(key = "skeleton:hero") { HeroShelfSkeleton() }
-    items(shelves - 1, key = { "skeleton:shelf:$it" }) { index ->
-        ShelfSkeleton(index = index + 1)
+fun LazyListScope.feedSkeleton(shelves: Int = 3, heroFirstShelf: Boolean = true, expressive: Boolean = false) {
+    if (heroFirstShelf) item(key = "skeleton:hero") { HeroShelfSkeleton() }
+    items((shelves - if (heroFirstShelf) 1 else 0).coerceAtLeast(0), key = { "skeleton:shelf:$it" }) { index ->
+        ShelfSkeleton(
+            index = index + if (heroFirstShelf) 1 else 0,
+            cardCorner = if (expressive) 20.dp else 12.dp,
+            bottomSpacing = 20.dp,
+        )
     }
 }
 

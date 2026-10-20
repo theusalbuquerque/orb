@@ -207,7 +207,7 @@ class BeatTracker(private val context: Context) {
     }
 
     companion object {
-        private const val TAG = "BitChordBeatTracker"
+        private const val TAG = "OrbBeatTracker"
         private const val MODEL_ASSET = "beat_this_int8.onnx"
         private const val INFERENCE_THREADS = 2
 

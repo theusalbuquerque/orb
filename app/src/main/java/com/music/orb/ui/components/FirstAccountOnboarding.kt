@@ -4,16 +4,18 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.material3.AlertDialog
+import com.music.orb.ui.components.OrbConfirmationDialog as AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import com.music.orb.ui.components.OrbGlassTextButton as TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.shape.RoundedCornerShape
 import com.music.orb.R
 import androidx.compose.ui.res.stringResource
 
@@ -27,6 +29,10 @@ fun YouTubeMusicFirstAccountDialog(
         onDismissRequest = {
             if (!connecting) onLater()
         },
+        modifier = Modifier.orbGlassSurface(orbOverlayGlassBaseColor(), cornerRadius = 28.dp),
+        containerColor = Color.Transparent,
+        tonalElevation = 0.dp,
+        shape = RoundedCornerShape(28.dp),
         title = {
             Column {
                 Text(
@@ -86,6 +92,10 @@ fun UsernameFirstAccountDialog(
         onDismissRequest = {
             if (!saving) onLater()
         },
+        modifier = Modifier.orbGlassSurface(orbOverlayGlassBaseColor(), cornerRadius = 28.dp),
+        containerColor = Color.Transparent,
+        tonalElevation = 0.dp,
+        shape = RoundedCornerShape(28.dp),
         title = {
             Column {
                 Text(

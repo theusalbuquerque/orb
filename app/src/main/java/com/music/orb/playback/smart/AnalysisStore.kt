@@ -300,7 +300,7 @@ class AnalysisStore(private val context: Context) {
 
     private companion object {
         const val KNOWN_RESULT_CACHE_ENTRIES = 128
-        const val TAG = "BitChordAnalysisStore"
+        const val TAG = "OrbAnalysisStore"
         const val DIRECTORY = "smart_analysis"
 
         /**

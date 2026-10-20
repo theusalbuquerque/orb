@@ -50,6 +50,12 @@ internal object LyricsOfflineStore {
             }
         }
 
+    fun delete(context: Context, videoId: String) {
+        if (videoId.isNotBlank()) File(directory(context), "${key(videoId)}.json").delete()
+    }
+
+    fun clear(context: Context) { directory(context).deleteRecursively() }
+
     suspend fun get(context: Context, videoId: String): LyricsRepository.Result? =
         withContext(Dispatchers.IO) {
             runCatching {
@@ -77,7 +83,10 @@ internal object LyricsOfflineStore {
                         sungUntilMs = if (row.isNull("end")) null else row.getLong("end"),
                     )
                 }
-                lines.takeIf { it.isNotEmpty() }?.let {
+                lines.takeIf { saved ->
+                    saved.count { it.text.isNotBlank() &&
+                        (it.timeMs > 0L || it.words.any { word -> word.startMs > 0L }) } >= 2
+                }?.let {
                     LyricsRepository.Result(source = source, lines = it)
                 }
             }.getOrNull()

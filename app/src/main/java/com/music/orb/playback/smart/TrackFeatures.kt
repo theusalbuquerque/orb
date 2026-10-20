@@ -39,7 +39,7 @@ import org.json.JSONObject
 object TrackFeatures {
 
     /** True when the native library loaded. Analysis is optional, so this is a fact, not a fault. */
-    val available: Boolean = runCatching { System.loadLibrary("bitchord_analysis") }.isSuccess
+    val available: Boolean = runCatching { System.loadLibrary("orb_analysis") }.isSuccess
 
     /**
      * The rate the analyzer's window and hop constants assume, deliberately
@@ -174,7 +174,7 @@ object TrackFeatures {
         }
     }
 
-    private const val TAG = "BitChordTrackFeatures"
+    private const val TAG = "OrbTrackFeatures"
 
     @JvmStatic private external fun nativeAnalyze(
         samples: FloatArray,

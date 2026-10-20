@@ -35,6 +35,7 @@ object LikeStatusStore {
 
     fun init(context: Context) {
         prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        com.music.orb.data.spotify.LinkedLikesSync.init(context)
     }
 
     @Synchronized

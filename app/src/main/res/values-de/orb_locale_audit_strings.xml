@@ -1,0 +1,21 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<resources>
+  <string name="orb_l10n_listenbrainz_title">ListenBrainz-Token</string>
+  <string name="orb_l10n_listenbrainz_hint">Füge deinen ListenBrainz-Benutzertoken ein, um Scrobbling zu aktivieren.</string>
+  <string name="orb_l10n_api_token">API-Token</string>
+  <string name="orb_l10n_discord_title">Discord-Token</string>
+  <string name="orb_l10n_discord_hint">Füge deinen Discord-Kontotoken ein. Er wird auf diesem Gerät verschlüsselt gespeichert und nur an Discord gesendet.</string>
+  <string name="orb_l10n_token">Token</string>
+  <string name="orb_l10n_save">Speichern</string>
+  <string name="orb_l10n_cancel">Abbrechen</string>
+  <string name="orb_l10n_checking">Wird geprüft…</string>
+  <string name="orb_l10n_selected">Ausgewählt</string>
+  <string name="orb_l10n_playlist_generic">Playlist</string>
+  <string name="orb_l10n_playlist_open">Playlist öffnen</string>
+  <string name="orb_l10n_playlist_rename_action">Umbenennen</string>
+  <string name="orb_l10n_playlist_delete">Playlist löschen</string>
+  <string name="orb_l10n_playlist_delete_confirm" formatted="true">\"%1$s\" löschen – zum Bestätigen tippen</string>
+  <string name="orb_l10n_playlist_rename_title">Playlist umbenennen</string>
+  <string name="orb_l10n_playlist_save_name">Namen speichern</string>
+  <string name="orb_l10n_got_it">Verstanden</string>
+<string name="settings_lossless_audio">Verlustfreies Audio</string><string name="settings_lossless_audio_subtitle">FLAC und Hi-Res aus kompatiblen Quellen bevorzugen</string></resources>

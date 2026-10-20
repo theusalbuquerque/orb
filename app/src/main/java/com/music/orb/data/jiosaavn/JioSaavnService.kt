@@ -41,7 +41,7 @@ import javax.crypto.spec.SecretKeySpec
 data class SaavnStream(val url: String, val kbps: Int?)
 
 object JioSaavnService {
-    private const val TAG = "BitChord"
+    private const val TAG = "Orb"
     private val baseUrl = String(Base64.decode("aHR0cHM6Ly93d3cuamlvc2Fhdm4uY29tL2FwaS5waHA=", Base64.DEFAULT), Charsets.UTF_8)
     private val json = Json { isLenient = true; ignoreUnknownKeys = true; explicitNulls = false }
     private val client by lazy {

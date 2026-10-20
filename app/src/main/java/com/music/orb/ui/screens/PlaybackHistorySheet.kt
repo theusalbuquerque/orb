@@ -3,33 +3,34 @@ package com.music.orb.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.PhoneAndroid
+import androidx.compose.material.icons.rounded.TabletAndroid
+import androidx.compose.material.icons.rounded.Computer
+import androidx.compose.material.icons.rounded.Devices
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.SheetState
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -39,6 +40,7 @@ import com.music.orb.data.model.Song
 import com.music.orb.data.model.artworkAt
 import com.music.orb.data.settings.RecentPlaybackEntry
 import com.music.orb.ui.components.ProgressiveActionSheetItem
+import com.music.orb.ui.components.orbOverlayGlassBaseColor
 import java.text.DateFormat
 import java.util.Calendar
 import java.util.Date
@@ -51,45 +53,35 @@ fun PlaybackHistorySheet(
     entries: List<RecentPlaybackEntry>,
     onSongClick: (Song) -> Unit,
     onDismiss: () -> Unit,
-    sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
 ) {
     val groups = groupHistoryByDay(
         entries = entries,
         todayLabel = stringResource(R.string.playback_history_today),
         yesterdayLabel = stringResource(R.string.playback_history_yesterday),
     )
+    val historyListState = androidx.compose.foundation.lazy.rememberLazyListState()
+    // Keep enough space above the glass for the floating title, as on other Orb sheets.
+    val maxHistoryHeight = LocalConfiguration.current.screenHeightDp.dp * 0.80f
+    val sheetColor = orbOverlayGlassBaseColor()
 
-    ModalBottomSheet(
+    // Use the same fixed, frosted Orb sheet host as other action sheets.
+    // Its handle owns dismissal while the list retains independent scrolling.
+    com.music.orb.ui.components.RegisterSheetBackdrop()
+    com.music.orb.ui.components.OrbModalBottomSheet(
         onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = MaterialTheme.colorScheme.surface,
+        floatingTitle = stringResource(R.string.playback_history_title),
+        containerColor = Color.Transparent,
+        shape = RoundedCornerShape(topStart = 36.dp, topEnd = 36.dp),
+        navigationBarInsetInContent = true,
+        dragHandle = null,
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(bottom = 12.dp),
+        com.music.orb.ui.components.OrbGlassSheetSurface(
+            pageColor = sheetColor,
+            cornerRadius = 36.dp,
+            // The shared glass surface includes the navigation-bar inset.
+            // Avoid a second opaque background, which hides its blur/tint.
+            modifier = Modifier.heightIn(max = maxHistoryHeight),
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 24.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.History,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(26.dp),
-                )
-                Spacer(Modifier.size(12.dp))
-                Text(
-                    text = stringResource(R.string.playback_history_title),
-                    style = MaterialTheme.typography.headlineSmall,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-            }
-
             if (groups.isEmpty()) {
                 Text(
                     text = stringResource(R.string.playback_history_empty),
@@ -99,42 +91,38 @@ fun PlaybackHistorySheet(
                 )
             } else {
                 LazyColumn(
-                    contentPadding = PaddingValues(
-                        start = 18.dp,
-                        end = 18.dp,
-                        top = 8.dp,
-                        bottom = 28.dp,
-                    ),
+                    state = historyListState,
+                    modifier = Modifier.fillMaxWidth().weight(1f, fill = false),
+                    contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 12.dp, bottom = 28.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
-                    var globalIndex = 0
+                    var nextRowIndex = 0
                     groups.forEach { group ->
-                        val dayHeaderIndex = globalIndex++
+                        val headerIndex = nextRowIndex++
                         item(key = "history-day-" + group.key) {
                             ProgressiveActionSheetItem(
-                                index = dayHeaderIndex,
+                                index = headerIndex,
                                 itemKey = "history-day-" + group.key,
+                                modifier = com.music.orb.ui.components.verticalEdgeMotion(historyListState, "history-day-" + group.key),
                             ) {
                                 Text(
                                     text = group.label,
                                     style = MaterialTheme.typography.titleMedium,
                                     color = MaterialTheme.colorScheme.onSurface,
-                                    modifier = Modifier.padding(
-                                        start = 6.dp,
-                                        top = 14.dp,
-                                        bottom = 7.dp,
-                                    ),
+                                    modifier = Modifier.padding(start = 6.dp, top = 14.dp, bottom = 7.dp),
                                 )
                             }
                         }
+                        val firstEntryIndex = nextRowIndex
+                        nextRowIndex += group.entries.size
                         itemsIndexed(
                             items = group.entries,
-                            key = { _, entry -> entry.sessionKey() },
-                        ) { _, entry ->
-                            val rowIndex = globalIndex++
+                            key = { _, entry -> entry.eventId },
+                        ) { entryIndex, entry ->
                             ProgressiveActionSheetItem(
-                                index = rowIndex,
-                                itemKey = entry.sessionKey(),
+                                index = firstEntryIndex + entryIndex,
+                                itemKey = entry.eventId,
+                                modifier = com.music.orb.ui.components.verticalEdgeMotion(historyListState, entry.eventId),
                             ) {
                                 PlaybackHistoryRow(
                                     entry = entry,
@@ -191,6 +179,24 @@ private fun PlaybackHistoryRow(
             )
         }
         Spacer(Modifier.size(10.dp))
+        Icon(
+            imageVector = when (entry.deviceType) {
+                "phone" -> Icons.Rounded.PhoneAndroid
+                "tablet" -> Icons.Rounded.TabletAndroid
+                "computer" -> Icons.Rounded.Computer
+                else -> Icons.Rounded.Devices
+            },
+            contentDescription = when (entry.deviceType) {
+                "phone" -> stringResource(R.string.history_device_phone)
+                "tablet" -> stringResource(R.string.history_device_tablet)
+                "computer" -> stringResource(R.string.history_device_computer)
+                "multiple" -> stringResource(R.string.history_device_multiple)
+                else -> stringResource(R.string.history_device_unknown)
+            },
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(16.dp),
+        )
+        Spacer(Modifier.size(6.dp))
         Text(
             text = timeFormatter.format(Date(entry.playedAtMs)),
             style = MaterialTheme.typography.labelMedium,

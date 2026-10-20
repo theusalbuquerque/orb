@@ -1,0 +1,21 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<resources>
+  <string name="orb_l10n_listenbrainz_title">Токен ListenBrainz</string>
+  <string name="orb_l10n_listenbrainz_hint">Вставьте токен ListenBrainz, чтобы включить скробблинг.</string>
+  <string name="orb_l10n_api_token">Токен API</string>
+  <string name="orb_l10n_discord_title">Токен Discord</string>
+  <string name="orb_l10n_discord_hint">Вставьте токен учётной записи Discord. Он хранится на устройстве в зашифрованном виде и отправляется только в Discord.</string>
+  <string name="orb_l10n_token">Токен</string>
+  <string name="orb_l10n_save">Сохранить</string>
+  <string name="orb_l10n_cancel">Отмена</string>
+  <string name="orb_l10n_checking">Проверка…</string>
+  <string name="orb_l10n_selected">Выбрано</string>
+  <string name="orb_l10n_playlist_generic">Плейлист</string>
+  <string name="orb_l10n_playlist_open">Открыть плейлист</string>
+  <string name="orb_l10n_playlist_rename_action">Переименовать</string>
+  <string name="orb_l10n_playlist_delete">Удалить плейлист</string>
+  <string name="orb_l10n_playlist_delete_confirm" formatted="true">Удалить «%1$s» — нажмите для подтверждения</string>
+  <string name="orb_l10n_playlist_rename_title">Переименовать плейлист</string>
+  <string name="orb_l10n_playlist_save_name">Сохранить название</string>
+  <string name="orb_l10n_got_it">Понятно</string>
+<string name="settings_lossless_audio">Аудио без потерь</string><string name="settings_lossless_audio_subtitle">Отдавать приоритет FLAC и Hi-Res из совместимых источников</string></resources>

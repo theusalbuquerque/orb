@@ -41,6 +41,8 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.res.stringResource
+import com.music.orb.R
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.music.orb.data.settings.AppSettings
 import dev.chrisbanes.haze.HazeState
@@ -70,13 +72,13 @@ fun ListenBrainzTokenAlert(
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Text(
-                text = "ListenBrainz Token",
+                text = stringResource(R.string.orb_l10n_listenbrainz_title),
                 style = MaterialTheme.typography.bodyLarge.copy(fontSize = 17.sp, fontWeight = FontWeight.W600),
                 color = MaterialTheme.colorScheme.onSurface,
                 textAlign = TextAlign.Center,
             )
             Text(
-                text = "Paste your ListenBrainz user token to enable scrobbling.",
+                text = stringResource(R.string.orb_l10n_listenbrainz_hint),
                 modifier = Modifier.padding(top = 4.dp, bottom = 14.dp),
                 style = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp, lineHeight = 17.sp),
                 color = MaterialTheme.colorScheme.onSurface,
@@ -85,15 +87,15 @@ fun ListenBrainzTokenAlert(
             AlertTextField(
                 value = tokenInput,
                 onValueChange = onTokenInputChange,
-                placeholder = "API Token",
+                placeholder = stringResource(R.string.orb_l10n_api_token),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = { onSave() }),
             )
         }
         AlertRule()
-        AlertAction(label = "Save", emphasised = true, onClick = onSave)
+        AlertAction(label = stringResource(R.string.orb_l10n_save), emphasised = true, onClick = onSave)
         AlertRule()
-        AlertAction(label = "Cancel", emphasised = false, onClick = onDismiss)
+        AlertAction(label = stringResource(R.string.orb_l10n_cancel), emphasised = false, onClick = onDismiss)
     }
 }
 
@@ -101,75 +103,50 @@ fun ListenBrainzTokenAlert(
 @Composable
 fun LastfmLoginAlert(
     hazeState: HazeState,
-    usernameInput: String,
-    onUsernameInputChange: (String) -> Unit,
-    passwordInput: String,
-    onPasswordInputChange: (String) -> Unit,
+    waitingForApproval: Boolean,
     error: String?,
     loading: Boolean,
-    onSignIn: () -> Unit,
+    onAuthorize: () -> Unit,
+    onComplete: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     AlertScaffold(hazeState = hazeState, onDismiss = onDismiss) {
         Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 19.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 21.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Text(
-                text = "Last.fm Login",
-                style = MaterialTheme.typography.bodyLarge.copy(fontSize = 17.sp, fontWeight = FontWeight.W600),
+                text = stringResource(R.string.lastfm_connect_title),
+                style = MaterialTheme.typography.bodyLarge.copy(fontSize = 18.sp, fontWeight = FontWeight.W600),
                 color = MaterialTheme.colorScheme.onSurface,
                 textAlign = TextAlign.Center,
             )
             Text(
-                text = error ?: "Sign in with your Last.fm account to enable scrobbling.",
-                modifier = Modifier.padding(top = 4.dp, bottom = 14.dp),
-                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp, lineHeight = 17.sp),
-                color = if (error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                text = error ?: if (waitingForApproval)
+                    stringResource(R.string.lastfm_browser_waiting)
+                else stringResource(R.string.lastfm_browser_intro),
+                modifier = Modifier.padding(top = 8.dp),
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
-            )
-            AlertTextField(
-                value = usernameInput,
-                onValueChange = onUsernameInputChange,
-                placeholder = "Username",
-                enabled = !loading,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
-            )
-            Spacer(Modifier.height(8.dp))
-            AlertTextField(
-                value = passwordInput,
-                onValueChange = onPasswordInputChange,
-                placeholder = "Password",
-                enabled = !loading,
-                isPassword = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(
-                    onDone = { if (usernameInput.isNotBlank() && passwordInput.isNotBlank()) onSignIn() },
-                ),
             )
         }
         AlertRule()
         AlertAction(
-            label = if (loading) "Signing in..." else "Sign in",
+            label = when {
+                loading -> stringResource(R.string.lastfm_please_wait)
+                waitingForApproval -> stringResource(R.string.lastfm_finish_connection)
+                else -> stringResource(R.string.lastfm_authorize)
+            },
             emphasised = true,
-            onClick = onSignIn,
-            enabled = !loading && usernameInput.isNotBlank() && passwordInput.isNotBlank(),
+            onClick = if (waitingForApproval) onComplete else onAuthorize,
+            enabled = !loading,
         )
         AlertRule()
-        AlertAction(label = "Cancel", emphasised = false, onClick = onDismiss, enabled = !loading)
+        AlertAction(label = stringResource(R.string.lastfm_cancel), emphasised = false, onClick = onDismiss, enabled = !loading)
     }
 }
 
-/**
- * Manual token entry, for when the in-app login can't run — a WebView an OEM
- * has broken, or a token lifted from a desktop client.
- *
- * [error] carries back what the verification attempt said, because a token that
- * was mistyped or has expired is indistinguishable from one that works until
- * Discord is asked about it.
- */
 @OptIn(ExperimentalHazeMaterialsApi::class)
 @Composable
 fun DiscordTokenAlert(
@@ -189,15 +166,14 @@ fun DiscordTokenAlert(
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Text(
-                text = "Discord Token",
+                text = stringResource(R.string.orb_l10n_discord_title),
                 style = MaterialTheme.typography.bodyLarge.copy(fontSize = 17.sp, fontWeight = FontWeight.W600),
                 color = MaterialTheme.colorScheme.onSurface,
                 textAlign = TextAlign.Center,
             )
             Text(
                 text = error
-                    ?: "Paste your Discord account token. It stays on this device, " +
-                    "encrypted, and is only ever sent to Discord.",
+                    ?: stringResource(R.string.orb_l10n_discord_hint),
                 modifier = Modifier.padding(top = 4.dp, bottom = 14.dp),
                 style = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp, lineHeight = 17.sp),
                 color = if (error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
@@ -206,7 +182,7 @@ fun DiscordTokenAlert(
             AlertTextField(
                 value = tokenInput,
                 onValueChange = onTokenInputChange,
-                placeholder = "Token",
+                placeholder = stringResource(R.string.orb_l10n_token),
                 enabled = !loading,
                 isPassword = true,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
@@ -215,13 +191,13 @@ fun DiscordTokenAlert(
         }
         AlertRule()
         AlertAction(
-            label = if (loading) "Checking..." else "Save",
+            label = if (loading) stringResource(R.string.orb_l10n_checking) else stringResource(R.string.orb_l10n_save),
             emphasised = true,
             onClick = onSave,
             enabled = !loading && tokenInput.isNotBlank(),
         )
         AlertRule()
-        AlertAction(label = "Cancel", emphasised = false, onClick = onDismiss, enabled = !loading)
+        AlertAction(label = stringResource(R.string.orb_l10n_cancel), emphasised = false, onClick = onDismiss, enabled = !loading)
     }
 }
 
@@ -272,9 +248,9 @@ fun TextValueAlert(
             )
         }
         AlertRule()
-        AlertAction(label = "Save", emphasised = true, onClick = onSave)
+        AlertAction(label = stringResource(R.string.orb_l10n_save), emphasised = true, onClick = onSave)
         AlertRule()
-        AlertAction(label = "Cancel", emphasised = false, onClick = onDismiss)
+        AlertAction(label = stringResource(R.string.orb_l10n_cancel), emphasised = false, onClick = onDismiss)
     }
 }
 
@@ -332,7 +308,7 @@ fun <T> ChoiceAlert(
             )
         }
         AlertRule()
-        AlertAction(label = "Cancel", emphasised = false, onClick = onDismiss)
+        AlertAction(label = stringResource(R.string.orb_l10n_cancel), emphasised = false, onClick = onDismiss)
     }
 }
 
@@ -379,7 +355,7 @@ private fun ChoiceRow(
         if (checked) {
             Icon(
                 imageVector = Icons.Rounded.Check,
-                contentDescription = "Selected",
+                contentDescription = stringResource(R.string.orb_l10n_selected),
                 tint = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.size(19.dp),
             )
@@ -413,12 +389,9 @@ private fun AlertScaffold(
             modifier = Modifier
                 .width(ALERT_WIDTH)
                 .clip(shape)
-                .then(
-                    if (reduceDynamicBlur) {
-                        Modifier.background(MaterialTheme.colorScheme.surface)
-                    } else {
-                        Modifier.hazeEffect(state = hazeState, style = HazeMaterials.regular(MaterialTheme.colorScheme.surface))
-                    },
+                .orbGlassSurface(
+                    pageColor = MaterialTheme.colorScheme.surfaceContainer,
+                    cornerRadius = ALERT_CORNER,
                 )
                 .clickable(
                     indication = null,

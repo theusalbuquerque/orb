@@ -34,4 +34,11 @@
     <string name="song_action_turn_off_timer">Turn off timer</string>
     <string name="song_action_running">Running</string>
     <string name="song_action_remove_download">Remove download</string>
-</resources>
+
+    <string name="orb_download_retry_quality_title">Try a different quality?</string>
+    <string name="orb_download_retry_quality_message">The Lossless download failed again. Download in High quality (AAC) instead? You can also try Lossless again.</string>
+    <string name="orb_download_retry_quality_accept">Download in High quality</string>
+    <string name="orb_download_retry_quality_keep">Try Lossless again</string>
+    <string name="orb_download_lossless_verify_failed">The downloaded Lossless file could not be verified.</string>
+
+    </resources>

@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="artist_profile_identity_error">No se ha podido verificar el perfil de este artista. Intenta buscarlo de nuevo.</string>
+    <string name="history_device_computer">Ordenador</string>
+    <string name="history_device_phone">Teléfono</string>
+    <string name="history_device_tablet">Tableta</string>
+    <string name="history_device_unknown">Dispositivo desconocido</string>
+    <string name="lastfm_authorize">Autorizar en Last.fm</string>
+    <string name="lastfm_browser_intro">Inicia sesión en el sitio web oficial de Last.fm. Orb nunca te pedirá tu contraseña.</string>
+    <string name="lastfm_browser_waiting">Autoriza Orb en el navegador y regresa para completar la conexión.</string>
+    <string name="lastfm_cancel">Cancelar</string>
+    <string name="lastfm_connect">Conectar</string>
+    <string name="lastfm_connect_title">Conectar Last.fm</string>
+    <string name="lastfm_disconnect">Desconectar</string>
+    <string name="lastfm_enable">Activar Last.fm</string>
+    <string name="lastfm_finish_connection">Finalizar conexión</string>
+    <string name="lastfm_please_wait">Espera…</string>
+    <string name="orb_download_lossless_verify_failed">No se ha podido verificar el archivo Lossless descargado.</string>
+    <string name="orb_download_retry_quality_accept">Descargar en calidad Alta</string>
+    <string name="orb_download_retry_quality_keep">Volver a intentar Lossless</string>
+    <string name="orb_download_retry_quality_message">La descarga Lossless ha vuelto a fallar. ¿Quieres descargar en calidad Alta (AAC) o intentar Lossless otra vez?</string>
+    <string name="orb_download_retry_quality_title">¿Probar otra calidad?</string>
+    <string name="orb_lock_brightness_auto">Brillo automático</string>
+    <string name="orb_lock_mode_always">Siempre activado</string>
+    <string name="orb_lock_mode_notifications">Al encender la pantalla</string>
+    <string name="orb_lock_mode_on_wake_explanation">Muestra Orb Lock al encender la pantalla bloqueada durante la reproducción. No lee notificaciones de otras apps ni enciende la pantalla por avisos.</string>
+    <string name="orb_lock_mode_off">Desactivado</string>
+    <string name="orb_playback_wrong_recording">Este enlace de música lleva a una grabación diferente. Elige otra versión.</string>
+    <string name="profile_cancel">Cancelar</string>
+    <string name="profile_change_photo">Elegir foto de perfil</string>
+    <string name="profile_display_name">Nombre</string>
+    <string name="profile_edit">Editar perfil</string>
+    <string name="profile_edit_save_error">No se ha podido guardar tu perfil. Comprueba el nombre elegido y vuelve a intentarlo.</string>
+    <string name="profile_edit_title">Editar perfil</string>
+    <string name="profile_follow">Seguir</string>
+    <string name="profile_following_button">Siguiendo</string>
+    <string name="profile_photo_error">Elige una imagen JPEG, PNG, WebP, HEIC o HEIF de hasta 5 MB.</string>
+    <string name="profile_total_plays">Reproducciones</string>
+    <string name="profile_username">Nombre de usuario</string>
+    <string name="profile_username_available_on">Podrás volver a cambiarlo el %1$s.</string>
+    <string name="profile_username_monthly_rule">Puedes cambiar tu nombre de usuario una vez al mes.</string>
+    <string name="settings_download_auto_fallback_summary">Orb busca primero la calidad seleccionada. Si no está disponible o no es válida para escuchar sin conexión, descarga automáticamente la mejor alternativa verificada.</string>
+    <string name="source_tidal_available">TIDAL Lossless disponible</string>
+    <string name="source_tidal_unavailable">TIDAL Lossless no está disponible actualmente</string>
+</resources>

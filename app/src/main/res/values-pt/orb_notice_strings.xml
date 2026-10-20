@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="notice_added_to_queue">Adicionada à fila</string>
+    <string name="notice_play_next">Vai tocar a seguir</string>
+    <string name="notice_added_to_playlist">Adicionada à playlist</string>
+    <string name="notice_added_to_library">Adicionada à biblioteca</string>
+    <string name="notice_removed_from_library">Removida da biblioteca</string>
+    <string name="notice_download_started">Download iniciado</string>
+    <string name="notice_downloads_started">Baixando %1$d músicas</string>
+    <string name="notice_already_downloaded">Já baixada</string>
+    <string name="notice_already_in_playlist">Esta música já faz parte da playlist</string>
+</resources>

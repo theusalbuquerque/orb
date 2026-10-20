@@ -2,14 +2,15 @@
 
 package com.music.orb.ui.components
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.expandVertically
@@ -30,11 +31,16 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.statusBarsIgnoringVisibility
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -49,39 +55,55 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Notifications
 import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.PersonSearch
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.ColorFilter
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
+import kotlin.math.roundToInt
+import kotlin.math.max
+import kotlin.math.min
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.music.orb.BuildConfig
@@ -93,25 +115,34 @@ import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.HazeStyle
 import dev.chrisbanes.haze.HazeTint
 import dev.chrisbanes.haze.hazeEffect
+import dev.chrisbanes.haze.materials.HazeMaterials
 import dev.chrisbanes.haze.materials.ExperimentalHazeMaterialsApi
 
+/** Header glass uses the original v1.6.2 ultra-thin Haze material. */
+@OptIn(ExperimentalHazeMaterialsApi::class)
+@Composable
+private fun orbHeaderGlassStyle(containerColor: Color): HazeStyle =
+    HazeMaterials.ultraThin(containerColor)
+
 /**
- * Lighter glass used by Orb's ordinary fixed headers.
- *
- * The previous HazeMaterials.ultraThin preset used a 55% tint on dark
- * surfaces (35% on light). For this trial we keep the same 24 dp blur while
- * letting substantially more of the page show through: 30% tint on dark
- * surfaces and 22% on light surfaces.
+ * The header and page must feel like one continuous material. Material 3's
+ * surfaceContainer is intentionally more elevated than background; using it
+ * unmodified made the lower edge read as a second slab. Pull it toward the
+ * page canvas while keeping enough chroma/contrast for Haze to remain visible.
  */
-private fun orbHeaderGlassStyle(containerColor: Color): HazeStyle = HazeStyle(
-    blurRadius = 24.dp,
-    backgroundColor = containerColor,
-    tint = HazeTint(
-        containerColor.copy(
-            alpha = if (containerColor.luminance() >= 0.5f) 0.22f else 0.30f,
-        ),
-    ),
-)
+@Composable
+private fun orbHeaderGlassColor(): Color {
+    val scheme = MaterialTheme.colorScheme
+    return if (OrbFlavorUi.expressive) {
+        lerp(scheme.background, scheme.surfaceContainer, 0.42f)
+    } else {
+        scheme.surface
+    }
+}
+
+// The former tonal skirt below the Haze header was removed. The glass itself
+// still blurs the content immediately behind the header, but nothing paints
+// over the artwork/cards after the header's real lower boundary.
 
 /** Centers a selected horizontal item, naturally clamping at the row edges. */
 internal suspend fun LazyListState.animateScrollToCenteredItem(index: Int) {
@@ -144,6 +175,11 @@ internal suspend fun LazyListState.animateScrollToCenteredItem(index: Int) {
  * Apple Music behaviour: the big in-list header owns the title at rest;
  * once the list scrolls, the small centered title + hairline divider fade in.
  */
+private val HeaderActionEndPadding = 18.dp
+private val HeaderActionTopPadding = 10.dp
+private val HeaderActionTouchSize = 48.dp
+private val HeaderActionIconSize = 25.dp
+
 @OptIn(ExperimentalHazeMaterialsApi::class)
 @Composable
 fun FrostedTopBar(
@@ -161,6 +197,8 @@ fun FrostedTopBar(
      * bottom edge.
      */
     ownBackdrop: Boolean = true,
+    /** Local files/downloads have no large in-content title, so keep the header label visible. */
+    alwaysShowTitle: Boolean = false,
     onBack: (() -> Unit)? = null,
     plainBackButton: Boolean = false,
     showBrandingWhenNoBack: Boolean = true,
@@ -171,7 +209,7 @@ fun FrostedTopBar(
     actions: @Composable () -> Unit = {},
 ) {
     val titleAlpha by animateFloatAsState(
-        targetValue = if (scrolled) 1f else 0f,
+        targetValue = if (scrolled || alwaysShowTitle) 1f else 0f,
         animationSpec = tween(220),
         label = "topBarTitleAlpha",
     )
@@ -180,44 +218,33 @@ fun FrostedTopBar(
             if (OrbFlavorUi.expressive) MaterialTheme.colorScheme.outlineVariant
             else MaterialTheme.colorScheme.outline
         ).copy(
-            alpha = if (scrolled && ownBackdrop) {
-                if (OrbFlavorUi.expressive) 0.48f else 0.6f
-            } else {
-                0f
-            },
+            alpha = if (scrolled && ownBackdrop && !OrbFlavorUi.expressive) 0.6f else 0f,
         ),
         animationSpec = tween(220),
         label = "topBarDivider",
     )
     val reduceDynamicBlur by AppSettings.reduceDynamicBlur.collectAsStateWithLifecycle()
+    val glassColor = orbHeaderGlassColor()
+
 
     Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .then(
-                when {
-                    !ownBackdrop -> Modifier
-                    reduceDynamicBlur -> Modifier.background(
-                        if (OrbFlavorUi.expressive) {
-                            MaterialTheme.colorScheme.surfaceContainer
-                        } else {
-                            MaterialTheme.colorScheme.surface
-                        },
-                    )
-                    else -> Modifier.hazeEffect(
-                        state = hazeState,
-                        style = orbHeaderGlassStyle(
-                            if (OrbFlavorUi.expressive) {
-                                MaterialTheme.colorScheme.surfaceContainer
-                            } else {
-                                MaterialTheme.colorScheme.surface
-                            },
-                        ),
-                    )
-                },
-            ),
+        modifier = modifier.fillMaxWidth(),
     ) {
-        Box(
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(
+                    when {
+                        !ownBackdrop -> Modifier
+                        reduceDynamicBlur -> Modifier.background(glassColor)
+                        else -> Modifier.hazeEffect(
+                            state = hazeState,
+                            style = orbHeaderGlassStyle(glassColor),
+                        )
+                    },
+                ),
+        ) {
+            Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility)
@@ -227,8 +254,7 @@ fun FrostedTopBar(
                 targetState = title,
                 contentKey = { it },
                 transitionSpec = {
-                    (slideInVertically(tween(260)) { height -> height / 2 } + fadeIn(tween(190))) togetherWith
-                            (slideOutVertically(tween(210)) { height -> -height / 3 } + fadeOut(tween(150)))
+                    (fadeIn(tween(190)) togetherWith fadeOut(tween(150))).using(null)
                 },
                 modifier = Modifier
                     .align(Alignment.Center)
@@ -281,7 +307,7 @@ fun FrostedTopBar(
                 ) {
                     Icon(
                         Icons.AutoMirrored.Rounded.ArrowBack,
-                        contentDescription = "Back",
+                        contentDescription = stringResource(R.string.song_action_back),
                         tint = MaterialTheme.colorScheme.onSurface,
                     )
                 }
@@ -293,9 +319,8 @@ fun FrostedTopBar(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Image(
-                        painter = painterResource(R.drawable.ic_logo),
+                        painter = painterResource(R.drawable.orb_logo),
                         contentDescription = null,
-                        colorFilter = ColorFilter.tint(MaterialTheme.colorScheme.onSurface),
                         modifier = Modifier.height(if (OrbFlavorUi.expressive) 26.dp else 24.dp),
                     )
                     // Keep the preview channel obvious in-app. Dev and prod
@@ -335,17 +360,23 @@ fun FrostedTopBar(
                 actions()
             }
         }
-        // The divider and the loader line share the bar's bottom edge; the box
-        // only grows to the line's height while a refresh is actually showing.
-        Box(Modifier.fillMaxWidth()) {
-            HorizontalDivider(thickness = 0.5.dp, color = dividerColor)
-            RefreshLine(
-                refreshing = refreshing,
-                pullFraction = pullFraction,
-                modifier = Modifier.align(Alignment.BottomCenter),
-            )
+        // Refresh feedback belongs to the page gap; this divider stays fixed.
+            Box(Modifier.fillMaxWidth()) {
+                HorizontalDivider(thickness = 0.5.dp, color = dividerColor)
+            }
+        }
+        if (ownBackdrop) {
+
         }
     }
+}
+
+/** Greeting IDs are resolved by stringResource so app-language changes update the Home header. */
+internal fun homeGreetingResForHour(hour: Int): Int = when (hour) {
+    in 5..11 -> R.string.expressive_greeting_morning
+    in 12..17 -> R.string.expressive_greeting_afternoon
+    in 18..23 -> R.string.expressive_greeting_evening
+    else -> R.string.expressive_greeting_overnight
 }
 
 /**
@@ -369,12 +400,22 @@ fun HomeFrostedHeader(
     modifier: Modifier = Modifier,
     refreshing: Boolean = false,
     pullFraction: () -> Float = { 0f },
+    glassRecovering: Boolean = false,
 ) {
     val reduceDynamicBlur by AppSettings.reduceDynamicBlur.collectAsStateWithLifecycle()
+    val wifiConnected by AppSettings.wifiConnection.collectAsStateWithLifecycle()
     // Use exactly the same glass recipe as the Settings top bar. Keeping the
     // material color opaque here is intentional: HazeMaterials owns the tint
     // and transparency; pre-dimming it changes the blur response.
-    val glassColor = MaterialTheme.colorScheme.surfaceContainer
+    val glassColor = orbHeaderGlassColor()
+    // During Back navigation Haze needs a frame to recapture the Home page.
+    // This temporary backing matches the glass color and blocks the sharp-artwork flash.
+    val recoveryBackingAlpha by animateFloatAsState(
+        targetValue = if (glassRecovering && !reduceDynamicBlur) 0.88f else 0f,
+        animationSpec = if (glassRecovering) snap() else tween(220),
+        label = "homeHeaderGlassRecoveryBacking",
+    )
+
     val dividerColor by animateColorAsState(
         targetValue = MaterialTheme.colorScheme.outlineVariant.copy(
             alpha = if (scrolled) 0.42f else 0f,
@@ -382,17 +423,18 @@ fun HomeFrostedHeader(
         animationSpec = tween(220),
         label = "homeHeaderDivider",
     )
-    val greeting = remember(account?.name) {
-        val firstName = account?.name?.trim()?.substringBefore(' ')?.takeIf { it.isNotBlank() }
-        val hour = java.time.LocalTime.now().hour
-        val hello = when (hour) {
-            in 5..11 -> "Bom dia"
-            in 12..17 -> "Boa tarde"
-            in 18..23 -> "Boa noite"
-            else -> "Oi"
+    // Use the app's selected locale, not a hardcoded Portuguese greeting.
+    // A clock tick also refreshes the greeting when Home stays open across a time boundary.
+    var localHour by remember { mutableIntStateOf(java.time.LocalTime.now().hour) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            localHour = java.time.LocalTime.now().hour
+            delay(30_000L)
         }
-        if (firstName != null) "$hello, $firstName" else hello
     }
+    val hello = stringResource(homeGreetingResForHour(localHour))
+    val firstName = account?.name?.trim()?.substringBefore(' ')?.takeIf { it.isNotBlank() }
+    val greeting = if (firstName == null) hello else "$hello, $firstName"
 
     val topAreaHeight by animateDpAsState(
         targetValue = if (scrolled) 62.dp else 116.dp,
@@ -408,11 +450,6 @@ fun HomeFrostedHeader(
         targetValue = if (scrolled) 17.dp else 10.dp,
         animationSpec = tween(240),
         label = "homeHeaderAvatarTop",
-    )
-    val settingsTop by animateDpAsState(
-        targetValue = if (scrolled) 12.dp else 10.dp,
-        animationSpec = tween(240),
-        label = "homeHeaderSettingsTop",
     )
     val greetingX by animateDpAsState(
         targetValue = if (scrolled) 68.dp else 20.dp,
@@ -431,20 +468,24 @@ fun HomeFrostedHeader(
     )
 
     Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .then(
-                if (reduceDynamicBlur) {
-                    Modifier.background(glassColor)
-                } else {
-                    Modifier.hazeEffect(
-                        state = hazeState,
-                        style = orbHeaderGlassStyle(glassColor),
-                    )
-                },
-            ),
+        modifier = modifier.fillMaxWidth(),
     ) {
-        Box(
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(
+                    if (reduceDynamicBlur) {
+                        Modifier.background(glassColor)
+                    } else {
+                        Modifier.background(glassColor.copy(alpha = recoveryBackingAlpha))
+                            .hazeEffect(
+                                state = hazeState,
+                                style = orbHeaderGlassStyle(glassColor),
+                            )
+                    },
+                ),
+        ) {
+            Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility)
@@ -460,14 +501,22 @@ fun HomeFrostedHeader(
                     .padding(start = 18.dp, top = avatarTop),
             )
 
+            OrbCastButton(
+                modifier=Modifier.align(Alignment.TopEnd).padding(
+                    end=HeaderActionEndPadding+HeaderActionTouchSize, top=HeaderActionTopPadding),
+            )
+
             // Settings stays visually stable while Home collapses: only the
             // surrounding header moves. The affordance has no decorative
             // background, so its 48 dp touch target never reads as another chip.
             Box(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(end = 18.dp, top = settingsTop)
-                    .size(48.dp)
+                    .padding(
+                        end = HeaderActionEndPadding,
+                        top = HeaderActionTopPadding,
+                    )
+                    .size(HeaderActionTouchSize)
                     .clickable(onClick = onSettingsClick),
                 contentAlignment = Alignment.Center,
             ) {
@@ -475,7 +524,7 @@ fun HomeFrostedHeader(
                     imageVector = Icons.Rounded.Settings,
                     contentDescription = stringResource(R.string.title_settings),
                     tint = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.size(25.dp),
+                    modifier = Modifier.size(HeaderActionIconSize),
                 )
             }
 
@@ -490,97 +539,313 @@ fun HomeFrostedHeader(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .padding(start = greetingX, top = greetingY, end = 78.dp),
+                    .padding(start = greetingX, top = greetingY, end = if (wifiConnected == true) 126.dp else 78.dp),
             )
         }
 
-        // The feed selector is a permanent second pane of the header. Keep the
-        // selected chip fully visible even when its label is wider than the
-        // available remainder of the row (notably Community playlists).
-        val filterListState = rememberLazyListState()
-        LaunchedEffect(selectedSection, sections.size) {
-            if (sections.isNotEmpty()) {
-                filterListState.animateScrollToCenteredItem(
-                    selectedSection.coerceIn(sections.indices),
-                )
+        // A single moving selection capsule, driven by the same spring family
+        // used by the bottom navigation. The previous implementation animated
+        // four independent chip backgrounds, so the highlight appeared to
+        // teleport instead of travelling between sections.
+        HomeSectionSelector(
+            sections = sections,
+            selectedSection = selectedSection,
+            onSectionSelected = onSectionSelected,
+        )
+
+            Box(Modifier.fillMaxWidth()) {
+                Spacer(Modifier.height(0.5.dp))
             }
         }
-        LazyRow(
-            state = filterListState,
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 18.dp),
-            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
+
+    }
+}
+
+
+/**
+ * Material 3 Expressive Home section selector.
+ *
+ * With only four destinations a regular scroll row is cheaper and, more
+ * importantly, lets one physical indicator move between measured chip slots.
+ * Its offset/width and the automatic centering scroll use medium-bouncy
+ * springs, mirroring the motion language of [FloatingBottomBar].
+ */
+@Composable
+private fun HomeSectionSelector(
+    sections: List<String>,
+    selectedSection: Int,
+    onSectionSelected: (Int) -> Unit,
+) {
+    OrbBouncyPillSelector(
+        labels = sections,
+        selectedIndex = selectedSection,
+        onSelected = onSectionSelected,
+    )
+}
+
+/**
+ * Shared Material 3 Expressive travelling-pill selector.
+ *
+ * The selected capsule is a single physical layer that springs between slots,
+ * just like Orb's expressive bottom navigation. The neutral slot under the
+ * moving capsule progressively fades and morphs to the capsule radius as the
+ * overlap grows; this prevents the old, less-rounded chip from peeking out at
+ * the corners and looking like a shadow behind the selected item.
+ */
+@Composable
+internal fun OrbBouncyPillSelector(
+    labels: List<String>,
+    selectedIndex: Int,
+    onSelected: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+    icons: List<ImageVector?> = emptyList(),
+) {
+    if (labels.isEmpty()) return
+
+    val context = LocalContext.current
+    val density = LocalDensity.current
+    val textMeasurer = rememberTextMeasurer()
+    val labelStyle = MaterialTheme.typography.labelLarge
+    val scrollState = rememberScrollState()
+    var viewportWidthPx by remember { mutableIntStateOf(0) }
+
+    val sidePadding = 18.dp
+    val chipHorizontalPadding = 18.dp
+    val chipHeight = 42.dp
+    val gap = 8.dp
+    val iconSize = 18.dp
+    val iconGap = 6.dp
+    val neutralRadiusDp = 15f
+    val selectedRadiusDp = 22f
+    // Neutral filters use exactly the same glass and outline as the bottom dock.
+    val neutralContainer = MaterialTheme.colorScheme.surfaceContainerHigh
+    val neutralBorder = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
+    val navigationHazeState = LocalOrbNavigationGlassHazeState.current
+    val reduceDynamicBlur by AppSettings.reduceDynamicBlur.collectAsStateWithLifecycle()
+
+    val sidePaddingPx = with(density) { sidePadding.toPx() }
+    val chipPaddingPx = with(density) { (chipHorizontalPadding * 2).toPx() }
+    val gapPx = with(density) { gap.toPx() }
+    val iconSizePx = with(density) { iconSize.toPx() }
+    val iconGapPx = with(density) { iconGap.toPx() }
+
+    val chipWidthsPx = labels.mapIndexed { index, label ->
+        val iconExtra = if (icons.getOrNull(index) != null) iconSizePx + iconGapPx else 0f
+        textMeasurer.measure(
+            text = AnnotatedString(label),
+            style = labelStyle,
+            maxLines = 1,
+        ).size.width.toFloat() + chipPaddingPx + iconExtra
+    }
+    val chipOffsetsPx = buildList {
+        var x = sidePaddingPx
+        chipWidthsPx.forEach { width ->
+            add(x)
+            x += width + gapPx
+        }
+    }
+    val contentWidthPx = sidePaddingPx * 2f +
+            chipWidthsPx.sum() + gapPx * (labels.size - 1).coerceAtLeast(0)
+
+    val safeSelectedIndex = selectedIndex.coerceIn(labels.indices)
+    // Shared selected material: same dynamic primaryContainer as Geral/Pessoal,
+    // miniplayer and bottom navigation. The outer rail retains its frosted glass.
+    val selectedContainerTarget = MaterialTheme.colorScheme.primaryContainer
+    val selectedContentTarget = MaterialTheme.colorScheme.onPrimaryContainer
+    val selectedContainer by animateColorAsState(
+        targetValue = selectedContainerTarget,
+        animationSpec = tween(220),
+        label = "orbPillSelectedContainer",
+    )
+    val selectedContent by animateColorAsState(
+        targetValue = selectedContentTarget,
+        animationSpec = tween(220),
+        label = "orbPillSelectedContent",
+    )
+    val indicatorX by animateFloatAsState(
+        targetValue = chipOffsetsPx[safeSelectedIndex],
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMediumLow,
+        ),
+        label = "orbPillIndicatorX",
+    )
+    val indicatorWidth by animateFloatAsState(
+        targetValue = chipWidthsPx[safeSelectedIndex],
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMediumLow,
+        ),
+        label = "orbPillIndicatorWidth",
+    )
+
+    // Shape is part of the motion now: every destination change briefly returns
+    // the travelling capsule toward the tighter neutral radius, then springs it
+    // into the fully rounded selected form. This removes the instantaneous
+    // 15dp -> 22dp corner jump visible in the previous implementation.
+    val shapeProgress = remember { Animatable(1f) }
+    LaunchedEffect(safeSelectedIndex) {
+        shapeProgress.snapTo(0f)
+        shapeProgress.animateTo(
+            targetValue = 1f,
+            animationSpec = spring(
+                dampingRatio = Spring.DampingRatioMediumBouncy,
+                stiffness = Spring.StiffnessMediumLow,
+            ),
+        )
+    }
+    val indicatorRadiusDp = neutralRadiusDp +
+            (selectedRadiusDp - neutralRadiusDp) * shapeProgress.value.coerceIn(0f, 1f)
+    val indicatorShape = RoundedCornerShape(indicatorRadiusDp.dp)
+
+    LaunchedEffect(safeSelectedIndex, viewportWidthPx, contentWidthPx) {
+        if (viewportWidthPx <= 0) return@LaunchedEffect
+        val center = chipOffsetsPx[safeSelectedIndex] + chipWidthsPx[safeSelectedIndex] / 2f
+        val target = (center - viewportWidthPx / 2f)
+            .roundToInt()
+            .coerceIn(0, scrollState.maxValue)
+        scrollState.animateScrollTo(
+            value = target,
+            animationSpec = spring(
+                dampingRatio = Spring.DampingRatioMediumBouncy,
+                stiffness = Spring.StiffnessMediumLow,
+            ),
+        )
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(58.dp)
+            .onSizeChanged { viewportWidthPx = it.width }
+            .horizontalScroll(scrollState),
+    ) {
+        val contentWidth = with(density) { contentWidthPx.toDp() }
+        Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .height(58.dp),
+                .width(contentWidth)
+                .fillMaxHeight(),
         ) {
-            itemsIndexed(sections) { index, label ->
-                val selected = selectedSection == index
-            val background = if (selected) {
-                    MaterialTheme.colorScheme.primaryContainer
-                } else {
-                    // Opaque + highest surface elevation keeps the chip visible
-                    // against the light header, where the former translucent fill
-                    // could disappear almost completely.
-                    MaterialTheme.colorScheme.surfaceContainerHighest
+            // Neutral slots. Their visible part fades/morphs according to the
+            // actual overlap with the travelling indicator, so no darker
+            // squarish chip can remain visible behind the selected capsule.
+            Row(
+                modifier = Modifier.fillMaxSize(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Spacer(Modifier.width(sidePadding))
+                labels.forEachIndexed { index, _ ->
+                    val widthPx = chipWidthsPx[index]
+                    val width = with(density) { widthPx.toDp() }
+                    val slotStart = chipOffsetsPx[index]
+                    val slotEnd = slotStart + widthPx
+                    val indicatorEnd = indicatorX + indicatorWidth
+                    val overlapPx = max(
+                        0f,
+                        min(slotEnd, indicatorEnd) - max(slotStart, indicatorX),
+                    )
+                    val overlapBase = min(widthPx, indicatorWidth).coerceAtLeast(1f)
+                    val overlap = (overlapPx / overlapBase).coerceIn(0f, 1f)
+                    val slotRadiusDp = neutralRadiusDp +
+                            (indicatorRadiusDp - neutralRadiusDp) * overlap
+                    val neutralShape = RoundedCornerShape(slotRadiusDp.dp)
+                    val neutralAlpha = (1f - overlap).coerceIn(0f, 1f)
+
+                    Box(
+                        modifier = Modifier
+                            .width(width)
+                            .height(chipHeight)
+                            .graphicsLayer { alpha = neutralAlpha }
+                            .orbNavigationNeutralGlass(
+                                hazeState = navigationHazeState,
+                                reduceDynamicBlur = reduceDynamicBlur,
+                                containerColor = neutralContainer,
+                                borderColor = neutralBorder,
+                                shape = neutralShape,
+                            ),
+                    )
+                    if (index != labels.lastIndex) Spacer(Modifier.width(gap))
                 }
-            val outline = if (selected) {
-                    MaterialTheme.colorScheme.primary.copy(alpha = 0.20f)
-                } else {
-                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)
+                Spacer(Modifier.width(sidePadding))
             }
-            val chipShapeRadius by animateDpAsState(
-                targetValue = if (selected) 22.dp else 15.dp,
-                animationSpec = tween(durationMillis = 300),
-                label = "homeFilterShape",
+
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .offset { IntOffset(indicatorX.roundToInt(), 0) }
+                    .width(with(density) { indicatorWidth.toDp() })
+                    .height(chipHeight)
+                    .clip(indicatorShape)
+                    .background(selectedContainer),
             )
-            val chipScale by animateFloatAsState(
-                targetValue = if (selected) 1.015f else 1f,
-                animationSpec = tween(durationMillis = 260),
-                label = "homeFilterScale",
-            )
-            val animatedBackground by animateColorAsState(
-                targetValue = background,
-                animationSpec = tween(durationMillis = 280),
-                label = "homeFilterBackground",
-            )
-            val animatedOutline by animateColorAsState(
-                targetValue = outline,
-                animationSpec = tween(durationMillis = 280),
-                label = "homeFilterOutline",
-            )
-            val chipShape = RoundedCornerShape(chipShapeRadius)
-            Text(
-                    text = label,
-                    style = MaterialTheme.typography.labelLarge,
-                    color = if (selected) {
-                        MaterialTheme.colorScheme.onPrimaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                    maxLines = 1,
-                    modifier = Modifier
-                    .graphicsLayer {
-                        scaleX = chipScale
-                        scaleY = chipScale
+
+            Row(
+                modifier = Modifier.fillMaxSize(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Spacer(Modifier.width(sidePadding))
+                labels.forEachIndexed { index, label ->
+                    val selected = index == safeSelectedIndex
+                    val width = with(density) { chipWidthsPx[index].toDp() }
+                    val labelColor by animateColorAsState(
+                        targetValue = if (selected) {
+                            selectedContent
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        animationSpec = tween(180),
+                        label = "orbPillTextColor$index",
+                    )
+                    val labelScale by animateFloatAsState(
+                        targetValue = if (selected) 1.035f else 1f,
+                        animationSpec = spring(
+                            dampingRatio = Spring.DampingRatioMediumBouncy,
+                            stiffness = Spring.StiffnessMediumLow,
+                        ),
+                        label = "orbPillTextScale$index",
+                    )
+                    Box(
+                        modifier = Modifier
+                            .width(width)
+                            .height(chipHeight)
+                            .clip(RoundedCornerShape(selectedRadiusDp.dp))
+                            .clickable {
+                                if (index != safeSelectedIndex) {
+                                    OrbHaptics.perform(context, OrbHaptics.Kind.NAVIGATION)
+                                    onSelected(index)
+                                }
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
+                            modifier = Modifier.graphicsLayer {
+                                scaleX = labelScale
+                                scaleY = labelScale
+                            },
+                        ) {
+                            icons.getOrNull(index)?.let { icon ->
+                                Icon(
+                                    imageVector = icon,
+                                    contentDescription = null,
+                                    tint = labelColor,
+                                    modifier = Modifier.size(iconSize),
+                                )
+                                Spacer(Modifier.width(iconGap))
+                            }
+                            Text(
+                                text = label,
+                                style = labelStyle,
+                                color = labelColor,
+                                maxLines = 1,
+                            )
+                        }
                     }
-                    .clip(chipShape)
-                    .background(animatedBackground)
-                    .border(1.dp, animatedOutline, chipShape)
-                        .clickable { onSectionSelected(index) }
-                        .padding(horizontal = 18.dp, vertical = 11.dp),
-                )
+                    if (index != labels.lastIndex) Spacer(Modifier.width(gap))
+                }
+                Spacer(Modifier.width(sidePadding))
             }
-        }
-
-
-        Box(Modifier.fillMaxWidth()) {
-            Spacer(Modifier.height(0.5.dp))
-            RefreshLine(
-                refreshing = refreshing,
-                pullFraction = pullFraction,
-                modifier = Modifier.align(Alignment.BottomCenter),
-            )
         }
     }
 }
@@ -603,7 +868,8 @@ fun LibraryFrostedHeader(
     pullFraction: () -> Float = { 0f },
 ) {
     val reduceDynamicBlur by AppSettings.reduceDynamicBlur.collectAsStateWithLifecycle()
-    val glassColor = MaterialTheme.colorScheme.surfaceContainer
+    val glassColor = orbHeaderGlassColor()
+
     val dividerColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.42f)
     val focusRequester = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
@@ -613,20 +879,23 @@ fun LibraryFrostedHeader(
     }
 
     Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .then(
-                if (reduceDynamicBlur) {
-                    Modifier.background(glassColor)
-                } else {
-                    Modifier.hazeEffect(
-                        state = hazeState,
-                        style = orbHeaderGlassStyle(glassColor),
-                    )
-                },
-            ),
+        modifier = modifier.fillMaxWidth(),
     ) {
-        Box(
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(
+                    if (reduceDynamicBlur) {
+                        Modifier.background(glassColor)
+                    } else {
+                        Modifier.hazeEffect(
+                            state = hazeState,
+                            style = orbHeaderGlassStyle(glassColor),
+                        )
+                    },
+                ),
+        ) {
+            Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility)
@@ -701,8 +970,11 @@ fun LibraryFrostedHeader(
             Box(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(end = 18.dp, top = 7.dp)
-                    .size(48.dp)
+                    .padding(
+                        end = HeaderActionEndPadding,
+                        top = HeaderActionTopPadding,
+                    )
+                    .size(HeaderActionTouchSize)
                     .clickable(onClick = if (searchActive) onCloseSearch else onSearchClick),
                 contentAlignment = Alignment.Center,
             ) {
@@ -712,19 +984,16 @@ fun LibraryFrostedHeader(
                         if (searchActive) R.string.library_search_close else R.string.library_search_open,
                     ),
                     tint = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.size(25.dp),
+                    modifier = Modifier.size(HeaderActionIconSize),
                 )
             }
         }
 
-        Box(Modifier.fillMaxWidth()) {
-            Spacer(Modifier.height(0.5.dp))
-            RefreshLine(
-                refreshing = refreshing,
-                pullFraction = pullFraction,
-                modifier = Modifier.align(Alignment.BottomCenter),
-            )
+            Box(Modifier.fillMaxWidth()) {
+                Spacer(Modifier.height(0.5.dp))
+            }
         }
+
     }
 }
 
@@ -745,14 +1014,15 @@ fun ExploreFrostedHeader(
     onSearchSubmit: () -> Unit,
     onSearchActivated: () -> Unit,
     focusTrigger: Int = 0,
-    onHistoryClick: () -> Unit = {},
+    onPeopleSearchClick: () -> Unit,
     onAccountClick: () -> Unit,
     modifier: Modifier = Modifier,
     refreshing: Boolean = false,
     pullFraction: () -> Float = { 0f },
 ) {
     val reduceDynamicBlur by AppSettings.reduceDynamicBlur.collectAsStateWithLifecycle()
-    val glassColor = MaterialTheme.colorScheme.surfaceContainer
+    val glassColor = orbHeaderGlassColor()
+
     val dividerColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.42f)
     val focusRequester = remember { FocusRequester() }
 
@@ -764,20 +1034,23 @@ fun ExploreFrostedHeader(
     }
 
     Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .then(
-                if (reduceDynamicBlur) {
-                    Modifier.background(glassColor)
-                } else {
-                    Modifier.hazeEffect(
-                        state = hazeState,
-                        style = orbHeaderGlassStyle(glassColor),
-                    )
-                },
-            ),
+        modifier = modifier.fillMaxWidth(),
     ) {
-        Box(
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(
+                    if (reduceDynamicBlur) {
+                        Modifier.background(glassColor)
+                    } else {
+                        Modifier.hazeEffect(
+                            state = hazeState,
+                            style = orbHeaderGlassStyle(glassColor),
+                        )
+                    },
+                ),
+        ) {
+            Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility)
@@ -809,16 +1082,20 @@ fun ExploreFrostedHeader(
             )
 
             IconButton(
-                onClick = onHistoryClick,
+                onClick = onPeopleSearchClick,
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(end = 54.dp, top = 9.dp)
-                    .size(44.dp),
+                    .padding(
+                        end = HeaderActionEndPadding,
+                        top = HeaderActionTopPadding,
+                    )
+                    .size(HeaderActionTouchSize),
             ) {
                 Icon(
-                    imageVector = Icons.Rounded.History,
-                    contentDescription = stringResource(R.string.playback_history_open),
+                    imageVector = Icons.Rounded.PersonSearch,
+                    contentDescription = stringResource(R.string.stats_user_search_title),
                     tint = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.size(HeaderActionIconSize),
                 )
             }
         }
@@ -830,17 +1107,14 @@ fun ExploreFrostedHeader(
             onSearchSubmit = onSearchSubmit,
             onSearchActivated = onSearchActivated,
             focusRequester = focusRequester,
-            clearContentDescription = "Limpar pesquisa",
+            clearContentDescription = stringResource(R.string.beta_ui_clear_search),
         )
 
-        Box(Modifier.fillMaxWidth()) {
-            Spacer(Modifier.height(0.5.dp))
-            RefreshLine(
-                refreshing = refreshing,
-                pullFraction = pullFraction,
-                modifier = Modifier.align(Alignment.BottomCenter),
-            )
+            Box(Modifier.fillMaxWidth()) {
+                Spacer(Modifier.height(0.5.dp))
+            }
         }
+
     }
 }
 
@@ -853,7 +1127,7 @@ fun ExpressiveSearchField(
     onSearchActivated: () -> Unit,
     focusRequester: FocusRequester,
     modifier: Modifier = Modifier,
-    clearContentDescription: String = "Clear search",
+    clearContentDescription: String? = null,
 ) {
     val focusManager = LocalFocusManager.current
     BasicTextField(
@@ -925,7 +1199,7 @@ fun ExpressiveSearchField(
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.Close,
-                            contentDescription = clearContentDescription,
+                            contentDescription = clearContentDescription ?: stringResource(R.string.beta_ui_clear_search),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(18.dp),
                         )
@@ -949,7 +1223,7 @@ fun StatsFrostedHeader(
     searchTitle: String,
     searchMode: Boolean,
     notificationCount: Int,
-    onSearchClick: () -> Unit,
+    onHistoryClick: () -> Unit,
     onNotificationsClick: () -> Unit,
     onBack: () -> Unit,
     periodLabels: List<String> = emptyList(),
@@ -961,24 +1235,28 @@ fun StatsFrostedHeader(
     pullFraction: () -> Float = { 0f },
 ) {
     val reduceDynamicBlur by AppSettings.reduceDynamicBlur.collectAsStateWithLifecycle()
-    val glassColor = MaterialTheme.colorScheme.surfaceContainer
+    val glassColor = orbHeaderGlassColor()
+
     val dividerColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.42f)
 
     Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .then(
-                if (reduceDynamicBlur) {
-                    Modifier.background(glassColor)
-                } else {
-                    Modifier.hazeEffect(
-                        state = hazeState,
-                        style = orbHeaderGlassStyle(glassColor),
-                    )
-                },
-            ),
+        modifier = modifier.fillMaxWidth(),
     ) {
-        Box(
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(
+                    if (reduceDynamicBlur) {
+                        Modifier.background(glassColor)
+                    } else {
+                        Modifier.hazeEffect(
+                            state = hazeState,
+                            style = orbHeaderGlassStyle(glassColor),
+                        )
+                    },
+                ),
+        ) {
+            Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility)
@@ -1056,12 +1334,12 @@ fun StatsFrostedHeader(
                         .align(Alignment.TopEnd)
                         .padding(end = 18.dp, top = 7.dp)
                         .size(48.dp)
-                        .clickable(onClick = onSearchClick),
+                        .clickable(onClick = onHistoryClick),
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
-                        imageVector = Icons.Rounded.Search,
-                        contentDescription = searchTitle,
+                        imageVector = Icons.Rounded.History,
+                        contentDescription = stringResource(R.string.playback_history_open),
                         tint = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.size(25.dp),
                     )
@@ -1070,83 +1348,18 @@ fun StatsFrostedHeader(
         }
 
         if (showPeriodSelector && periodLabels.isNotEmpty()) {
-            val periodListState = rememberLazyListState()
-            LaunchedEffect(selectedPeriodIndex, periodLabels.size) {
-                periodListState.animateScrollToCenteredItem(
-                    selectedPeriodIndex.coerceIn(periodLabels.indices),
-                )
-            }
-            LazyRow(
-                state = periodListState,
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 18.dp),
-                horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(58.dp),
-            ) {
-                itemsIndexed(periodLabels) { index, label ->
-                    val active = index == selectedPeriodIndex
-                    val background = if (active) {
-                        MaterialTheme.colorScheme.primaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.surfaceContainerHighest
-                    }
-                    val outline = if (active) {
-                        MaterialTheme.colorScheme.primary.copy(alpha = 0.20f)
-                    } else {
-                        MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)
-                    }
-                    val radius by animateDpAsState(
-                        targetValue = if (active) 22.dp else 15.dp,
-                        animationSpec = spring(
-                            dampingRatio = Spring.DampingRatioMediumBouncy,
-                            stiffness = Spring.StiffnessMediumLow,
-                        ),
-                        label = "statsHeaderPeriodRadius",
-                    )
-                    val scale by animateFloatAsState(
-                        targetValue = if (active) 1.04f else 1f,
-                        animationSpec = spring(
-                            dampingRatio = Spring.DampingRatioMediumBouncy,
-                            stiffness = Spring.StiffnessMediumLow,
-                        ),
-                        label = "statsHeaderPeriodScale",
-                    )
-                    val fill by animateColorAsState(
-                        targetValue = background,
-                        animationSpec = tween(260),
-                        label = "statsHeaderPeriodFill",
-                    )
-                    val stroke by animateColorAsState(
-                        targetValue = outline,
-                        animationSpec = tween(260),
-                        label = "statsHeaderPeriodStroke",
-                    )
-                    Text(
-                        text = label,
-                        style = MaterialTheme.typography.labelLarge,
-                        color = if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier
-                            .graphicsLayer { scaleX = scale; scaleY = scale }
-                            .clip(RoundedCornerShape(radius))
-                            .background(fill)
-                            .border(1.dp, stroke, RoundedCornerShape(radius))
-                            .clickable { onPeriodSelected(index) }
-                            .padding(horizontal = 16.dp, vertical = 9.dp),
-                    )
-                }
+            OrbBouncyPillSelector(
+                labels = periodLabels,
+                selectedIndex = selectedPeriodIndex,
+                onSelected = onPeriodSelected,
+            )
+        }
+
+            Box(Modifier.fillMaxWidth()) {
+                Spacer(Modifier.height(0.5.dp))
             }
         }
 
-        Box(Modifier.fillMaxWidth()) {
-            Spacer(Modifier.height(0.5.dp))
-            RefreshLine(
-                refreshing = refreshing,
-                pullFraction = pullFraction,
-                modifier = Modifier.align(Alignment.BottomCenter),
-            )
-        }
     }
 }
 
@@ -1175,15 +1388,17 @@ private fun HomeHeaderAvatar(
             modifier = modifier
                 .size(size)
                 .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.primaryContainer)
-                .thumbnailBorder(CircleShape)
+                .then(
+                    if (OrbFlavorUi.expressive) Modifier
+                    else Modifier.background(MaterialTheme.colorScheme.surfaceVariant),
+                )
                 .clickable(onClick = onClick),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
                 imageVector = Icons.Rounded.Person,
                 contentDescription = stringResource(R.string.title_settings),
-                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                tint = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.size(iconSize),
             )
         }
@@ -1215,7 +1430,7 @@ fun TopBarAccountButton(
         if (photo != null) {
             AsyncImage(
                 model = photo,
-                contentDescription = "Settings",
+                contentDescription = stringResource(R.string.title_settings),
                 contentScale = ContentScale.Crop,
                 modifier = Modifier
                     .size(avatarSize)
@@ -1227,24 +1442,16 @@ fun TopBarAccountButton(
                 modifier = Modifier
                     .size(avatarSize)
                     .clip(CircleShape)
-                    .background(
-                        if (OrbFlavorUi.expressive) {
-                            MaterialTheme.colorScheme.primaryContainer
-                        } else {
-                            MaterialTheme.colorScheme.surfaceVariant
-                        },
-                    )
-                    .thumbnailBorder(CircleShape),
+                    .then(
+                        if (OrbFlavorUi.expressive) Modifier
+                        else Modifier.background(MaterialTheme.colorScheme.surfaceVariant),
+                    ),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
                     Icons.Rounded.Person,
-                    contentDescription = "Settings",
-                    tint = if (OrbFlavorUi.expressive) {
-                        MaterialTheme.colorScheme.onPrimaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
+                    contentDescription = stringResource(R.string.title_settings),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(if (OrbFlavorUi.expressive) 21.dp else 18.dp),
                 )
             }
@@ -1252,48 +1459,7 @@ fun TopBarAccountButton(
     }
 }
 
-/**
- * The refresh indicator: a line along the bottom of the bar, directly under the
- * status bar. It tracks the drag on the way down — filling left to right as the
- * pull approaches the threshold — then sweeps indefinitely once the refresh is
- * away, so the two phases read as one continuous gesture.
- */
-@Composable
-private fun RefreshLine(refreshing: Boolean, pullFraction: () -> Float, modifier: Modifier = Modifier) {
-    val fraction = pullFraction()
-    val pulling = fraction > 0.01f
-    AnimatedVisibility(
-        visible = refreshing || pulling,
-        enter = fadeIn(tween(120)),
-        exit = fadeOut(tween(220)),
-        modifier = modifier,
-    ) {
-        val lineModifier = Modifier
-            .fillMaxWidth()
-            .height(LINE_HEIGHT)
-        if (refreshing) {
-            LinearProgressIndicator(
-                modifier = lineModifier,
-                color = MaterialTheme.colorScheme.primary,
-                trackColor = Color.Transparent,
-                strokeCap = StrokeCap.Butt,
-                gapSize = 0.dp,
-            )
-        } else {
-            LinearProgressIndicator(
-                progress = { fraction.coerceIn(0f, 1f) },
-                modifier = lineModifier,
-                color = MaterialTheme.colorScheme.primary,
-                trackColor = Color.Transparent,
-                strokeCap = StrokeCap.Butt,
-                gapSize = 0.dp,
-                drawStopIndicator = {},
-            )
-        }
-    }
-}
 
-private val LINE_HEIGHT = 2.5.dp
 
 /**
  * The account photo's diameter.

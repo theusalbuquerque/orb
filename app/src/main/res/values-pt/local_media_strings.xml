@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="local_tab_songs">Músicas</string>
+    <string name="local_tab_artists">Artistas</string>
+    <string name="local_tab_albums">Álbuns</string>
+    <string name="local_no_albums">Nenhuma destas músicas informa de qual álbum faz parte.</string>
+</resources>

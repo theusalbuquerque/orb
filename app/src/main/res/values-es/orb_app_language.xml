@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="orb_language_settings_title">Idioma de la aplicación</string>
+    <string name="orb_language_settings_subtitle">Usa el idioma del dispositivo o elige otro idioma y región.</string>
+    <string name="orb_language_choose_language">Elegir idioma</string>
+    <string name="orb_language_choose_region">Elegir región</string>
+    <string name="orb_language_auto_title">Automático (idioma del dispositivo)</string>
+    <string name="orb_language_auto_description">Dispositivo: %1$s</string>
+    <string name="orb_language_region_description">Selecciona la región para %1$s.</string>
+    <string name="orb_language_back">Idiomas</string>
+</resources>

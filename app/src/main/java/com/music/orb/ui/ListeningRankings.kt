@@ -27,11 +27,16 @@ internal data class ListeningRankedItem(
 
 internal fun currentMonthStartInstant(
     now: ZonedDateTime = ZonedDateTime.now(),
-): Instant = now
-    .withDayOfMonth(1)
-    .toLocalDate()
-    .atStartOfDay(now.zone)
-    .toInstant()
+): Instant {
+    // "Month" in Orb is a rolling window. Its size follows the number of days
+    // in the month that is currently in effect (28/29/30/31), so profile and
+    // Stats rankings do not reset when the calendar flips to day 1.
+    val days = now.toLocalDate().lengthOfMonth()
+    return now.toLocalDate()
+        .minusDays((days - 1).toLong())
+        .atStartOfDay(now.zone)
+        .toInstant()
+}
 
 internal fun currentMonthListeningActivity(
     activity: List<ListeningActivity>,
@@ -87,7 +92,7 @@ internal fun rankListeningTracks(
             identity = identity,
             title = lead.title,
             subtitle = lead.artist,
-            artworkUrl = rows.firstNotNullOfOrNull { it.artworkUrl?.takeIf(String::isNotBlank) },
+            artworkUrl = rows.firstArtworkOrYoutubeThumbnail(),
             listenedMs = rows.sumOf { it.effectivePlayedMs() },
             plays = rows.size,
         )
@@ -110,13 +115,24 @@ internal fun rankListeningAlbums(
             identity = identity,
             title = lead.album!!.trim(),
             subtitle = lead.artist,
-            artworkUrl = rows.firstNotNullOfOrNull { it.artworkUrl?.takeIf(String::isNotBlank) },
+            artworkUrl = rows.firstArtworkOrYoutubeThumbnail(),
             listenedMs = rows.sumOf { it.effectivePlayedMs() },
             plays = rows.size,
         )
     }
     .sortedWith(LISTENING_RANK_COMPARATOR)
     .take(limit.coerceAtLeast(0))
+
+
+private val YOUTUBE_VIDEO_ID_REGEX = Regex("[A-Za-z0-9_-]{11}")
+
+private fun youtubeThumbnailFallback(videoId: String?): String? =
+    videoId?.takeIf { it.matches(YOUTUBE_VIDEO_ID_REGEX) }
+        ?.let { "https://i.ytimg.com/vi/$it/hqdefault.jpg" }
+
+private fun List<ListeningActivity>.firstArtworkOrYoutubeThumbnail(): String? =
+    firstNotNullOfOrNull { it.artworkUrl?.takeIf(String::isNotBlank) }
+        ?: firstNotNullOfOrNull { row -> youtubeThumbnailFallback(row.videoId) }
 
 private val LISTENING_RANK_COMPARATOR =
     compareByDescending<ListeningRankedItem> { it.plays }

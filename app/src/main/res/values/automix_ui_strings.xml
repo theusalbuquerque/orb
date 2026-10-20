@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="detail_suggested">Suggested</string>
+    <string name="settings_autoplay">Autoplay</string>
+    <string name="settings_autoplay_subtitle">Keep playing similar music automatically when the current queue ends.</string>
 </resources>

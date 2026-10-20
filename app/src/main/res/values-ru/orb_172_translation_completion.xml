@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="expressive_greeting_overnight">Привет</string>
+    <string name="account_youtube_library_partial">Канал YouTube подключён. Ваша личная библиотека YouTube Music пока недоступна.</string>
+    <string name="download_prefer_offline_online_summary">Если выключено, вне раздела загрузок используется потоковая передача. Без интернета всегда используются сохранённые файлы.</string>
+    <string name="download_prefer_offline_online_title">Использовать загруженное аудио при наличии интернета</string>
+    <string name="nerd_offline_automix_status">Нет сети · анализ приостановлен</string>
+    <string name="nerd_offline_automix_unavailable">Automix недоступен без интернета</string>
+    <string name="profile_photo_cannot_open">Не удалось открыть фото. Выберите другое изображение.</string>
+    <string name="profile_photo_too_large">Выбранное фото превышает 50 МБ. Выберите изображение размером до 50 МБ.</string>
+    <string name="settings_download_fallback_lower_summary">Пробовать более низкий битрейт, только если выбранный недоступен. Выключено — без снижения качества.</string>
+    <string name="settings_download_fallback_lower_title">Разрешить понижать качество загрузок</string>
+    <string name="settings_download_strict_quality_summary">Для загрузки требуется выбранное качество; без разрешения более низкое качество не используется.</string>
+</resources>

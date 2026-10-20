@@ -12,7 +12,7 @@ import java.util.Locale
  * Zero-network storage for the Home Suggestions hero.
  *
  * The Home screen must never have to manufacture its first visible carousel.
- * Instead we keep two durable 20-item buffers:
+ * Instead we keep two durable 25-item buffers:
  *  - current: the immutable set rendered for this app session;
  *  - next: the complete set prepared silently during the current session and
  *    promoted atomically on the next real app entry.
@@ -24,7 +24,7 @@ import java.util.Locale
  */
 object HomeSuggestionStore {
     private const val PREFS = "orb_home_suggestions"
-    private const val MAX_ITEMS = 20
+    private const val MAX_ITEMS = 25
     private const val MAX_POOL_ITEMS = 96
     private const val KEY_CURRENT = "current_v2"
     private const val KEY_NEXT = "next_v2"
@@ -75,7 +75,7 @@ object HomeSuggestionStore {
 
     /**
      * Promote a previously prepared full buffer. This is intentionally a
-     * synchronous commit because it runs before Compose and is tiny (~20 rows).
+     * synchronous commit because it runs before Compose and is tiny (~25 rows).
      */
     @Synchronized
     fun promoteNext(): List<ShelfItem> {

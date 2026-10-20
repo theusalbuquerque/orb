@@ -1,4 +1,4 @@
--- Orb Stats social feed: four-hour listening history + six-hour reaction notifications.
+-- Orb Stats social feed: six-hour listening history + 24-hour reaction notifications.
 -- Run once in Supabase SQL Editor after the existing social/reaction migrations.
 
 -- listening_activity is now the durable feed source. Realtime UPDATE matters too:
@@ -43,7 +43,7 @@ begin
 end $$;
 
 -- Reactions must outlive now_playing, otherwise a completed song cannot remain in
--- Stats for four hours and the listener cannot see its reactions for six hours.
+-- Stats for six hours and the listener cannot see its reactions for 24 hours.
 drop trigger if exists cleanup_now_playing_reactions_trigger on public.now_playing;
 drop function if exists public.cleanup_now_playing_reactions();
 
@@ -66,7 +66,7 @@ create trigger prune_old_orb_reactions_trigger
 after insert or update on public.now_playing_reactions
 for each statement execute function public.prune_old_orb_reactions();
 
--- A reaction is valid for the current live session OR for a recent 4-hour
+-- A reaction is valid for the current live session OR for a recent 6-hour
 -- listening_activity row. This preserves the existing "followed users only"
 -- rule while allowing reactions on cards after playback has ended. The existing
 -- SELECT/DELETE policies are intentionally kept: listeners can still see their
@@ -100,7 +100,7 @@ with check (
             where la.user_id = now_playing_reactions.listener_id
               and la.video_id = now_playing_reactions.video_id
               and la.started_at = now_playing_reactions.activity_started_at
-              and coalesce(la.finished_at, la.started_at) >= now() - interval '4 hours'
+              and coalesce(la.finished_at, la.started_at) >= now() - interval '6 hours'
         )
     )
 );
@@ -135,7 +135,7 @@ with check (
             where la.user_id = now_playing_reactions.listener_id
               and la.video_id = now_playing_reactions.video_id
               and la.started_at = now_playing_reactions.activity_started_at
-              and coalesce(la.finished_at, la.started_at) >= now() - interval '4 hours'
+              and coalesce(la.finished_at, la.started_at) >= now() - interval '6 hours'
         )
     )
 );

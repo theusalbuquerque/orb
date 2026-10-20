@@ -1,0 +1,13 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+  <string name="cast_sheet_wifi">Devices on your Wi-Fi</string>
+  <string name="cast_sheet_searching">Searching for devices…</string>
+  <string name="cast_sheet_empty">No devices found</string>
+  <string name="cast_sheet_same_wifi">Connect both devices to the same Wi-Fi network.</string>
+  <string name="cast_sheet_connected">Connected</string>
+  <string name="cast_sheet_connecting">Connecting…</string>
+  <string name="cast_sheet_tap">Tap to connect</string>
+  <string name="cast_sheet_volume">Volume</string>
+  <string name="cast_sheet_disconnect">Disconnect</string>
+  <string name="cast_sheet_retry">Search again</string>
+</resources>

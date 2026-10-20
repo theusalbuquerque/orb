@@ -2,7 +2,7 @@
 <resources>
     <string name="settings_automix">Automix</string>
     <string name="settings_automix_subtitle">Transiciones inteligentes sincronizadas con el ritmo, el tempo, la tonalidad y la energía</string>
-    <string name="settings_automix_subtitle_v20">Automix 2.0 · Motor público estable</string>
+    <string name="settings_automix_subtitle_v20">Automix 2.0</string>
     <string name="settings_automix_subtitle_v25">Automix 2.5 · Vista previa Premium</string>
     <string name="settings_automix_version">Versión de Automix</string>
     <string name="settings_automix_20">2.0</string>
@@ -13,4 +13,6 @@
     <string name="automix_25_beta_notice_title">Vista previa Premium de Automix 2.5</string>
     <string name="automix_25_beta_notice_message">Automix 2.5 usa el nuevo planificador musical remoto con análisis de tempo, tonalidad, frases, energía y solapamiento vocal. Esta vista previa sigue siendo experimental y está restringida a cuentas autorizadas.</string>
     <string name="detail_suggested">Sugeridas</string>
+    <string name="settings_autoplay">Autoplay</string>
+    <string name="settings_autoplay_subtitle">Seguir reproduciendo música similar automáticamente cuando termine la cola actual.</string>
 </resources>

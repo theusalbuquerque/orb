@@ -1,0 +1,8 @@
+<resources>
+    <string name="settings_hide_status_bar_now_playing">Ocultar barra de estado</string>
+    <string name="settings_hide_status_bar_now_playing_subtitle">Oculta la hora, la batería y los iconos del sistema mientras el reproductor esté abierto.</string>
+    <string name="settings_keep_screen_on_now_playing">Pantalla activa</string>
+    <string name="settings_keep_screen_on_now_playing_subtitle">Evita que la pantalla se apague automáticamente mientras el reproductor esté abierto.</string>
+    <string name="settings_allow_screen_rotation">Rotar pantalla</string>
+    <string name="settings_allow_screen_rotation_subtitle">Permite que solo Now Playing siga la rotación del dispositivo en teléfonos.</string>
+</resources>

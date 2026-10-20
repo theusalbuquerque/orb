@@ -365,6 +365,8 @@ object StatsShareStoryRenderer {
         val dateFormatter = DateTimeFormatter.ofPattern("dd MMM yyyy", Locale.getDefault())
         val logoRes = if (luminance(bg0) < 0.42f) R.drawable.orb_share_logo_light else R.drawable.orb_share_logo_dark
         val logo = trimTransparent(resourceBitmap(logoRes))
+        val wordmarkRes = if (luminance(bg0) < 0.42f) R.drawable.orb_share_wordmark_light else R.drawable.orb_share_wordmark_dark
+        val wordmark = trimTransparent(resourceBitmap(wordmarkRes))
 
         suspend fun artworkForLeader(leader: StatsLeader?, preferArtistPortrait: Boolean = false): Bitmap? {
             if (leader == null) return null
@@ -909,20 +911,15 @@ object StatsShareStoryRenderer {
             context.getString(if (snapshot.period == StatsPeriod.WEEK) R.string.stats_share_story_last_week else R.string.stats_share_story_previous_period),
         )
 
-        // Footer
-        logo?.let {
-            val footerHeight = 86f
+        // Footer uses the complete Orb wordmark.
+        wordmark?.let {
+            val footerHeight = 64f
             val footerWidth = footerHeight * (it.width.toFloat() / it.height.toFloat())
             val left = (WIDTH - footerWidth) / 2f
             val footerLogoRect = RectF(left, footerY, left + footerWidth, footerY + footerHeight)
             paint.alpha = 255
             canvas.drawBitmap(it, null, footerLogoRect, paint)
         }
-        val footerText = capitalizeFirst(context.getString(R.string.stats_share_story_footer).substringAfter('·').trim())
-        paint.textSize = 24f
-        paint.typeface = regular
-        val footerTextWidth = paint.measureText(footerText)
-        text(footerText, (WIDTH - footerTextWidth) / 2f, footerY + 124f, 24f, textSecondary, false)
 
         bitmap
     }

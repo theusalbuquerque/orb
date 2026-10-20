@@ -1,0 +1,12 @@
+<resources>
+    <string name="beta_ui_filter_all">Tudo</string>
+    <string name="beta_ui_filter_artists">Artistas</string>
+    <string name="beta_ui_filter_songs">Músicas</string>
+    <string name="beta_ui_filter_albums">Álbuns</string>
+    <string name="beta_ui_filter_playlists">Playlists</string>
+    <string name="beta_ui_album">Álbum</string>
+    <string name="beta_ui_artist">Artista</string>
+    <string name="beta_ui_playlist">Playlist</string>
+    <string name="yt_ui_monthly_audience_count">%1$s ouvintes mensais</string>
+    <string name="yt_ui_track_count">%1$s faixas</string>
+</resources>

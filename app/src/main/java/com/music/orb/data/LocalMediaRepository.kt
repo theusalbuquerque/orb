@@ -23,7 +23,7 @@ import java.util.concurrent.ConcurrentHashMap
 
 object LocalMediaRepository {
 
-    private const val TAG = "BitChord"
+    private const val TAG = "Orb"
     private val artistArtworkCache = ConcurrentHashMap<String, String>()
     private val albumArtworkCache = ConcurrentHashMap<String, String>()
 

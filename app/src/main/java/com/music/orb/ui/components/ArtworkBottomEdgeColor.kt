@@ -183,7 +183,7 @@ private data class Rgb(
     val b: Double,
 )
 
-private fun createBottomEdgeField(
+internal fun createBottomEdgeField(
     bitmap: Bitmap,
     sampleStartFraction: Float,
     fallback: Color,

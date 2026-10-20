@@ -78,6 +78,47 @@ data class StreamFormat(
 }
 
 /**
+ * The quality Orb should preserve when a Premium listener downloads the track
+ * that is currently playing.
+ *
+ * This is deliberately separate from [StreamRequest]. A stream request is a
+ * network ceiling (and therefore changes when Wi-Fi/mobile settings change),
+ * while a download target is evidence about the rendition the listener has
+ * already reached. Downloads must not silently re-read the current network
+ * setting and choose another tier after the listener taps Download.
+ */
+data class DownloadQualityTarget(
+    val codec: String? = null,
+    val kbps: Int? = null,
+    val sampleRateHz: Int? = null,
+    val bitDepth: Int? = null,
+    val losslessTier: LosslessTier = LosslessTier.NONE,
+) {
+    val isLossless: Boolean
+        get() = losslessTier.isLossless || StreamFormat(codec = codec).isLossless == true
+
+    /** Human-readable target used only in diagnostics/logs. */
+    val summary: String
+        get() = StreamFormat(
+            codec = codec,
+            kbps = kbps,
+            sampleRateHz = sampleRateHz,
+            bitDepth = bitDepth,
+            declaredLosslessTier = losslessTier.takeIf { it.isLossless },
+        ).summary
+
+    companion object {
+        fun from(format: StreamFormat): DownloadQualityTarget = DownloadQualityTarget(
+            codec = format.codec,
+            kbps = format.kbps,
+            sampleRateHz = format.sampleRateHz,
+            bitDepth = format.bitDepth,
+            losslessTier = format.losslessTier,
+        )
+    }
+}
+
+/**
  * A URL the player can open, and what is expected to come back out of it.
  *
  * [headers] travel with the fetch because some sources bind the stream URL to
@@ -234,6 +275,10 @@ interface MusicSource {
      */
     suspend fun search(query: String, limit: Int = 25, waitForAll: Boolean = false): List<Song>
 
+    /** Download lookups may have a different quality policy from live playback. */
+    suspend fun searchForDownload(query: String, limit: Int = 25, waitForAll: Boolean = false): List<Song> =
+        search(query, limit, waitForAll)
+
     /**
      * @param trackId this source's own id for the track, as issued by [search].
      * @return an openable stream, or null when this source turns out not to
@@ -241,4 +286,15 @@ interface MusicSource {
      *   [SourceResolver] move to the next source without logging a failure.
      */
     suspend fun stream(trackId: String, request: StreamRequest): SourceStream?
+
+    /**
+     * Download-specific stream resolution. Most sources can keep using [stream],
+     * but adaptive playback sources may need to request a standalone asset
+     * instead of returning the DASH/HLS transport used by Media3.
+     */
+    suspend fun streamForDownload(
+        trackId: String,
+        request: StreamRequest,
+        qualityTarget: DownloadQualityTarget? = null,
+    ): SourceStream? = stream(trackId, request)
 }

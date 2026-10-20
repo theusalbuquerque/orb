@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="rooms_duration_title">Durata della stanza</string>
+    <string name="rooms_duration_24h">24 ore</string>
+    <string name="rooms_duration_3d">3 giorni</string>
+    <string name="rooms_duration_5d">5 giorni</string>
+    <string name="rooms_duration_7d">7 giorni</string>
+    <string name="rooms_duration_15d">15 giorni</string>
+    <string name="rooms_duration_indefinite">Illimitata</string>
+    <string name="rooms_duration_no_expiry">Senza scadenza · Orb Premium</string>
+    <string name="rooms_duration_expired">Stanza scaduta</string>
+    <string name="rooms_duration_remaining_days">Tempo rimanente: %1$d g %2$d h</string>
+    <string name="rooms_duration_remaining_hours">Tempo rimanente: %1$d h %2$d min</string>
+    <string name="rooms_error_premium_only">La durata illimitata richiede Orb Premium.</string>
+</resources>

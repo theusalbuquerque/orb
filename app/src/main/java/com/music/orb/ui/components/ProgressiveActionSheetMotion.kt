@@ -32,13 +32,15 @@ internal fun ProgressiveActionSheetItem(
     index: Int,
     itemKey: Any,
     modifier: Modifier = Modifier,
+    initiallyRevealed: Boolean = false,
+    onRevealed: () -> Unit = {},
     content: @Composable () -> Unit,
 ) {
-    val progress = remember(itemKey) { Animatable(0f) }
+    val progress = remember(itemKey) { Animatable(if (initiallyRevealed) 1f else 0f) }
     var enteredViewport by remember(itemKey) { mutableStateOf(false) }
     val density = LocalDensity.current
     val view = LocalView.current
-    val travelPx = with(density) { 42.dp.toPx() }
+    val travelPx = with(density) { 8.dp.toPx() }
 
     LaunchedEffect(enteredViewport, itemKey) {
         if (!enteredViewport || progress.value >= 1f) return@LaunchedEffect
@@ -46,16 +48,17 @@ internal fun ProgressiveActionSheetItem(
         // The first rows cascade exactly like the ranking. Rows that were below
         // the fold wait for scrolling, then enter promptly instead of inheriting
         // a large delay just because their absolute menu index is high.
-        val delayMs = if (index <= 5) index * 72L else 36L
+        val delayMs = if (index <= 5) index * 12L else 0L
         delay(delayMs)
         progress.animateTo(
             targetValue = 1f,
             animationSpec = spring(
-                dampingRatio = 0.72f,
-                stiffness = 260f,
+                dampingRatio = 0.86f,
+                stiffness = 560f,
                 visibilityThreshold = 0.001f,
             ),
         )
+        onRevealed()
     }
 
     val p = progress.value.coerceIn(0f, 1f)
@@ -70,12 +73,13 @@ internal fun ProgressiveActionSheetItem(
                     enteredViewport = true
                 }
             }
+            // Keep the actual hit target at its final position from the first frame.
+            // Only the pixels move a few dp during the cascade, so an option can be
+            // tapped immediately while the visual entrance is still settling.
+            .orbSheetProgressiveItem()
             .graphicsLayer {
                 alpha = p
                 translationY = travelPx * (1f - p)
-                val scale = 0.94f + (0.06f * p)
-                scaleX = scale
-                scaleY = scale
             },
     ) {
         content()

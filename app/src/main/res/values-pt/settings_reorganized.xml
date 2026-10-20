@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_audio_sources">Áudio e fontes</string>
+    <string name="settings_download_preferences">Preferências de download</string>
+    <string name="settings_storage_limit">Limite de armazenamento</string>
+    <string name="settings_cache_page_title">Cache</string>
+    <string name="settings_cache_page_subtitle">Gerencie o cache de músicas, capas e do aplicativo</string>
+    <string name="settings_cache_page_description">Limpe arquivos temporários sem excluir músicas baixadas, sua conta ou suas preferências.</string>
+    <string name="settings_cache_back">Voltar às configurações</string>
+    <string name="settings_clear_covers_cache">Limpar cache de capas</string>
+    <string name="settings_clear_app_cache">Limpar cache do app</string>
+    <string name="settings_clear_app_cache_subtitle">Remove outros arquivos temporários, sem apagar o cache de músicas e capas</string>
+    <string name="settings_clear_cache_confirm">Deseja limpar estes arquivos temporários? Músicas baixadas e preferências serão preservadas.</string>
+    <string name="settings_clear_cache_cancel">Cancelar</string>
+    <string name="settings_clear_cache_confirm_action">Limpar cache</string>
+    <string name="settings_clear_cache_success">Cache limpo</string>
+    <string name="settings_clear_cache_failed">Não foi possível remover alguns arquivos temporários</string>
+    <string name="settings_lyrics_origin">Origem das letras</string>
+    <string name="settings_nerd_stats_short">Estatísticas para nerds</string>
+    <string name="settings_display_hide_status_bar">Ocultar barra de status</string>
+</resources>

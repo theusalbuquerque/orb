@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="song_action_view_credits">Ver créditos da música</string>
+    <string name="song_action_credits_title">Créditos da música</string>
+    <string name="song_action_credits_unavailable">Os créditos não estão disponíveis para esta faixa.</string>
+    <string name="song_action_play_next">Reproduzir a seguir</string>
+    <string name="song_action_add_to_queue">Adicionar à fila</string>
+    <string name="song_action_release_year">Ano de lançamento</string>
+    <string name="song_action_share">Compartilhar</string>
+</resources>

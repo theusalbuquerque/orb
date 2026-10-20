@@ -30,7 +30,7 @@ import kotlinx.coroutines.sync.withLock
  */
 object PlaybackTracker {
 
-    private const val TAG = "BitChord"
+    private const val TAG = "Orb"
 
     /** Report watched time once this much new audio has gone by. */
     private const val REPORT_INTERVAL_SECONDS = 30L

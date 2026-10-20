@@ -97,7 +97,7 @@
     <string name="stats_artist_ranking_down">↓ %1$d</string>
     <string name="stats_artist_ranking_no_data">No artists in this period yet.</string>
     <string name="stats_artist_ranking_hint">Tap your top artist to see the full ranking.</string>
-    <string name="friends_recent_listening_empty_message">Recent listening from people you follow will stay here for up to four hours.</string>
+    <string name="friends_recent_listening_empty_message">Recent listening from people you follow will stay here for up to six hours.</string>
     <string name="friends_was_listening_just_now">was listening just now:</string>
     <string name="friends_was_listening_minute_ago">was listening 1 minute ago:</string>
     <string name="friends_was_listening_minutes_ago">was listening %1$d minutes ago:</string>
@@ -139,7 +139,7 @@
 
     <string name="stats_share_preparing">Preparing your Story…</string>
     <string name="stats_share_preview_title">Your Stats Story</string>
-    <string name="stats_share_save">Save to gallery</string>
+    <string name="stats_share_save">Save</string>
     <string name="stats_share_share">Share</string>
     <string name="stats_share_saved">Stats saved to your gallery.</string>
     <string name="stats_share_save_failed">Couldn’t save the Stats image.</string>

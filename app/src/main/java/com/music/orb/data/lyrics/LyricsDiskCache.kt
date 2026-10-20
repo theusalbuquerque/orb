@@ -28,7 +28,7 @@ internal object LyricsDiskCache {
             album: String?, sources: Set<LyricsSource>, prioritizeSyllableSync: Boolean = false): String {
         val identity = JSONArray().put(videoId).put(title).put(artist).put(durationMs)
             .put(album ?: "").put(sources.map { it.name }.sorted().joinToString(","))
-            .put(prioritizeSyllableSync)
+            .put(prioritizeSyllableSync).put("lyrics_priority_v2")
         return MessageDigest.getInstance("SHA-256").digest(identity.toString().toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02x".format(it.toInt() and 0xff) }
     }

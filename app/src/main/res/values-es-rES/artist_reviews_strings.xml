@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="artist_reviews_title">Últimas valoraciones</string>
+    <string name="artist_reviews_sign_in">Inicia sesión para ver las valoraciones de los álbumes.</string>
+    <string name="artist_reviews_error">No se pudieron cargar las valoraciones. Inténtalo de nuevo.</string>
+    <string name="artist_reviews_empty">Todavía no hay valoraciones públicas de estos álbumes.</string>
+    <string name="artist_reviews_user">Usuario</string>
+    <string name="artist_reviews_album">Álbum</string>
+    <string name="artist_reviews_public_note">Tu valoración será pública, con tu foto y nombre de usuario.</string>
+</resources>

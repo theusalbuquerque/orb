@@ -1,7 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <vector>
-namespace bitchord::smart {
+namespace orb::smart {
 constexpr double kVocalSpectrogramSampleRate=44100.0;
 constexpr size_t kVocalSpectrogramFft=4096;
 constexpr size_t kVocalSpectrogramHop=1024;

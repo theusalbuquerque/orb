@@ -27,8 +27,24 @@ object OrbLibraryStore {
 
     private val lock = Any()
 
-    fun containsSong(context: Context, videoId: String): Boolean = synchronized(lock) {
-        readSongs(context).any { it.videoId == videoId }
+    // All public accessors below are synchronized on [lock]. SharedPreferences
+    // JSON is authoritative on the first read; subsequent reads reuse the same
+    // immutable snapshot until an Orb write replaces it. Without this, each
+    // containsSong()/containsCollection() call reparsed every saved item (often
+    // once per visible card during a Compose recomposition).
+    private var songSnapshot: List<Song>? = null
+    private var collectionSnapshot: List<ShelfItem>? = null
+    private var savedSongIds: Set<String>? = null
+    private var savedCollectionIds: Set<String>? = null
+    private var savedAlbumIds: Set<String>? = null
+
+    fun containsSong(context: Context, videoId: String, albumId: String? = null): Boolean = synchronized(lock) {
+        (savedSongIds ?: readSongs(context).mapTo(HashSet()) { it.videoId }
+            .also { savedSongIds = it }).contains(videoId) ||
+            (albumId != null && (savedAlbumIds ?: readCollections(context)
+                .filter { it.type == BrowseType.ALBUM }
+                .mapNotNullTo(HashSet()) { it.browseId }
+                .also { savedAlbumIds = it }).contains(albumId))
     }
 
     fun setSong(context: Context, song: Song, saved: Boolean): Boolean = synchronized(lock) {
@@ -44,7 +60,8 @@ object OrbLibraryStore {
     }
 
     fun containsCollection(context: Context, browseId: String): Boolean = synchronized(lock) {
-        readCollections(context).any { it.browseId == browseId }
+        (savedCollectionIds ?: readCollections(context).mapNotNullTo(HashSet()) { it.browseId }
+            .also { savedCollectionIds = it }).contains(browseId)
     }
 
     fun setCollection(context: Context, item: ShelfItem, saved: Boolean): Boolean = synchronized(lock) {
@@ -100,30 +117,33 @@ object OrbLibraryStore {
     private fun prefs(context: Context) =
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    private fun readSongs(context: Context): List<Song> = runCatching {
-        val array = JSONArray(prefs(context).getString(KEY_SONGS, "[]") ?: "[]")
-        buildList {
-            for (i in 0 until array.length()) {
-                val obj = array.optJSONObject(i) ?: continue
-                val id = obj.optString("videoId").takeIf { it.isNotBlank() } ?: continue
-                add(
-                    Song(
-                        videoId = id,
-                        title = obj.optString("title"),
-                        artist = obj.optString("artist"),
-                        thumbnailUrl = obj.nullableString("thumbnailUrl"),
-                        durationText = obj.nullableString("durationText"),
-                        artistId = obj.nullableString("artistId"),
-                        albumId = obj.nullableString("albumId"),
-                        albumName = obj.nullableString("albumName"),
-                        isVideo = obj.optBoolean("isVideo", false),
-                        isExplicit = obj.optBoolean("isExplicit", false),
-                        releaseYear = obj.optInt("releaseYear", 0).takeIf { it > 0 },
-                    ),
-                )
+    private fun readSongs(context: Context): List<Song> {
+        songSnapshot?.let { return it }
+        return runCatching {
+            val array = JSONArray(prefs(context).getString(KEY_SONGS, "[]") ?: "[]")
+            buildList {
+                for (i in 0 until array.length()) {
+                    val obj = array.optJSONObject(i) ?: continue
+                    val id = obj.optString("videoId").takeIf { it.isNotBlank() } ?: continue
+                    add(
+                        Song(
+                            videoId = id,
+                            title = obj.optString("title"),
+                            artist = obj.optString("artist"),
+                            thumbnailUrl = obj.nullableString("thumbnailUrl"),
+                            durationText = obj.nullableString("durationText"),
+                            artistId = obj.nullableString("artistId"),
+                            albumId = obj.nullableString("albumId"),
+                            albumName = obj.nullableString("albumName"),
+                            isVideo = obj.optBoolean("isVideo", false),
+                            isExplicit = obj.optBoolean("isExplicit", false),
+                            releaseYear = obj.optInt("releaseYear", 0).takeIf { it > 0 },
+                        ),
+                    )
+                }
             }
-        }
-    }.getOrDefault(emptyList())
+        }.getOrDefault(emptyList()).also { songSnapshot = it }
+    }
 
     private fun writeSongs(context: Context, songs: List<Song>) {
         val array = JSONArray()
@@ -145,32 +165,37 @@ object OrbLibraryStore {
             )
         }
         prefs(context).edit().putString(KEY_SONGS, array.toString()).apply()
+        songSnapshot = songs.toList()
+        savedSongIds = songs.mapTo(HashSet()) { it.videoId }
     }
 
-    private fun readCollections(context: Context): List<ShelfItem> = runCatching {
-        val array = JSONArray(prefs(context).getString(KEY_COLLECTIONS, "[]") ?: "[]")
-        buildList {
-            for (i in 0 until array.length()) {
-                val obj = array.optJSONObject(i) ?: continue
-                val browseId = obj.optString("browseId").takeIf { it.isNotBlank() } ?: continue
-                val type = runCatching {
-                    BrowseType.valueOf(obj.optString("type", BrowseType.ALBUM.name))
-                }.getOrDefault(BrowseType.ALBUM)
-                if (type != BrowseType.ALBUM && type != BrowseType.PLAYLIST) continue
-                add(
-                    ShelfItem(
-                        title = obj.optString("title"),
-                        subtitle = obj.optString("subtitle"),
-                        thumbnailUrl = obj.nullableString("thumbnailUrl"),
-                        videoId = null,
-                        browseId = browseId,
-                        isExplicit = obj.optBoolean("isExplicit", false),
-                        type = type,
-                    ),
-                )
+    private fun readCollections(context: Context): List<ShelfItem> {
+        collectionSnapshot?.let { return it }
+        return runCatching {
+            val array = JSONArray(prefs(context).getString(KEY_COLLECTIONS, "[]") ?: "[]")
+            buildList {
+                for (i in 0 until array.length()) {
+                    val obj = array.optJSONObject(i) ?: continue
+                    val browseId = obj.optString("browseId").takeIf { it.isNotBlank() } ?: continue
+                    val type = runCatching {
+                        BrowseType.valueOf(obj.optString("type", BrowseType.ALBUM.name))
+                    }.getOrDefault(BrowseType.ALBUM)
+                    if (type != BrowseType.ALBUM && type != BrowseType.PLAYLIST) continue
+                    add(
+                        ShelfItem(
+                            title = obj.optString("title"),
+                            subtitle = obj.optString("subtitle"),
+                            thumbnailUrl = obj.nullableString("thumbnailUrl"),
+                            videoId = null,
+                            browseId = browseId,
+                            isExplicit = obj.optBoolean("isExplicit", false),
+                            type = type,
+                        ),
+                    )
+                }
             }
-        }
-    }.getOrDefault(emptyList())
+        }.getOrDefault(emptyList()).also { collectionSnapshot = it }
+    }
 
     private fun writeCollections(context: Context, collections: List<ShelfItem>) {
         val array = JSONArray()
@@ -188,6 +213,10 @@ object OrbLibraryStore {
             )
         }
         prefs(context).edit().putString(KEY_COLLECTIONS, array.toString()).apply()
+        collectionSnapshot = collections.toList()
+        savedCollectionIds = collections.mapNotNullTo(HashSet()) { it.browseId }
+        savedAlbumIds = collections.filter { it.type == BrowseType.ALBUM }
+            .mapNotNullTo(HashSet()) { it.browseId }
     }
 
     private fun JSONObject.nullableString(key: String): String? =

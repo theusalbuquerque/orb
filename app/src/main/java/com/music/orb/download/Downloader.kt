@@ -40,7 +40,7 @@ import java.io.OutputStream
  */
 object Downloader {
 
-    private const val TAG = "BitChord"
+    private const val TAG = "Orb"
 
     /** Matches the range size read-ahead settled on; large enough to amortise, small enough to cancel promptly. */
     private const val CHUNK_BYTES = 2L * 1024 * 1024
@@ -90,7 +90,14 @@ object Downloader {
                 if (reresolved) error("Download refused after ${position}B (HTTP ${response.code})")
                 reresolved = true
                 Log.w(TAG, "re-resolving $videoId after HTTP ${response.code} at $position")
-                url = StreamResolver.resolveForDownload(videoId).url
+                val refreshed = StreamResolver.resolveForDownload(videoId, stream.kbps)
+                // It is not safe to stitch together two different AAC encodes:
+                // even equal byte length does not mean identical sample frames.
+                // Fail this attempt rather than silently switching quality.
+                if (refreshed.kbps != stream.kbps || refreshed.mimeType != stream.mimeType) {
+                    error("The selected audio rendition changed during download — try again")
+                }
+                url = refreshed.url
                 // Resolving again re-runs the whole client walk, and a
                 // different client can answer with a different format. Resuming
                 // one stream into the middle of another produces a file that is
@@ -104,6 +111,28 @@ object Downloader {
                 if (it.code !in 200..299) error("Download failed (HTTP ${it.code})")
                 val body = it.body ?: error("Download failed: empty response")
                 val source = body.byteStream()
+                if (it.code == 200) {
+                    // Some CDNs ignore Range and return the whole MP4. Use it
+                    // only at offset zero; issuing another range would append
+                    // duplicated audio and corrupt the saved file.
+                    check(position == 0L) {
+                        "The server stopped honoring audio byte ranges — try again"
+                    }
+                    while (true) {
+                        coroutineContext.ensureActive()
+                        val read = source.read(buffer)
+                        if (read == -1) break
+                        sink.write(buffer, 0, read)
+                        position += read
+                        check(position <= total) { "The audio response exceeded its declared length" }
+                        onProgress(position, total)
+                    }
+                    check(position == total) {
+                        "The audio response ended early — try again"
+                    }
+                    // Fully downloaded through one un-ranged response.
+                    return@withContext position.also { sink.flush() }
+                }
                 var readForChunk = 0L
                 while (readForChunk < length) {
                     coroutineContext.ensureActive()
@@ -270,6 +299,8 @@ object Downloader {
                     ?.substringAfter('/', "")
                     ?.toLongOrNull()
                     ?.takeIf { it > 0 }
+                    ?: response.header("Content-Length")?.toLongOrNull()
+                        ?.takeIf { it > 1 && response.code == 200 }
                     ?: response.header("Content-Length")?.toLongOrNull()?.takeIf { it > 0 }
             }
         }.onFailure { Log.w(TAG, "could not measure selected rendition: ${it.message}") }.getOrNull()

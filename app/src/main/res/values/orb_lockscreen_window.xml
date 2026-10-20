@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The foreground Compose surface remains opaque until the device unlocks.
+         Window translucency lets the previous app appear behind the upwards exit. -->
+    <style name="Theme.Orb.Lockscreen" parent="Theme.Orb">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowDisablePreview">true</item>
+    </style>
+</resources>

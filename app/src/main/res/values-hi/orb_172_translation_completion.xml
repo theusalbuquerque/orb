@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="expressive_greeting_overnight">नमस्ते</string>
+    <string name="account_youtube_library_partial">YouTube चैनल कनेक्ट है। आपकी निजी YouTube Music लाइब्रेरी अभी उपलब्ध नहीं है।</string>
+    <string name="download_prefer_offline_online_summary">बंद होने पर, डाउनलोड अनुभाग के बाहर सामान्य स्ट्रीमिंग होगी। ऑफ़लाइन हमेशा सहेजी गई फ़ाइलें चलेंगी।</string>
+    <string name="download_prefer_offline_online_title">ऑनलाइन होने पर भी डाउनलोड किया गया ऑडियो चलाएँ</string>
+    <string name="nerd_offline_automix_status">ऑफ़लाइन · विश्लेषण रुका हुआ है</string>
+    <string name="nerd_offline_automix_unavailable">ऑफ़लाइन Automix उपलब्ध नहीं है</string>
+    <string name="profile_photo_cannot_open">यह फ़ोटो नहीं खुल सकी। कृपया दूसरी छवि चुनें।</string>
+    <string name="profile_photo_too_large">चुनी गई फ़ोटो 50 MB से बड़ी है। अधिकतम 50 MB की छवि चुनें।</string>
+    <string name="settings_download_fallback_lower_summary">चुना गया बिटरेट उपलब्ध न होने पर ही कम बिटरेट आज़माएँ। बंद होने पर गुणवत्ता कम नहीं होगी।</string>
+    <string name="settings_download_fallback_lower_title">कम डाउनलोड गुणवत्ता की अनुमति दें</string>
+    <string name="settings_download_strict_quality_summary">डाउनलोड के लिए चुनी गई गुणवत्ता आवश्यक है; बिना अनुमति कम गुणवत्ता डाउनलोड नहीं होगी।</string>
+</resources>

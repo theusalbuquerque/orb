@@ -33,4 +33,5 @@
     <string name="donation_details_hint">Tap any field to copy it, or copy all transfer details at once.</string>
     <string name="donation_back">Back</string>
     <string name="donation_not_configured">Contribution methods are currently unavailable.</string>
+    <string name="donation_notice_after_launch">Your contribution is optional and is not part of Orb Premium. By donating, you understand that you will not gain access to any exclusive Orb Premium features.</string>
 </resources>

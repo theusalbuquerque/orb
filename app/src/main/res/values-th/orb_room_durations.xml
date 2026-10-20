@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="rooms_duration_title">ระยะเวลาของห้อง</string>
+    <string name="rooms_duration_24h">24 ชั่วโมง</string>
+    <string name="rooms_duration_3d">3 วัน</string>
+    <string name="rooms_duration_5d">5 วัน</string>
+    <string name="rooms_duration_7d">7 วัน</string>
+    <string name="rooms_duration_15d">15 วัน</string>
+    <string name="rooms_duration_indefinite">ไม่มีกำหนด</string>
+    <string name="rooms_duration_no_expiry">ไม่มีวันหมดอายุ · Orb Premium</string>
+    <string name="rooms_duration_expired">ห้องหมดอายุแล้ว</string>
+    <string name="rooms_duration_remaining_days">เหลือเวลา: %1$d วัน %2$d ชม.</string>
+    <string name="rooms_duration_remaining_hours">เหลือเวลา: %1$d ชม. %2$d นาที</string>
+    <string name="rooms_error_premium_only">ระยะเวลาไม่จำกัดต้องใช้ Orb Premium</string>
+</resources>

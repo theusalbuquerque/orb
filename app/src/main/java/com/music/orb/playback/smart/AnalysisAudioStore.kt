@@ -172,8 +172,9 @@ class AnalysisAudioStore(private val context: Context) {
     )
 
     private suspend fun resolveSeekable(videoId: String): ResolvedSeekable? {
-        val resolvedUrl = StreamResolver.resolve(videoId)
-        val headers = PlayerClient.forStreamUrl(resolvedUrl).mediaHeaders()
+        val carrier = StreamResolver.resolveImmediatePlayback(videoId)
+        val resolvedUrl = carrier.url
+        val headers = carrier.headers
         val total = resolvedUrl.toHttpUrlOrNull()?.queryParameter("clen")?.toLongOrNull()
             ?.takeIf { it > 0L }
             ?: probeLength(resolvedUrl, headers)
@@ -219,8 +220,9 @@ class AnalysisAudioStore(private val context: Context) {
     }
 
     private suspend fun download(videoId: String): File? {
-        val resolvedUrl = StreamResolver.resolve(videoId)
-        val headers = PlayerClient.forStreamUrl(resolvedUrl).mediaHeaders()
+        val carrier = StreamResolver.resolveImmediatePlayback(videoId)
+        val resolvedUrl = carrier.url
+        val headers = carrier.headers
         val total = resolvedUrl.toHttpUrlOrNull()?.queryParameter("clen")?.toLongOrNull()
             ?.takeIf { it > 0L }
             ?: probeLength(resolvedUrl, headers)

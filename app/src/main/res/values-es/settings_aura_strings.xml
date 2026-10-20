@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_home_aura">Aura</string>
+    <string name="settings_home_aura_subtitle">Muestra el degradado de fondo en Inicio. Desactívalo para reducir el consumo de batería y GPU.</string>
+</resources>

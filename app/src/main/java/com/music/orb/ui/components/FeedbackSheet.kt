@@ -19,16 +19,16 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AddPhotoAlternate
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Send
-import androidx.compose.material3.Button
+import com.music.orb.ui.components.OrbGlassButton as Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import com.music.orb.ui.components.OrbGlassIconButton as IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
+import com.music.orb.ui.components.OrbModalBottomSheet as ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import com.music.orb.ui.components.OrbGlassTextButton as TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -36,6 +36,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -118,11 +119,18 @@ fun FeedbackSheet(
         }
     }
 
+    com.music.orb.ui.components.RegisterSheetBackdrop()
+    val sheetGlassColor = orbOverlayGlassBaseColor()
     ModalBottomSheet(
-        onDismissRequest = {
-            if (!sending) onDismiss()
-        },
-    ) {
+        floatingTitle = stringResource(R.string.feedback_title),
+        onDismissRequest = onDismiss,
+        dismissEnabled = !sending,
+        containerColor = Color.Transparent,
+        shape = RoundedCornerShape(topStart = 36.dp, topEnd = 36.dp),
+        dragHandle = null,
+        navigationBarInsetInContent = true,
+        ) {
+        OrbGlassSheetSurface(sheetGlassColor, 36.dp) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -326,6 +334,7 @@ fun FeedbackSheet(
                     }
                 }
             }
+        }
         }
     }
 }

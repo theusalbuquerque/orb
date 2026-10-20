@@ -1,5 +1,6 @@
 package com.music.orb.data.innertube
 
+import com.music.orb.auth.YouTubeAuthorizationPolicy
 import com.music.orb.data.DebugLog as Log
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
@@ -74,7 +75,7 @@ object Innertube {
         "1.${DateTimeFormatter.BASIC_ISO_DATE.format(LocalDate.now(ZoneOffset.UTC))}.01.00"
     private const val WEB_REMIX_CLIENT_ID = "67"
 
-    private const val TAG = "BitChord"
+    private const val TAG = "Orb"
 
     /** Legacy browser session used only when a private Music endpoint rejects OAuth. */
     var cookie: String? = null
@@ -357,6 +358,33 @@ object Innertube {
     suspend fun browseContinuationForeground(token: String): JsonObject =
         browseContinuation(token)
 
+    /**
+     * Personal Music feeds MUST NOT silently fall back to the public catalogue.
+     * The public browse() path intentionally permits anonymous reads for fast
+     * artist/album pages; it must never back a user's own Liked Music, saved
+     * albums or playlists, because an anonymous 200 can look like an empty
+     * account library.
+     */
+    suspend fun browseAccount(browseId: String): JsonObject = postMusic(
+        endpoint = "browse",
+        authenticatedOnly = true,
+    ) {
+        put("browseId", browseId)
+        put("contentCheckOk", true)
+        put("racyCheckOk", true)
+    }
+
+    /** Continuations inherit exactly the same authenticated-only policy. */
+    suspend fun browseAccountContinuation(token: String): JsonObject = postMusic(
+        endpoint = "browse",
+        query = mapOf("ctoken" to token, "continuation" to token, "type" to "next"),
+        authenticatedOnly = true,
+    ) {
+        put("continuation", token)
+        put("contentCheckOk", true)
+        put("racyCheckOk", true)
+    }
+
     /** Signed-in profile: display name, email/handle and avatar. */
     suspend fun accountMenu(): JsonObject = postMusic("account/account_menu") {}
 
@@ -568,7 +596,7 @@ object Innertube {
             }
 
         var response = send(oauthToken, if (oauthToken == null) cookie else null)
-        if (oauthToken != null && response.status.value in AUTH_REJECTION_CODES) {
+        if (oauthToken != null && YouTubeAuthorizationPolicy.isPrivateOAuthRejection(response.status.value)) {
             oauthRejectedHandler?.invoke(oauthToken)
             cookie?.let { response = send(null, it) }
         }
@@ -819,6 +847,7 @@ object Innertube {
         requestTimeoutMs: Long? = null,
         forceAnonymous: Boolean = false,
         preferLegacyCookie: Boolean = false,
+        authenticatedOnly: Boolean = false,
         bodyExtras: JsonObjectBuilder.() -> Unit,
     ): JsonObject {
         // Foreground catalogue reads do not need account state. Most importantly,
@@ -835,6 +864,12 @@ object Innertube {
             } else {
                 null
             }
+
+        // No OAuth token and no legacy session means that this request cannot
+        // read the user's personal library. Never send it as a guest.
+        if (!MusicBrowseAccessPolicy.maySend(authenticatedOnly, oauthToken != null, cookie != null)) {
+            throw NotSignedInException()
+        }
 
         suspend fun send(token: String?, legacyCookie: String?): HttpResponse = withRetry {
             client.post("$MUSIC_BASE/$endpoint") {
@@ -890,12 +925,12 @@ object Innertube {
             send(oauthToken, if (oauthToken == null) cookie else null)
         }
 
-        if (!forceAnonymous && oauthToken != null && response.status.value in AUTH_REJECTION_CODES) {
+        if (!forceAnonymous && oauthToken != null && YouTubeAuthorizationPolicy.isPrivateOAuthRejection(response.status.value)) {
             Log.w(TAG, "OAuth rejected by $endpoint (${response.status.value}); trying compatibility auth")
             oauthRejectedHandler?.invoke(oauthToken)
             response = when {
                 cookie != null -> send(null, cookie)
-                allowAnonymousFallback -> send(null, null)
+                MusicBrowseAccessPolicy.mayFallbackAnonymously(authenticatedOnly, allowAnonymousFallback) -> send(null, null)
                 else -> response
             }
         }
@@ -912,7 +947,7 @@ object Innertube {
             }
             response = when {
                 fallbackOAuth != null -> send(fallbackOAuth, null)
-                allowAnonymousFallback -> send(null, null)
+                MusicBrowseAccessPolicy.mayFallbackAnonymously(authenticatedOnly, allowAnonymousFallback) -> send(null, null)
                 else -> response
             }
         }
@@ -925,6 +960,13 @@ object Innertube {
         }
 
         val body = response.body<JsonObject>()
+        if (authenticatedOnly) {
+            // Innertube sometimes returns HTTP 200 with an embedded error,
+            // especially when a signed-in operation is refused.
+            body["error"]?.let {
+                throw IllegalStateException("YouTube Music denied an authenticated library request")
+            }
+        }
         if (visitorData == null) {
             visitorData = body["responseContext"]?.jsonObject
                 ?.get("visitorData")?.jsonPrimitive?.content
@@ -1016,7 +1058,7 @@ object Innertube {
         if (
             authenticated &&
             oauthToken != null &&
-            response.status.value in AUTH_REJECTION_CODES
+            YouTubeAuthorizationPolicy.isPrivateOAuthRejection(response.status.value)
         ) {
             oauthRejectedHandler?.invoke(oauthToken)
             cookie?.let { response = send(null, it) }
@@ -1068,7 +1110,6 @@ object Innertube {
         }
     }
 
-    private val AUTH_REJECTION_CODES = setOf(400, 401, 403)
     private val LEGACY_AUTH_REJECTION_CODES = setOf(401, 403)
 
     private fun sapisidFrom(cookieHeader: String): String? =

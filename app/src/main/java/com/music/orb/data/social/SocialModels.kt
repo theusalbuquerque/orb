@@ -24,10 +24,21 @@ data class OrbProfile(
     @SerialName("favorite_artists_visibility") val favoriteArtistsVisibility: String? = null,
     @SerialName("favorite_albums_visibility") val favoriteAlbumsVisibility: String? = null,
     @SerialName("favorite_songs_visibility") val favoriteSongsVisibility: String? = null,
+    @SerialName("recent_ratings_visibility") val recentRatingsVisibility: String? = null,
     @SerialName("country_code") val countryCode: String? = null,
     @SerialName("language_code") val languageCode: String? = null,
     @SerialName("locale_tag") val localeTag: String? = null,
     @SerialName("locale_updated_at") val localeUpdatedAt: String? = null,
+)
+
+
+@Serializable
+data class ProfileAlbumRatingRow(
+    @SerialName("user_id") val userId: String,
+    @SerialName("album_id") val albumId: String,
+    @SerialName("rating_tenths") val ratingTenths: Int,
+    @SerialName("updated_at") val updatedAt: String,
+    @SerialName("is_public") val isPublic: Boolean = false,
 )
 
 @Serializable
@@ -220,6 +231,7 @@ fun ListeningActivity.reachedSocialFeedThreshold(): Boolean =
 
 @Serializable
 internal data class ListeningActivityInsert(
+    @SerialName("session_token") val sessionToken: String,
     @SerialName("user_id") val userId: String,
     @SerialName("video_id") val videoId: String,
     @SerialName("tidal_id") val tidalId: String? = null,

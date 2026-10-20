@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="artist_reviews_title">Recent ratings</string>
+    <string name="artist_reviews_sign_in">Sign in to see album ratings.</string>
+    <string name="artist_reviews_error">Could not load ratings. Please try again.</string>
+    <string name="artist_reviews_empty">No public ratings for these albums yet.</string>
+    <string name="artist_reviews_user">User</string>
+    <string name="artist_reviews_album">Album</string>
+    <string name="artist_reviews_public_note">Your rating will be public, with your photo and username.</string>
+</resources>

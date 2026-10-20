@@ -1,6 +1,5 @@
 package com.music.orb.data.lyrics
 
-import com.music.orb.data.settings.AppSettings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -16,9 +15,8 @@ import java.util.Locale
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 
-/** Public Apple lyrics plus optional authenticated Spotify and Musixmatch routes. */
+/** Public Apple Music lyrics through PaxSenix. */
 object PaxSenix {
-    private const val API = "https://api.paxsenix.org"
     private const val PUBLIC_PROXY = "https://lyrics.paxsenix.org"
     private const val APPLE_SEARCH = "https://amp-api.music.apple.com/v1/catalog/us/search"
     private val tokenMutex = Mutex()
@@ -36,38 +34,6 @@ object PaxSenix {
             .addQueryParameter("ttml", "true")
             .build()
         lyricsGet(url.toString())?.let(ProviderLyrics::parse)
-    }
-
-    suspend fun spotifyLyrics(title: String, artist: String, durationMs: Long): List<LyricLine>? =
-        withContext(Dispatchers.IO) {
-            val key = AppSettings.paxSenixApiKey.value.takeIf { it.isNotBlank() } ?: return@withContext null
-            val search = "$API/spotify/search".toHttpUrl().newBuilder()
-                .addQueryParameter("q", "$title $artist").build()
-            val id = lyricsGetBearer(search.toString(), key)?.let { raw -> bestCandidateId(raw, title, artist, durationMs) }
-            val direct = id?.let {
-                val url = "$API/lyrics/spotify".toHttpUrl().newBuilder().addQueryParameter("id", it).build()
-                lyricsGetBearer(url.toString(), key)?.let(ProviderLyrics::parse)
-            }
-            direct ?: genericAuthenticatedLyrics(title, artist)
-        }
-
-    suspend fun musixmatchLyrics(title: String, artist: String, durationMs: Long): List<LyricLine>? =
-        withContext(Dispatchers.IO) {
-            val key = AppSettings.paxSenixApiKey.value.takeIf { it.isNotBlank() } ?: return@withContext null
-            val url = "$API/lyrics/musixmatch".toHttpUrl().newBuilder()
-                .addQueryParameter("t", title)
-                .addQueryParameter("a", artist)
-                .addQueryParameter("d", (durationMs / 1000).toString())
-                .build()
-            lyricsGetBearer(url.toString(), key)?.let(ProviderLyrics::parse)
-                ?: genericAuthenticatedLyrics(title, artist)
-        }
-
-    private fun genericAuthenticatedLyrics(title: String, artist: String): List<LyricLine>? {
-        val key = AppSettings.paxSenixApiKey.value.takeIf { it.isNotBlank() } ?: return null
-        val url = "$API/lyrics/lrcget".toHttpUrl().newBuilder()
-            .addQueryParameter("q", "$title $artist").build()
-        return lyricsGetBearer(url.toString(), key)?.let(ProviderLyrics::parse)
     }
 
     private suspend fun searchPublicAppleTrackId(title: String, artist: String, durationMs: Long): String? {

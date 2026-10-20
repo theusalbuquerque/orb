@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="experimental_feature_confirm">Entendido</string>
+    <string name="audio_lossless_experimental_title">Audio Lossless experimental</string>
+    <string name="audio_lossless_experimental_message">La reproducción Lossless y Hi-Res Lossless todavía es experimental y puede no funcionar correctamente con todas las canciones por ahora. Por ahora, Lossless y Hi-Res Lossless funcionan únicamente en redes Wi-Fi.</string>
+    <string name="automix_experimental_title">Automix experimental</string>
+    <string name="automix_experimental_message">Automix todavía es experimental y puede no funcionar correctamente con todas las canciones o transiciones por ahora. Si el teléfono se calienta demasiado o Android empieza a detener Orb automáticamente, desactiva Automix.</string>
+</resources>

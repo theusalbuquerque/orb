@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="source_tidal_available">TIDAL Lossless disponible</string>
+    <string name="source_tidal_unavailable">TIDAL Lossless no está disponible en este momento</string>
+</resources>

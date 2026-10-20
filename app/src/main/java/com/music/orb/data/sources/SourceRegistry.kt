@@ -31,9 +31,9 @@ data class SourceConfig(
     val isComplete: Boolean get() = !kind.needsServer || baseUrl.isNotBlank()
 }
 
-/** Source registry following the fixed BitChord v1.5 order. */
+/** Source registry following the fixed Orb v1.5 order. */
 object SourceRegistry {
-    private const val TAG = "BitChord"
+    private const val TAG = "Orb"
     private lateinit var prefs: SharedPreferences
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     val configs = MutableStateFlow<List<SourceConfig>>(emptyList())
@@ -119,6 +119,42 @@ object SourceRegistry {
     }
 
     fun customModule(): SourceConfig? = configs.value.firstOrNull { it.kind == SourceKind.CUSTOM_MODULE }
+
+    /**
+     * Account-sync snapshot. Do not upload a user-configured URL when it embeds
+     * credentials (user-info or a secret-bearing query parameter). An endpoint
+     * that contains such credentials remains usable locally but must be set up
+     * explicitly on other devices.
+     */
+    fun accountSyncSnapshot(): List<SourceConfig> = configs.value.filter { config ->
+        val url = config.baseUrl.trim()
+        if (url.isBlank()) return@filter true
+        val parsed = runCatching { Uri.parse(url) }.getOrNull() ?: return@filter false
+        val hasUserInfo = parsed.encodedAuthority?.contains('@') == true
+        val secretParameter = runCatching { parsed.queryParameterNames.any { name ->
+            name.lowercase() in setOf(
+                "key", "api_key", "apikey", "token", "access_token", "refresh_token",
+                "secret", "password", "passwd", "auth", "authorization", "signature",
+            )
+        } }.getOrDefault(true)
+        !hasUserInfo && !secretParameter
+    }
+
+    /** Prevent custom sources belonging to an old Orb account from leaking to a new one. */
+    fun resetAccountSyncSources() {
+        if (!::prefs.isInitialized) return
+        publish(BUILT_IN_KINDS.map { kind -> SourceConfig(kind = kind, enabled = true) })
+    }
+
+    /** Applies source ordering/enabled state and non-secret endpoints restored for the Orb account. */
+    fun applyAccountSyncSnapshot(value: List<SourceConfig>) {
+        if (!::prefs.isInitialized || value.isEmpty()) return
+        val remote = value.distinctBy { it.id }
+        val missingBuiltIns = configs.value.filter { local ->
+            local.kind in BUILT_IN_KINDS && remote.none { it.kind == local.kind }
+        }
+        publish(remote + missingBuiltIns)
+    }
 
     fun setCustomModule(url: String, label: String = "") {
         val trimmed = url.trim()

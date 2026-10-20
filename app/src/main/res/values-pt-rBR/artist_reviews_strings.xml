@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="artist_reviews_title">Últimas avaliações</string>
+    <string name="artist_reviews_sign_in">Entre na sua conta para ver as avaliações dos álbuns.</string>
+    <string name="artist_reviews_error">Não foi possível carregar as avaliações. Tente novamente.</string>
+    <string name="artist_reviews_empty">Ainda não há avaliações públicas destes álbuns.</string>
+    <string name="artist_reviews_user">Usuário</string>
+    <string name="artist_reviews_album">Álbum</string>
+    <string name="artist_reviews_public_note">Sua avaliação será pública, com sua foto e username.</string>
+</resources>

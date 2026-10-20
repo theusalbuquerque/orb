@@ -4,7 +4,7 @@
 #include <array>
 #include <cmath>
 #include <numeric>
-namespace bitchord::smart { namespace { double clamp01(double x){return std::clamp(x,0.0,1.0);} }
+namespace orb::smart { namespace { double clamp01(double x){return std::clamp(x,0.0,1.0);} }
 AnalysisResult AnalyzeAudio(const std::vector<float>& s,double sr,double duration){AnalysisResult r; if(s.empty()||sr<=0)return r;r.duration=duration>0?duration:s.size()/sr;
  const size_t win=std::max<size_t>(128,(size_t)std::round(sr*0.20)),hop=std::max<size_t>(64,(size_t)std::round(sr*0.10)); std::vector<double> env,onset; double prev=0,lp=0; const double alpha=std::exp(-2*3.141592653589793*180.0/sr);
  for(size_t st=0;st<s.size();st+=hop){size_t en=std::min(s.size(),st+win);double e=0,le=0;for(size_t i=st;i<en;++i){double v=s[i];e+=v*v;lp=(1-alpha)*v+alpha*lp;le+=lp*lp;}e=std::sqrt(e/std::max<size_t>(1,en-st));le=std::sqrt(le/std::max<size_t>(1,en-st));double t=(st+(en-st)/2.0)/sr;env.push_back(e);r.energy_curve.push_back({t,e});r.low_energy_curve.push_back({t,le});const double non_low=std::sqrt(std::max(0.0,e*e-le*le));r.mid_energy_curve.push_back({t,non_low*0.72});r.high_energy_curve.push_back({t,non_low*0.28});onset.push_back(std::max(0.0,e-prev));prev=e;if(en==s.size())break;}

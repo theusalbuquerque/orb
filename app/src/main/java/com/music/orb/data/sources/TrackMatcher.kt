@@ -90,6 +90,9 @@ object TrackMatcher {
             // Album-aware lookup first. Search engines are allowed to return
             // covers and alternate releases; giving them the requested release
             // helps discovery before identity checks even begin.
+            if (artist.isNotBlank() && album.isNotBlank() && target.releaseYear != null) {
+                add("$title $artist $album ${target.releaseYear}")
+            }
             if (artist.isNotBlank() && album.isNotBlank()) add("$title $artist $album")
             if (artist.isNotBlank()) add("$title $artist")
             add(title)
@@ -256,7 +259,11 @@ object TrackMatcher {
      * compatible release too. A common deluxe/expanded reissue is accepted as
      * the same release family; an unrelated tribute/cover compilation is not.
      */
-    internal fun verifiedForSubstitution(candidate: Song, target: Target): Boolean {
+    internal fun verifiedForSubstitution(
+        candidate: Song,
+        target: Target,
+        allowSingleAlbumRelease: Boolean = false,
+    ): Boolean {
         // Do the title/artist/version/duration check first without release veto;
         // release-family compatibility is handled below so a legitimate deluxe
         // reissue can still satisfy an original-album request.
@@ -276,15 +283,69 @@ object TrackMatcher {
         val wantedAlbum = target.albumName?.takeIf { it.isNotBlank() }
         if (wantedAlbum != null) {
             val gotAlbum = candidate.albumName?.takeIf { it.isNotBlank() } ?: return false
-            if (!sameReleaseFamily(wantedAlbum, gotAlbum)) return false
+            // For offline lookups only: a label can publish the exact same studio
+            // master as both an album track and a self-titled single. Keep the
+            // usual release-family gate for playback and every other mismatch.
+            if (!sameReleaseFamily(wantedAlbum, gotAlbum) &&
+                !(allowSingleAlbumRelease && verifiedSingleAlbumPair(candidate, target, wantedAlbum, gotAlbum))
+            ) return false
         }
 
         if (target.releaseYear != null && candidate.releaseYear != null &&
             candidate.releaseYear != target.releaseYear
         ) {
-            return false
+            // A verified same-album-family reissue can have a newer year.
+            // Do not reject the recording solely for the publication date;
+            // title, credited artists, take, album family and duration are
+            // still mandatory above. Unrelated or unknown releases remain vetoed.
+            val reissueAlbum = candidate.albumName?.takeIf { it.isNotBlank() }
+            if (wantedAlbum == null || reissueAlbum == null ||
+                !sameReleaseFamily(wantedAlbum, reissueAlbum)
+            ) return false
         }
         return true
+    }
+
+    /**
+     * Exception for an official recording listed once on an album and once as
+     * its own single. This is *not* permission to ignore differing albums:
+     * the single package must be named after the track itself, and both
+     * catalogues must report near-identical runtimes and full artist credits.
+     *
+     * Without an ISRC on Song we cannot prove that two differently packaged
+     * masters are equal. Consequently this exception is confined to offline
+     * discovery, never ordinary playback substitution, and known different
+     * release years are kept as a veto.
+     */
+    private fun verifiedSingleAlbumPair(
+        candidate: Song,
+        target: Target,
+        wantedAlbum: String,
+        gotAlbum: String,
+    ): Boolean {
+        if (target.durationSec == null ||
+            !withinSeconds(candidate, target, LOSSLESS_IDENTITY_DURATION_SEC)
+        ) return false
+        if (target.releaseYear != null && candidate.releaseYear != null &&
+            target.releaseYear != candidate.releaseYear
+        ) return false
+        // A different guest credit, version, or cover must never be excused by
+        // the fact that some release happens to be titled after the song.
+        if (artistNames(target.artist) != artistNames(candidate.artist)) return false
+        if (looksLikeCover(target.title, wantedAlbum) ||
+            looksLikeCover(candidate.title, gotAlbum)
+        ) return false
+        return isSelfTitledSingle(wantedAlbum, target.title) ||
+            isSelfTitledSingle(gotAlbum, target.title)
+    }
+
+    private fun isSelfTitledSingle(album: String, title: String): Boolean {
+        // Stores commonly expose "Underwater" or "Underwater - Single" for
+        // the very same single. Do not accept EP, remix packs, compilations or
+        // a loose substring match such as "Underwater Sessions".
+        val packageTitle = album.replace(SINGLE_RELEASE_SUFFIX, "").trim()
+        return releaseCore(packageTitle).isNotBlank() &&
+            releaseCore(packageTitle) == releaseCore(searchableTitle(title))
     }
 
     /**
@@ -471,15 +532,9 @@ object TrackMatcher {
         .filter { it.isNotEmpty() }
         .toSet()
 
-    private fun sameArtist(a: List<String>, b: List<String>) = runOf(a, b) || runOf(b, a)
-
-    /** Whether [outer] contains [inner] as a run of whole words. */
-    private fun runOf(outer: List<String>, inner: List<String>): Boolean {
-        if (inner.isEmpty() || inner.size > outer.size) return false
-        return (0..outer.size - inner.size).any { at ->
-            outer.subList(at, at + inner.size) == inner
-        }
-    }
+    // Matching a proper name by word containment accepts "Michael!" as
+    // "Michael Jackson". A recording identity needs the *complete* credit.
+    private fun sameArtist(a: List<String>, b: List<String>) = a == b
 
     // ── Release identity ───────────────────────────────────────────────────
 
@@ -608,6 +663,7 @@ object TrackMatcher {
     private val NON_ALNUM = Regex("""[^a-z0-9]""")
     private val DIACRITICS = Regex("""\p{M}+""")
     private val RELEASE_NON_ALNUM = Regex("""[^a-z0-9]""")
+    private val SINGLE_RELEASE_SUFFIX = Regex("""(?i)\s*(?:[-–—:]\s*single|\(single\))\s*$""")
     private val ARTIST_SEPARATORS =
         Regex("""\s*(?:[,&/;·|]|\band\b|\bx\b|\bvs\.?\b|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b|\bwith\b)\s*""")
 

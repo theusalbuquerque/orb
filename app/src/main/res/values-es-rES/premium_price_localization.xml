@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="premium_price_unavailable">Precio mensual no disponible</string>
+    <string name="premium_price_approximate">Conversión aproximada; tu banco puede aplicar otro cambio o comisiones.</string>
+    <string name="premium_price_actual_brl">Cobro en BRL: %1$s</string>
+</resources>

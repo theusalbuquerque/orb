@@ -1,0 +1,6 @@
+<resources>
+    <string name="history_device_phone">Celular</string>
+    <string name="history_device_tablet">Tablet</string>
+    <string name="history_device_computer">Computador</string>
+    <string name="history_device_unknown">Dispositivo desconhecido</string>
+</resources>

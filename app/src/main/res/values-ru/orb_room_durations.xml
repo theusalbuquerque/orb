@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="rooms_duration_title">Срок действия комнаты</string>
+    <string name="rooms_duration_24h">24 часа</string>
+    <string name="rooms_duration_3d">3 дня</string>
+    <string name="rooms_duration_5d">5 дней</string>
+    <string name="rooms_duration_7d">7 дней</string>
+    <string name="rooms_duration_15d">15 дней</string>
+    <string name="rooms_duration_indefinite">Без ограничения</string>
+    <string name="rooms_duration_no_expiry">Без срока действия · Orb Premium</string>
+    <string name="rooms_duration_expired">Срок комнаты истёк</string>
+    <string name="rooms_duration_remaining_days">Осталось: %1$d дн. %2$d ч</string>
+    <string name="rooms_duration_remaining_hours">Осталось: %1$d ч %2$d мин</string>
+    <string name="rooms_error_premium_only">Неограниченный срок доступен с Orb Premium.</string>
+</resources>

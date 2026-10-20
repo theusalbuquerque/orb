@@ -71,7 +71,7 @@ object StreamChoice {
             chosen.remove(videoId)
             PlaybackStreamStore.forget(videoId)
             TrackLog.w(
-                "BitChord",
+                "Orb",
                 "discarded malformed remembered stream for $videoId: " +
                     choice.stream.url.streamOriginForLog(),
                 about = videoId,
@@ -93,7 +93,7 @@ object StreamChoice {
     fun remember(videoId: String, stream: SourceStream, substituted: Boolean) {
         if (!stream.hasPlayableHttpUrl()) {
             TrackLog.w(
-                "BitChord",
+                "Orb",
                 "refused to remember malformed stream for $videoId: " +
                     stream.url.streamOriginForLog(),
                 about = videoId,

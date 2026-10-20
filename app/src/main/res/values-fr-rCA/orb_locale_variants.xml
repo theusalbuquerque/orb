@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_downloads_title">Téléchargements</string>
+    <string name="settings_download_preferences">Préférences de téléchargement</string>
+    <string name="settings_storage">Stockage</string>
+</resources>

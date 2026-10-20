@@ -21,6 +21,50 @@ import kotlinx.coroutines.sync.withLock
  * row when real forward playback reaches 30%. No audio bytes are ever uploaded.
  */
 class SocialPlaybackReporter {
+    init { PlaybackContinuity.reporter = this }
+    private var continuation: PlaybackContinuation? = null
+    private var nextTransfer: PlaybackContinuation? = null
+    private var lastAttribution: String? = null
+    private var lastStatsProgressMs = 0L
+
+    internal fun transferSnapshot(songId: String): PlaybackContinuation? =
+        continuation?.takeIf { currentSong?.videoId == songId }
+
+    internal fun adoptTransfer(value: PlaybackContinuation?) {
+        nextTransfer = value
+        if (value != null && currentSong?.videoId == value.songId) restoreTransfer(value)
+    }
+
+    private fun restoreTransfer(value: PlaybackContinuation) {
+        continuation = value
+        lastAttribution = null
+        lastStatsProgressMs = 0L
+        currentStartedAtMs = value.startedAtMs
+        listenedMs = value.listenedMs
+        qualifiedPlaybackRecorded = value.qualifiedAtMs > 0L
+        activityRowRecorded = false
+        socialFeedThresholdPublished = listenedMs >= SOCIAL_FEED_THRESHOLD_MS
+        nextTransfer = null
+    }
+
+    internal fun relinquishTransfer(songId: String) {
+        if (currentSong?.videoId != songId) return
+        socialFeedPersistJob?.cancel()
+        currentSong = null
+        continuation = null
+        currentlyPlaying = false
+        lastProgressElapsedMs = 0L
+    }
+
+    private fun updateHistory(song: Song) {
+        val value = continuation ?: return
+        if (value.qualifiedAtMs <= 0L) return
+        val attributedDevice = value.attributedDevice(currentDurationMs)
+        lastAttribution = attributedDevice
+        RecentPlaybackStore.record(song, value.qualifiedAtMs, value.startedAtMs,
+            value.eventId, attributedDevice, value.listenedMs)
+    }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private var currentSong: Song? = null
@@ -44,6 +88,10 @@ class SocialPlaybackReporter {
         durationMs: Long?,
         positionMs: Long,
     ) {
+        if (!isPlaying && currentlyPlaying && song != null && sameSong(currentSong, song)) {
+            onProgress(song, positionMs, durationMs)
+            updateHistory(song)
+        }
         if (song != null && !sameSong(currentSong, song)) {
             currentSong = song
             currentStartedAtMs = System.currentTimeMillis()
@@ -148,7 +196,15 @@ class SocialPlaybackReporter {
         // running. Requiring forward progress and capping by wall-clock time
         // prevents a seek straight to the end from becoming a fake listen.
         if (positionDelta > 0L && elapsedDelta > 0L && positionDelta <= MAX_PROGRESS_DELTA_MS) {
-            listenedMs += minOf(positionDelta, elapsedDelta + PROGRESS_JITTER_MS)
+            val heard = minOf(positionDelta, elapsedDelta + PROGRESS_JITTER_MS)
+            listenedMs += heard
+            continuation?.let { value ->
+                val device = RecentPlaybackStore.currentDeviceId
+                continuation = value.copy(
+                    deviceMs = value.deviceMs + (device to ((value.deviceMs[device] ?: 0L) + heard)),
+                    deviceTypes = value.deviceTypes + (device to RecentPlaybackStore.currentDeviceType),
+                )
+            }
         }
         lastObservedPositionMs = position
         lastProgressElapsedMs = nowElapsed
@@ -159,6 +215,13 @@ class SocialPlaybackReporter {
         }
         if (!qualifiedPlaybackRecorded && hasReachedListenThreshold()) {
             recordQualifiedPlayback(song)
+        }
+        if (qualifiedPlaybackRecorded) {
+            if (continuation?.attributedDevice(currentDurationMs) != lastAttribution) updateHistory(song)
+            if (nowElapsed - lastStatsProgressMs >= 30_000L) {
+                lastStatsProgressMs = nowElapsed
+                updateQualifiedPlayback(song, System.currentTimeMillis(), listenedMs)
+            }
         }
         publish(song, force = false)
     }
@@ -187,6 +250,11 @@ class SocialPlaybackReporter {
 
     private fun resetThreshold(positionMs: Long, isPlaying: Boolean) {
         listenedMs = 0L
+        lastAttribution = null
+        lastStatsProgressMs = 0L
+        continuation = currentSong?.let { song ->
+            PlaybackContinuation(java.util.UUID.randomUUID().toString(), song.videoId, currentStartedAtMs)
+        }
         lastObservedPositionMs = positionMs.coerceAtLeast(0L)
         lastProgressElapsedMs = if (isPlaying) SystemClock.elapsedRealtime() else 0L
         qualifiedPlaybackRecorded = false
@@ -195,6 +263,7 @@ class SocialPlaybackReporter {
         socialFeedPersistJob?.cancel()
         socialFeedPersistJob = null
         currentlyPlaying = isPlaying
+        nextTransfer?.takeIf { it.songId == currentSong?.videoId }?.let(::restoreTransfer)
     }
 
     private fun hasReachedListenThreshold(): Boolean {
@@ -210,11 +279,10 @@ class SocialPlaybackReporter {
         val duration = durationMs?.takeIf { it > 0L }
         currentDurationMs = duration ?: currentDurationMs
 
-        // A natural completion is trustworthy even when the five-second
-        // sampler did not observe the final slice of a very short track.
-        if (previousEnded && duration != null) {
-            listenedMs = maxOf(listenedMs, duration)
-        }
+        // Keep actual audible time across transfers; reaching the end cannot
+        // assign the whole duration to the receiving device.
+        continuation?.let { listenedMs = it.listenedMs }
+        updateHistory(song)
 
         val finishedAtMs = System.currentTimeMillis()
         if (activityRowRecorded) {
@@ -244,11 +312,8 @@ class SocialPlaybackReporter {
         if (qualifiedPlaybackRecorded) return
         qualifiedPlaybackRecorded = true
         val qualifiedAtMs = System.currentTimeMillis()
-        RecentPlaybackStore.record(
-            song = song,
-            playedAtMs = qualifiedAtMs,
-            startedAtMs = currentStartedAtMs,
-        )
+        continuation = continuation?.copy(qualifiedAtMs = qualifiedAtMs)
+        updateHistory(song)
         if (activityRowRecorded) {
             updateQualifiedPlayback(
                 song = song,
@@ -363,6 +428,7 @@ class SocialPlaybackReporter {
         CoroutineScope(Dispatchers.IO).launch {
             runCatching { SocialRepository.clearNowPlaying() }
         }
+        if (PlaybackContinuity.reporter === this) PlaybackContinuity.reporter = null
         scope.cancel()
     }
 

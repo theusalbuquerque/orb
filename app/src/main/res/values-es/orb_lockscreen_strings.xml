@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_orb_lockscreen">Orb Lock</string>
+    <string name="settings_orb_lockscreen_subtitle">Personaliza Orb Lock, la pantalla y los permisos.</string>
+    <string name="orb_lockscreen_previous">Anterior</string>
+    <string name="orb_lockscreen_next">Siguiente</string>
+    <string name="orb_lockscreen_pause">Pausar</string>
+    <string name="orb_lockscreen_play">Reproducir</string>
+    <string name="orb_lockscreen_cast">Cast</string>
+    <string name="orb_lockscreen_shuffle">Aleatorio</string>
+    <string name="orb_lockscreen_repeat">Repetir</string>
+    <string name="orb_lockscreen_lyrics">Letras</string>
+    <string name="orb_lockscreen_queue">Cola</string>
+    <string name="orb_lockscreen_sync_lyrics">Letras sincronizadas</string>
+    <string name="orb_lockscreen_close">Cerrar</string>
+    <string name="orb_lockscreen_play_queue">Reproducir</string>
+    <string name="orb_lockscreen_lyrics_unavailable">Letras no disponibles</string>
+    <string name="orb_lockscreen_lyrics_loading">Buscando letras…</string>
+    <string name="orb_lockscreen_swipe_to_unlock">Desliza para desbloquear</string>
+    <string name="orb_lockscreen_overlay_permission_title">Permitir apertura automática</string>
+    <string name="orb_lockscreen_overlay_permission_subtitle">Autoriza “Mostrar sobre otras apps” para abrir Orb al bloquear, incluso desde otra aplicación.</string>
+    <string name="orb_lockscreen_overlay_permission_granted">Permiso concedido · solo con el teléfono bloqueado</string>
+    <string name="orb_lockscreen_always_on_title">Mantener pantalla encendida</string>
+    <string name="orb_lockscreen_always_on_subtitle">Mantiene Orb Lock visible. No es el AOD de bajo consumo del sistema; consume más batería y puede marcar pantallas OLED.</string>
+    <string name="orb_lockscreen_brightness_title">Brillo de Orb Lock</string>
+    <string name="orb_lockscreen_brightness_subtitle">Solo cambia el brillo de esta pantalla; no modifica el brillo general.</string>
+    <string name="orb_lock_settings_header">Personalización de Orb Lock</string>
+    <string name="orb_lock_power_saving_title">Fondo de menor consumo</string>
+    <string name="orb_lock_power_saving_subtitle">Utiliza un fondo completamente negro, sin desenfoque de portada, para reducir el consumo de energía en pantallas OLED.</string>
+    <string name="orb_lock_premium_info">Orb Lock está disponible con Orb Premium.</string>
+    <string name="orb_lock_premium_label">Premium</string>
+    <string name="orb_lock_enabled_subtitle">Disponible con Premium</string>
+</resources>

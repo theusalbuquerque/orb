@@ -101,9 +101,38 @@ object TidalService {
     /** Short-lived raw search cache; verified quality knowledge is persisted separately. */
     private val searchCache = ConcurrentHashMap<String, SearchCacheEntry>()
 
-    /** Per-host circuit breaker so one bad public mirror cannot be hammered by every badge. */
+    /**
+     * Circuit breakers are keyed by host, operation AND media endpoint.
+     * A rejected manifest (e.g. 403) must not suppress catalog searches,
+     * a compatible /track fallback, or another allowed manifest usage.
+     */
     private val hostCooldownUntil = ConcurrentHashMap<String, Long>()
     private val hostFailures = ConcurrentHashMap<String, Int>()
+    private val lastCooldownLogMs = ConcurrentHashMap<String, Long>()
+
+    private fun circuitKey(url: String): String? = runCatching {
+        val parsed = URL(url)
+        val path = parsed.path.trim('/').substringBefore('/').lowercase()
+        val category = when (path) {
+            "search", "album" -> "catalogue"
+            "trackmanifests" -> {
+                // A rejected DOWNLOAD request does not invalidate PLAYBACK, or
+                // older /track endpoints on this mirror. Never suppress every
+                // way to resolve a track because one operation returned 403.
+                val usage = if (parsed.query.orEmpty().contains("usage=DOWNLOAD", true)) {
+                    "download"
+                } else "playback"
+                "media/trackManifests/$usage"
+            }
+            "track" -> "media/track"
+            // Queue polling IDs and signed CDN MPDs are resource-specific.
+            // An expired signature must not blacklist unrelated audio files.
+            // Hash the path so private manifest identifiers never reach Logcat.
+            "playback" -> "media/queue/${parsed.path.hashCode().toString(16)}"
+            else -> "media/resource/${parsed.path.hashCode().toString(16)}"
+        }
+        "${parsed.host.lowercase()}|$category"
+    }.getOrNull()
 
     /** hifi-api permits one in-flight playback request per playback credential. */
     private val playbackGate = Semaphore(1)
@@ -137,8 +166,14 @@ object TidalService {
         false
     }
 
-    suspend fun search(query: String, limit: Int = 25): List<Track> = withContext(Dispatchers.IO) {
-        if (!AppSettings.losslessAudio.value || query.isBlank()) return@withContext emptyList()
+    suspend fun search(
+        query: String,
+        limit: Int = 25,
+        forDownload: Boolean = false,
+    ): List<Track> = withContext(Dispatchers.IO) {
+        if (query.isBlank() || (!forDownload && !AppSettings.losslessAudio.value)) {
+            return@withContext emptyList()
+        }
 
         val cacheKey = query.trim().lowercase().replace(Regex("\\s+"), " ")
         val now = System.currentTimeMillis()
@@ -148,8 +183,12 @@ object TidalService {
 
         val encoded = URLEncoder.encode(query, Charsets.UTF_8.name())
 
+        var reachableSearchResponses = 0
         for (base in orderedInstances()) {
-            val body = requestText("$base/search/?s=$encoded") ?: continue
+            val body = requestText(
+                "$base/search/?s=$encoded", allowForDownload = forDownload,
+            ) ?: continue
+            reachableSearchResponses++
             val tracks = parseSearch(body)
 
             if (tracks.isNotEmpty()) {
@@ -159,6 +198,12 @@ object TidalService {
             }
         }
 
+        // 0 results is not the same as a successful search with no matches.
+        // Surface the difference in Logcat instead of making the matcher look
+        // responsible for an unavailable backend or a cooling-down mirror.
+        TrackLog.d(TAG, "search '$query' no candidates: " +
+            "successfulResponses=$reachableSearchResponses, mirrors=${orderedInstances().size}, " +
+            "purpose=${if (forDownload) "download" else "playback"}")
         emptyList()
     }
 
@@ -212,6 +257,124 @@ object TidalService {
     }
 
     /**
+     * Independent Premium download resolution. Reuse the same verified FLAC
+     * MPEG-DASH delivery used for playback without requiring a prior play.
+     * [DashFlacDownloader] stores its original fMP4 segments losslessly.
+     *
+     * Non-adaptive BTS FLAC and legacy /track remain compatibility fallbacks.
+     * No AAC response may satisfy a Maximum request.
+     */
+    suspend fun bestLosslessDownloadStream(
+        trackId: Long,
+        preferredTier: LosslessTier,
+    ): Stream? = withContext(Dispatchers.IO) {
+        // Maximum download is an explicit Premium choice, not the playback toggle.
+        playbackGate.withPermit {
+            // The player already obtains verified FLAC from this adaptive DASH
+            // endpoint. Start with that exact lookup even when nothing has ever
+            // played: a download is responsible for resolving its own source.
+            // Trying older BTS/direct endpoints first could consume the entire
+            // download budget before ever reaching the working DASH endpoint.
+            val dash = trackManifestStream(trackId, allowForDownload = true)
+                ?.takeIf { it.codec.equals("flac", ignoreCase = true) && it.verifiedLossless }
+            // Normally the combined DASH manifest already contains the best
+            // available FLAC. If it demonstrably contains only 16-bit audio,
+            // probe a separate Hi-Res endpoint before accepting that Lossless
+            // candidate. Never discard the valid 16-bit DASH fallback.
+            val needsHiResProbe = preferredTier == LosslessTier.HI_RES_LOSSLESS &&
+                dash != null && dash.audioQuality != "HI_RES_LOSSLESS"
+            if (dash != null && !needsHiResProbe) {
+                TrackLog.d(TAG, "independent download FLAC DASH $trackId -> ${dash.audioQuality} " +
+                    "${dash.bitDepth ?: "?"}-bit/${dash.sampleRateHz ?: "?"}Hz")
+                return@withPermit dash
+            }
+
+            // Older hifi-api servers can return FLAC as one signed file.
+            // Probe Hi-Res first; a verified Lossless DASH is retained instead
+            // of doing another identical download or incorrectly failing.
+            val qualities = when (preferredTier) {
+                LosslessTier.HI_RES_LOSSLESS -> if (dash != null) {
+                    listOf("HI_RES_LOSSLESS")
+                } else listOf("HI_RES_LOSSLESS", "LOSSLESS")
+                LosslessTier.LOSSLESS -> listOf("LOSSLESS", "HI_RES_LOSSLESS")
+                LosslessTier.NONE -> listOf("HI_RES_LOSSLESS", "LOSSLESS")
+            }
+            for (quality in qualities) {
+                val direct = directDownloadManifestStream(trackId, quality)
+                    ?.takeIf { it.codec.equals("flac", ignoreCase = true) &&
+                        (!it.isDash || it.verifiedLossless) }
+                val stream: Stream = (
+                    direct ?: streamExact(trackId, quality, forDownload = true)
+                        ?.takeIf { it.codec.equals("flac", ignoreCase = true) &&
+                            (!it.isDash || it.verifiedLossless) }
+                ) ?: continue
+                // A server's "HI_RES_LOSSLESS" label is not evidence of 24-bit
+                // if its stream metadata explicitly says 16-bit / 44.1 kHz.
+                val nativeResolutionKnown = stream.bitDepth != null || stream.sampleRateHz != null
+                val isHiRes = (stream.bitDepth ?: 0) > 16 || (stream.sampleRateHz ?: 0) > 48_000 ||
+                    (!nativeResolutionKnown && stream.audioQuality?.contains("HI_RES", true) == true)
+                if (needsHiResProbe && !isHiRes) continue
+                TrackLog.d(TAG, "independent download FLAC $trackId -> ${stream.audioQuality} " +
+                    "${stream.bitDepth ?: "?"}-bit/${stream.sampleRateHz ?: "?"}Hz")
+                return@withPermit stream
+            }
+            if (dash != null) {
+                TrackLog.d(TAG, "independent download FLAC DASH $trackId: " +
+                    "Hi-Res unavailable; accepting verified ${dash.bitDepth ?: "?"}-bit Lossless")
+                return@withPermit dash
+            }
+            TrackLog.d(TAG, "download lookup found no verified FLAC stream for $trackId")
+            null
+        }
+    }
+
+
+    /**
+     * Retrieve a single-file FLAC from hifi-api's non-adaptive trackManifests.
+     * Never interpret an MPEG-DASH MPD as a downloadable FLAC file.
+     */
+    private suspend fun directDownloadManifestStream(trackId: Long, quality: String): Stream? {
+        val format = if (quality == "HI_RES_LOSSLESS") "FLAC_HIRES" else "FLAC"
+        for (base in orderedInstances()) {
+            val body = requestText(
+                "$base/trackManifests/?id=$trackId&quality=$quality&adaptive=false&formats=$format",
+                allowForDownload = true,
+            ) ?: continue
+            val manifestUrl = parseTrackManifestUri(body) ?: continue
+            val manifest = requestText(
+                manifestUrl,
+                accept = "application/vnd.tidal.bts, application/json, */*",
+                allowForDownload = true,
+            ) ?: continue
+            if (manifest.contains("<MPD", ignoreCase = true)) continue
+            val bts = runCatching { json.parseToJsonElement(manifest).jsonObject }
+                .getOrNull() ?: continue
+            val mime = bts.string("mimeType").orEmpty()
+            val encryption = bts.string("encryptionType")
+            if (!mime.contains("flac", ignoreCase = true) ||
+                (encryption != null && !encryption.equals("NONE", ignoreCase = true))
+            ) continue
+            val directUrl = (bts["urls"] as? JsonArray)
+                ?.firstNotNullOfOrNull { item ->
+                    item.jsonPrimitive.contentOrNull
+                        ?.takeIf { it.startsWith("https://") }
+                } ?: continue
+            val verified = probeFlacHeader(directUrl)
+            // Some signed CDNs do not support byte-range probes. The file's
+            // native FLAC header will still be checked before storing it.
+            TrackLog.d(TAG, "download BTS $trackId requested=$quality verified=$verified via $base")
+            return Stream(
+                url = directUrl,
+                codec = "flac",
+                audioQuality = if (quality == "HI_RES_LOSSLESS") "LOSSLESS" else quality,
+                isDash = false,
+                verifiedLossless = verified,
+            )
+        }
+        return null
+    }
+
+    /**
      * Resolves a TIDAL stream through hifi-api 2.10's /trackManifests endpoint.
      *
      * uriScheme=HTTPS is important: the API returns a signed .mpd URL that
@@ -219,84 +382,106 @@ object TidalService {
      * avoids feeding the inline base64 MPD from the legacy /track endpoint to
      * an HTTP-only data source.
      */
-    private suspend fun trackManifestStream(trackId: Long): Stream? {
+    private suspend fun trackManifestStream(trackId: Long, allowForDownload: Boolean = false): Stream? {
+        // The server supports a separate DOWNLOAD usage. Older mirrors may
+        // support only PLAYBACK, so try that independently if necessary.
+        val usages = if (allowForDownload) listOf("DOWNLOAD", "PLAYBACK") else listOf("PLAYBACK")
         for (base in orderedInstances()) {
-            val body = requestText(
-                "$base/trackManifests/?" +
-                        "id=$trackId" +
-                        "&formats=FLAC_HIRES" +
-                        "&formats=FLAC" +
-                        "&adaptive=true" +
-                        "&manifestType=MPEG_DASH" +
-                        "&uriScheme=HTTPS" +
-                        "&usage=PLAYBACK",
-            ) ?: continue
+            for (usage in usages) {
+                val body = requestText(
+                    "$base/trackManifests/?" +
+                            "id=$trackId" +
+                            "&formats=FLAC_HIRES" +
+                            "&formats=FLAC" +
+                            "&adaptive=true" +
+                            "&manifestType=MPEG_DASH" +
+                            "&uriScheme=HTTPS" +
+                            "&usage=$usage",
+                    allowForDownload = allowForDownload,
+                ) ?: continue
+                val manifestUrl = parseTrackManifestUri(body)
+                if (manifestUrl == null) {
+                    TrackLog.d(TAG, "manifest lookup $trackId usage=$usage via ${URL(base).host}: " +
+                        "HTTP OK without a compatible manifest URI (${responseShape(body)})")
+                    continue
+                }
 
-            val manifestUrl = parseTrackManifestUri(body) ?: continue
+                // Inspect the signed MPD, but do not expose its credential/token
+                // in logs. The exact same URL will be consumed by Media3.
+                val mpd = requestText(
+                    manifestUrl,
+                    accept = "application/dash+xml, application/xml, text/xml, */*",
+                    allowForDownload = allowForDownload,
+                ) ?: continue
+                if (!mpd.contains("<MPD", ignoreCase = true)) {
+                    TrackLog.d(TAG, "manifest lookup $trackId usage=$usage via ${URL(base).host}: " +
+                        "signed URI returned a non-MPD document")
+                    continue
+                }
 
-            // Read the MPD once for metadata/validation. Media3 will open the
-            // same signed URL for playback afterwards.
-            val mpd = requestText(
-                manifestUrl,
-                accept = "application/dash+xml, application/xml, text/xml, */*",
-            ) ?: continue
-            if (!mpd.contains("<MPD", ignoreCase = true)) {
-                TrackLog.d(TAG, "trackManifests returned a non-MPD document for $trackId")
-                continue
+                val representations = Regex(
+                    """id\s*=\s*["']FLAC,(\d+),(\d+)["']""",
+                    RegexOption.IGNORE_CASE,
+                ).findAll(mpd).mapNotNull { match ->
+                    val rate = match.groupValues.getOrNull(1)?.toIntOrNull() ?: return@mapNotNull null
+                    val depth = match.groupValues.getOrNull(2)?.toIntOrNull() ?: return@mapNotNull null
+                    rate to depth
+                }.toList()
+                val best = representations.maxWithOrNull(
+                    compareBy<Pair<Int, Int>> { it.second }.thenBy { it.first },
+                )
+                val resolvedRate = best?.first ?: Regex(
+                    """audioSamplingRate\s*=\s*["'](\d+)["']""",
+                    RegexOption.IGNORE_CASE,
+                ).findAll(mpd).mapNotNull { it.groupValues.getOrNull(1)?.toIntOrNull() }.maxOrNull()
+                val declaredBitDepth = best?.second ?: Regex(
+                    """(?:bitDepth|bitsPerSample)\s*=\s*["'](\d+)["']""",
+                    RegexOption.IGNORE_CASE,
+                ).findAll(mpd).mapNotNull { it.groupValues.getOrNull(1)?.toIntOrNull() }.maxOrNull()
+                val hiResLabel = Regex(
+                    """(?:<Label[^>]*>\s*)?(?:FLAC_HIRES|HI[_-]?RES(?:_LOSSLESS)?)(?:\s*</Label>)?""",
+                    RegexOption.IGNORE_CASE,
+                ).containsMatchIn(mpd)
+                // An MPD might use numeric IDs and the codec attribute (flac)
+                // instead of TIDAL's FLAC,rate,depth IDs.
+                val manifestSaysFlac = representations.isNotEmpty() ||
+                    Regex("""codecs\s*=\s*["'][^"']*flac[^"']*["']""", RegexOption.IGNORE_CASE)
+                        .containsMatchIn(mpd) ||
+                    Regex("""mimeType\s*=\s*["']audio/flac["']""", RegexOption.IGNORE_CASE)
+                        .containsMatchIn(mpd)
+                if (!manifestSaysFlac) {
+                    TrackLog.d(TAG, "manifest lookup $trackId usage=$usage via ${URL(base).host}: " +
+                        "MPD has no FLAC audio representation")
+                    continue
+                }
+                val tier = if (
+                    (declaredBitDepth ?: 0) > 16 || (resolvedRate ?: 0) > 48_000 ||
+                    ((declaredBitDepth == null && resolvedRate == null) && hiResLabel)
+                ) "HI_RES_LOSSLESS" else "LOSSLESS"
+                TrackLog.d(TAG, "manifest lookup $trackId usage=$usage via ${URL(base).host}: " +
+                    "verified FLAC $tier ${declaredBitDepth ?: "?"}-bit/${resolvedRate ?: "?"}Hz")
+                return Stream(
+                    url = manifestUrl,
+                    codec = "flac",
+                    sampleRateHz = resolvedRate,
+                    bitDepth = declaredBitDepth,
+                    audioQuality = tier,
+                    isDash = true,
+                    verifiedLossless = true,
+                )
             }
-
-            // The combined manifest can contain several FLAC representations.
-            // Read every one and retain the native maximum instead of trusting
-            // the first XML attribute, which is commonly the 16/44.1 variant.
-            val representations = Regex(
-                """id\s*=\s*["']FLAC,(\d+),(\d+)["']""",
-                RegexOption.IGNORE_CASE,
-            ).findAll(mpd).mapNotNull { match ->
-                val rate = match.groupValues.getOrNull(1)?.toIntOrNull() ?: return@mapNotNull null
-                val depth = match.groupValues.getOrNull(2)?.toIntOrNull() ?: return@mapNotNull null
-                rate to depth
-            }.toList()
-            val best = representations.maxWithOrNull(
-                compareBy<Pair<Int, Int>> { it.second }.thenBy { it.first },
-            )
-            val resolvedRate = best?.first ?: Regex(
-                """audioSamplingRate\s*=\s*["'](\d+)["']""",
-                RegexOption.IGNORE_CASE,
-            ).findAll(mpd).mapNotNull { it.groupValues.getOrNull(1)?.toIntOrNull() }.maxOrNull()
-            val declaredBitDepth = best?.second ?: Regex(
-                """(?:bitDepth|bitsPerSample)\s*=\s*["'](\d+)["']""",
-                RegexOption.IGNORE_CASE,
-            ).findAll(mpd).mapNotNull { it.groupValues.getOrNull(1)?.toIntOrNull() }.maxOrNull()
-            val hiResLabel = Regex(
-                """(?:<Label[^>]*>\s*)?(?:FLAC_HIRES|HI[_-]?RES(?:_LOSSLESS)?)(?:\s*</Label>)?""",
-                RegexOption.IGNORE_CASE,
-            ).containsMatchIn(mpd)
-            // This is stronger than the catalogue saying "LOSSLESS": Orb read
-            // the actual playback MPD and found a FLAC representation in it.
-            // Keep that evidence so the UI can still classify the track during
-            // the rare window where Media3 has not published sampleMimeType.
-            val manifestSaysFlac = representations.isNotEmpty() ||
-                mpd.contains("FLAC", ignoreCase = true)
-
-            return Stream(
-                url = manifestUrl,
-                codec = "flac",
-                sampleRateHz = resolvedRate,
-                bitDepth = declaredBitDepth,
-                audioQuality = if (
-                    hiResLabel || (declaredBitDepth ?: 0) > 16 || (resolvedRate ?: 0) > 48_000
-                ) {
-                    "HI_RES_LOSSLESS"
-                } else {
-                    "LOSSLESS"
-                },
-                isDash = true,
-                verifiedLossless = manifestSaysFlac,
-            )
         }
-
+        TrackLog.d(TAG, "manifest lookup $trackId: no usable MPD from ${orderedInstances().size} mirrors")
         return null
     }
+
+    /** Only non-sensitive response structure is printed, never signed manifest URLs. */
+    private fun responseShape(body: String): String = runCatching {
+        val root = json.parseToJsonElement(body) as? JsonObject
+            ?: return@runCatching "not an object"
+        val data = root["data"] as? JsonObject
+        "keys=${root.keys.joinToString(limit = 8)}, dataKeys=${data?.keys?.joinToString(limit = 8) ?: "none"}"
+    }.getOrDefault("invalid JSON")
 
     private fun parseTrackManifestUri(body: String): String? = runCatching {
         val root = json.parseToJsonElement(body).jsonObject
@@ -311,6 +496,8 @@ object TidalService {
             outerData?.string("uri"),
             root.string("uri"),
             root.string("manifestUrl"),
+            root.string("url"),
+            outerData?.string("manifestUrl"),
         )
             .filterNotNull()
             .firstOrNull()
@@ -330,11 +517,16 @@ object TidalService {
             }
         }
 
-    private suspend fun streamExact(trackId: Long, quality: String): Stream? {
+    private suspend fun streamExact(
+        trackId: Long,
+        quality: String,
+        forDownload: Boolean = false,
+    ): Stream? {
         for (base in orderedInstances()) {
             val encodedQuality = URLEncoder.encode(quality, Charsets.UTF_8.name())
             val body = requestText(
                 "$base/track/?id=$trackId&quality=$encodedQuality",
+                allowForDownload = forDownload,
             ) ?: continue
 
             val stream = parseStream(
@@ -416,10 +608,11 @@ object TidalService {
     private suspend fun requestText(
         url: String,
         accept: String = "application/json",
+        allowForDownload: Boolean = false,
     ): String? {
-        // Master kill-switch: no health check, catalogue search, album lookup or
-        // manifest request is allowed to reach TIDAL while Lossless is off.
-        if (!AppSettings.losslessAudio.value) return null
+        // The playback Lossless switch gates streaming lookups only.
+        // A confirmed Premium Maximum download is an independent explicit request.
+        if (!AppSettings.losslessAudio.value && !allowForDownload) return null
 
         var currentUrl = url
         var statusUrl: String? = null
@@ -433,6 +626,11 @@ object TidalService {
                 return result.body
             }
             if (result.code != HttpURLConnection.HTTP_ACCEPTED) {
+                // Show the endpoint and HTTP status without leaking signed
+                // manifest URLs or account tokens to Logcat.
+                val parsed = URL(currentUrl)
+                TrackLog.d(TAG, "HTTP ${result.code} on ${parsed.host}${parsed.path}: " +
+                    "${responseShape(result.body)}")
                 registerHttpFailure(currentUrl, result.code, result.retryAfterMs)
                 return null
             }
@@ -456,7 +654,17 @@ object TidalService {
     private fun requestRaw(url: String, method: String, accept: String): HttpResult? {
         val parsed = runCatching { URL(url) }.getOrNull() ?: return null
         val host = parsed.host.lowercase()
-        if ((hostCooldownUntil[host] ?: 0L) > System.currentTimeMillis()) return null
+        val circuit = circuitKey(url) ?: host
+        val now = System.currentTimeMillis()
+        val until = hostCooldownUntil[circuit] ?: 0L
+        if (until > now) {
+            // Suppress repeated messages from a multi-query catalogue search.
+            if (now - (lastCooldownLogMs[circuit] ?: 0L) > 20_000L) {
+                lastCooldownLogMs[circuit] = now
+                TrackLog.d(TAG, "skipping ${circuit} during ${((until - now) / 1000L)}s cooldown")
+            }
+            return null
+        }
         return runCatching {
             val connection = (parsed.openConnection() as HttpURLConnection).apply {
                 requestMethod = method
@@ -480,11 +688,13 @@ object TidalService {
                 connection.disconnect()
             }
         }.getOrElse {
-            val failures = (hostFailures[host] ?: 0) + 1
-            hostFailures[host] = failures
+            val failures = (hostFailures[circuit] ?: 0) + 1
+            hostFailures[circuit] = failures
             val cooldown = (10_000L shl (failures - 1).coerceIn(0, 4)).coerceAtMost(2 * 60_000L)
-            hostCooldownUntil[host] = System.currentTimeMillis() + cooldown
-            TrackLog.d(TAG, "request failed on $host: ${it.message}; cooling down ${cooldown / 1000}s")
+            hostCooldownUntil[circuit] = System.currentTimeMillis() + cooldown
+            // Throwable messages can contain signed URLs. Never print those.
+            TrackLog.d(TAG, "request failed on $circuit: ${it.javaClass.simpleName}; " +
+                "cooling down ${cooldown / 1000}s")
             null
         }
     }
@@ -500,30 +710,31 @@ object TidalService {
     }
 
     private fun markHostHealthy(url: String) {
-        val host = runCatching { URL(url).host.lowercase() }.getOrNull() ?: return
-        hostFailures.remove(host)
-        hostCooldownUntil.remove(host)
+        val circuit = circuitKey(url) ?: return
+        hostFailures.remove(circuit)
+        hostCooldownUntil.remove(circuit)
+        lastCooldownLogMs.remove(circuit)
     }
 
     private fun registerHttpFailure(url: String, code: Int, serverRetryMs: Long?) {
-        val host = runCatching { URL(url).host.lowercase() }.getOrNull() ?: return
+        val circuit = circuitKey(url) ?: return
         if (code in setOf(400, 404, 405, 422)) {
             // Unsupported route/parameter is not a dead mirror. In particular,
             // older hifi-api builds may reject combined manifests but still
             // support the legacy /track endpoint on the same host.
-            TrackLog.d(TAG, "HTTP $code from $host; trying compatible endpoint")
+            TrackLog.d(TAG, "HTTP $code from $circuit; trying compatible endpoint")
             return
         }
-        val failures = (hostFailures[host] ?: 0) + 1
-        hostFailures[host] = failures
+        val failures = (hostFailures[circuit] ?: 0) + 1
+        hostFailures[circuit] = failures
         val cooldown = when (code) {
             429 -> serverRetryMs ?: 120_000L
             401, 403 -> 15 * 60_000L
             in 500..599 -> (15_000L shl (failures - 1).coerceIn(0, 4)).coerceAtMost(5 * 60_000L)
             else -> 30_000L
         }
-        hostCooldownUntil[host] = System.currentTimeMillis() + cooldown
-        TrackLog.d(TAG, "HTTP $code from $host; cooling down ${cooldown / 1000}s")
+        hostCooldownUntil[circuit] = System.currentTimeMillis() + cooldown
+        TrackLog.d(TAG, "HTTP $code from $circuit; cooling down ${cooldown / 1000}s")
     }
 
     private fun retryAfterMs(value: String?): Long? {
@@ -532,18 +743,21 @@ object TidalService {
     }
 
     private fun parseSearch(body: String): List<Track> = runCatching {
-        val root = json.parseToJsonElement(body).jsonObject
-        val data = root["data"]?.jsonObject ?: return@runCatching emptyList()
-
-        val directItems = data["items"] as? JsonArray
-        val nestedItems = data["tracks"]
-            ?.let { it as? JsonObject }
-            ?.get("items") as? JsonArray
-
-        val items =
-            directItems?.takeIf { it.isNotEmpty() }
-                ?: nestedItems
-                ?: JsonArray(emptyList())
+        val rootElement = json.parseToJsonElement(body)
+        val root = rootElement as? JsonObject
+        val data = root?.get("data")
+        val dataObject = data as? JsonObject
+        // Mirrors/Worker versions return either data.items, data.tracks.items,
+        // items or even a direct track array. Previously any response without
+        // data as a JSON object was silently parsed as an empty catalogue.
+        val items = listOfNotNull(
+            dataObject?.get("items") as? JsonArray,
+            (dataObject?.get("tracks") as? JsonObject)?.get("items") as? JsonArray,
+            root?.get("items") as? JsonArray,
+            (root?.get("tracks") as? JsonObject)?.get("items") as? JsonArray,
+            data as? JsonArray,
+            rootElement as? JsonArray,
+        ).firstOrNull { it.isNotEmpty() } ?: JsonArray(emptyList())
 
         items.mapNotNull { element ->
             val item = element as? JsonObject ?: return@mapNotNull null

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="rooms_edit">Edit room</string>
+    <string name="rooms_save">Save changes</string>
+    <string name="rooms_manage_members">Manage members</string>
+    <string name="rooms_remove_member">Remove member</string>
+    <string name="rooms_remove_member_notice">Remove %1$s from this room?</string>
+</resources>

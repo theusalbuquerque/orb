@@ -41,7 +41,7 @@ import java.util.concurrent.ConcurrentHashMap
 /** Suspend API over Innertube. Every call returns a Result so the UI can show a real error. */
 object YtMusicRepository {
 
-    private const val TAG = "BitChord"
+    private const val TAG = "Orb"
     private val resolvedArtistLinksCache = ConcurrentHashMap<String, List<ArtistLink>>()
     private val preferredAlbumVersionCache = ConcurrentHashMap<String, Song>()
 
@@ -97,10 +97,10 @@ object YtMusicRepository {
 
         coroutineScope {
             val likedDeferred = async {
-                runCatching { songsPaged(LIKED_MUSIC) }.getOrDefault(emptyList())
+                runCatching { songsPaged(LIKED_MUSIC, authenticatedOnly = true) }.getOrDefault(emptyList())
             }
             val addedDeferred = async {
-                runCatching { songsPaged(LIBRARY_SONGS) }.getOrDefault(emptyList())
+                runCatching { songsPaged(LIBRARY_SONGS, authenticatedOnly = true) }.getOrDefault(emptyList())
             }
             val liked = likedDeferred.await()
             val likedIds = liked.mapTo(HashSet()) { it.videoId }
@@ -114,71 +114,153 @@ object YtMusicRepository {
     suspend fun forYouRecapsSection(): Result<HomeShelf?> = call("home:for-you-recaps") {
         if (!Innertube.hasAccountSession) return@call null
 
-        coroutineScope {
-            val savedPlaylistsDeferred = async {
-                runCatching {
-                    InnertubeParser.parseLibraryItems(Innertube.browse(LIBRARY_PLAYLISTS))
-                }.getOrDefault(emptyList())
-            }
-            val recapHomeDeferred = async {
-                val recapItems = mutableListOf<ShelfItem>()
-                val first = runCatching { Innertube.browse("FEmusic_home") }.getOrNull()
-                    ?: return@async emptyList()
+        fun normalized(value: String): String = Normalizer
+            .normalize(value, Normalizer.Form.NFD)
+            .replace(Regex("\\p{Mn}+"), "")
+            .lowercase(Locale.ROOT)
+            .replace(Regex("""[^\p{L}\p{N}]+"""), " ")
+            .trim()
 
-                fun normalized(value: String): String = value
-                    .lowercase(Locale.ROOT)
-                    .replace('&', ' ')
-                    .replace(Regex("""[^\p{L}\p{N}]+"""), " ")
-                    .trim()
-
-                fun isRecapText(value: String): Boolean {
-                    val valueNormalized = normalized(value)
-                    return valueNormalized.contains("recap") ||
-                        valueNormalized.contains("retrospectiva") ||
-                        valueNormalized.contains("resumen")
-                }
-
-                fun collect(shelves: List<HomeShelf>) {
-                    shelves.forEach { shelf ->
-                        val shelfIsRecap = isRecapText(shelf.title) || isRecapText(shelf.subtitle)
-                        if (shelfIsRecap) {
-                            recapItems += shelf.items
-                        } else {
-                            recapItems += shelf.items.filter { item ->
-                                isRecapText(item.title) || isRecapText(item.subtitle)
-                            }
-                        }
-                    }
-                }
-
-                collect(InnertubeParser.parseHome(first))
-                var continuation = InnertubeParser.continuationToken(first)
-                var page = 0
-                // Stop as soon as the visible shelf is full. Walking all six
-                // continuation pages before publishing a recap made an otherwise
-                // independent Home section wait for content nobody could see.
-                while (
-                    continuation != null &&
-                    recapItems.size < FOR_YOU_RECAP_LIMIT &&
-                    page++ < FOR_YOU_RECAP_HOME_PAGES
-                ) {
-                    val response = runCatching { Innertube.browseContinuation(continuation) }
-                        .getOrNull() ?: break
-                    collect(InnertubeParser.parseHomeContinuation(response))
-                    continuation = InnertubeParser.continuationToken(response)
-                }
-                distinctShelfItems(recapItems)
-            }
-
-            val savedRecaps = savedPlaylistsDeferred.await().filter { item ->
-                val text = "${item.title} ${item.subtitle}".lowercase(Locale.ROOT)
-                text.contains("recap") || text.contains("retrospectiva") || text.contains("resumen")
-            }
-            val recaps = distinctShelfItems(recapHomeDeferred.await() + savedRecaps)
-                .take(FOR_YOU_RECAP_LIMIT)
-            recaps.takeIf { it.isNotEmpty() }?.let { HomeShelf("Recaps", it) }
+        fun isRecapPlaylistShelf(shelf: HomeShelf): Boolean {
+            val title = normalized(shelf.title)
+            return title.contains("recap") &&
+                (title.contains("playlist") || title.contains("listas de reproduccion"))
         }
+
+        // Only the official Recap playlist carousel belongs here. A saved or
+        // public playlist containing "Recap" in its name is not this collection.
+        val recapItems = mutableListOf<ShelfItem>()
+        val destinations = LinkedHashMap<String, String?>()
+        fun collect(shelves: List<HomeShelf>) {
+            shelves.filter(::isRecapPlaylistShelf).forEach { shelf ->
+                recapItems += shelf.items.filter { it.type == BrowseType.PLAYLIST }
+                shelf.browseId?.let { destinations[it] = shelf.browseParams }
+            }
+        }
+
+        val first = Innertube.browse("FEmusic_home")
+        collect(InnertubeParser.parseHome(first))
+        var continuation = InnertubeParser.continuationToken(first)
+        val seenHomeTokens = HashSet<String>()
+        var page = 0
+        while (continuation != null && page++ < FOR_YOU_RECAP_HOME_PAGES) {
+            if (!seenHomeTokens.add(continuation)) break
+            val response = runCatching { Innertube.browseContinuation(continuation) }
+                .getOrNull() ?: break
+            collect(InnertubeParser.parseHomeContinuation(response))
+            continuation = InnertubeParser.continuationToken(response)
+        }
+
+        // Expand the official collection, preserving its ordering and paging
+        // to the end instead of limiting it to the preview or saved playlists.
+        destinations.toMap().forEach { (browseId, params) ->
+            var response = runCatching { Innertube.browse(browseId, params = params) }.getOrNull()
+            val seenTokens = HashSet<String>()
+            while (response != null) {
+                val pageResponse = response
+                recapItems += InnertubeParser.parseLibraryItems(pageResponse)
+                    .filter { it.type == BrowseType.PLAYLIST }
+                collect(InnertubeParser.parseHome(pageResponse))
+                recapItems += InnertubeParser.parseHomeContinuation(pageResponse)
+                    .flatMap { it.items }.filter { it.type == BrowseType.PLAYLIST }
+                val token = InnertubeParser.continuationToken(pageResponse) ?: break
+                if (!seenTokens.add(token)) break
+                response = runCatching { Innertube.browseContinuation(token) }.getOrNull()
+            }
+        }
+        distinctShelfItems(recapItems).takeIf { it.isNotEmpty() }?.let { HomeShelf("Recaps", it) }
     }
+
+    /**
+     * Personalized YouTube Music rows used by Orb's curated For You page.
+     *
+     * These rows can live beyond FEmusic_home's first payload, so scan a small
+     * bounded number of continuation pages in the background. The visible Home
+     * feed is not blocked by this request; sections are merged into
+     * homeYouTubeSections when ready.
+     */
+    suspend fun forYouPersonalizedSections(): Result<List<HomeShelf>> =
+        call("home:for-you-personalized") {
+            if (!Innertube.hasAccountSession) return@call emptyList()
+
+            fun normalized(value: String): String = Normalizer
+                .normalize(value, Normalizer.Form.NFD)
+                .replace(Regex("\\p{Mn}+"), "")
+                .lowercase(Locale.ROOT)
+                .replace('&', ' ')
+                .replace(Regex("""[^\p{L}\p{N}]+"""), " ")
+                .trim()
+
+            fun rowText(shelf: HomeShelf): String =
+                normalized("${shelf.title} ${shelf.subtitle}")
+
+            fun isOldFavorites(shelf: HomeShelf): Boolean {
+                val text = rowText(shelf)
+                return listOf(
+                    "old favorites", "old favourites", "forgotten favorites", "forgotten favourites",
+                    "favoritos antigos", "favoritos esquecidos", "favoritos antiguos", "favoritos olvidados",
+                ).any { text.contains(it) }
+            }
+
+            fun isWanted(shelf: HomeShelf): Boolean {
+                val text = rowText(shelf)
+                return text.contains("new releases") ||
+                    text.contains("lancamentos") ||
+                    text.contains("nuevos lanzamientos") ||
+                    text.contains("listen again") ||
+                    text.contains("ouca novamente") ||
+                    text.contains("ouvir novamente") ||
+                    text.contains("escuchar de nuevo") ||
+                    text.contains("mixed for you") ||
+                    text.contains("mixes for you") ||
+                    text.contains("mixes para voce") ||
+                    text.contains("mixes para ti") ||
+                    text.contains("mixtapes para voce") ||
+                    text.contains("mixtapes criadas para voce") ||
+                    text.contains("mixtapes created for you") ||
+                    isOldFavorites(shelf) ||
+                    text.contains("similar to") ||
+                    text.contains("more like") ||
+                    text.contains("parecido com") ||
+                    text.contains("parecidos com") ||
+                    text.contains("parecido a") ||
+                    text.contains("similar a") ||
+                    text.contains("daily discoveries") ||
+                    text.contains("your daily discoveries") ||
+                    text.contains("suas descobertas diarias") ||
+                    text.contains("descobertas diarias") ||
+                    text.contains("tus descubrimientos diarios") ||
+                    text.contains("descubrimientos diarios")
+            }
+
+            val out = mutableListOf<HomeShelf>()
+            val seen = HashSet<String>()
+
+            fun collect(shelves: List<HomeShelf>) {
+                shelves.forEach { shelf ->
+                    if (!isWanted(shelf) || shelf.items.isEmpty()) return@forEach
+                    val key = "${normalized(shelf.title)}|${normalized(shelf.subtitle)}"
+                    if (seen.add(key)) out += shelf
+                }
+            }
+
+            val first = Innertube.browse("FEmusic_home")
+            collect(InnertubeParser.parseHome(first))
+            var continuation = InnertubeParser.continuationToken(first)
+            var page = 0
+            val seenContinuations = HashSet<String>()
+            while (continuation != null && page < FOR_YOU_OLD_FAVORITES_HOME_PAGES) {
+                if (page >= FOR_YOU_PERSONALIZED_HOME_PAGES && out.any(::isOldFavorites)) break
+                if (!seenContinuations.add(continuation)) break
+                page += 1
+                val response = runCatching { Innertube.browseContinuation(continuation) }
+                    .getOrNull() ?: break
+                collect(InnertubeParser.parseHomeContinuation(response))
+                continuation = InnertubeParser.continuationToken(response)
+            }
+
+            out
+        }
 
     /**
      * Compatibility aggregate for callers that still want both account-owned
@@ -328,9 +410,10 @@ object YtMusicRepository {
      *
      * The first shelf is a compact notification carousel containing only new
      * full albums by artists the listener explicitly marked as favorites in
-     * Orb. The remaining shelves stay album-only: personalised new releases
-     * and catalogue recommendations that exclude albums already represented in
-     * listening history, Liked Music or the YouTube Music library.
+     * Orb. The remaining shelves stay album-only: personalised new releases,
+     * YouTube Music's account-specific "Albums for you" row, and a separate
+     * discovery pool that excludes albums already represented in listening
+     * history, Liked Music or the YouTube Music library.
      */
     suspend fun releasesHub(
         favoriteArtists: Set<String> = emptySet(),
@@ -355,11 +438,11 @@ object YtMusicRepository {
             }
             val likedDeferred = async {
                 if (!Innertube.hasAccountSession) emptyList()
-                else runCatching { songsPaged(LIKED_MUSIC) }.getOrDefault(emptyList())
+                else runCatching { songsPaged(LIKED_MUSIC, authenticatedOnly = true) }.getOrDefault(emptyList())
             }
             val libraryDeferred = async {
                 if (!Innertube.hasAccountSession) emptyList()
-                else runCatching { songsPaged(LIBRARY_SONGS) }.getOrDefault(emptyList())
+                else runCatching { songsPaged(LIBRARY_SONGS, authenticatedOnly = true) }.getOrDefault(emptyList())
             }
             val releaseShelves = releasesDeferred.await()
             val homeShelves = homeDeferred.await()
@@ -412,6 +495,33 @@ object YtMusicRepository {
                 )
             }
 
+            // Prefer YouTube Music's own personalised album row when it is
+            // present. Different account languages localise the title, so match
+            // the known labels rather than depending on one locale. If that row
+            // is omitted by an experiment, fall back to other album cards from
+            // FEmusic_home; those are still account-personalised and make a much
+            // better "Albums for you" source than the generic explore catalogue.
+            val directAlbumsForYou = distinctShelfItems(
+                homeShelves
+                    .filter { it.title.isAlbumsForYouShelfLabel() }
+                    .flatMap { it.items },
+            ).filter { it.isLikelyFullAlbum() }
+
+            val homePersonalizedAlbums = distinctShelfItems(
+                homeShelves
+                    .filterNot { it.title.isReleaseShelfLabel() }
+                    .flatMap { it.items },
+            ).filter { it.isLikelyFullAlbum() }
+
+            val newAlbumIds = (favoriteArtistNewAlbums + similarNewAlbums)
+                .mapNotNullTo(hashSetOf()) { it.browseId }
+            val albumsForYou = distinctShelfItems(
+                directAlbumsForYou + homePersonalizedAlbums,
+            ).filter { item ->
+                val browseId = item.browseId ?: return@filter false
+                browseId !in newAlbumIds
+            }.take(ALBUM_SHELF_LIMIT)
+
             val recommendationCandidates = distinctShelfItems(
                 homeShelves.flatMap { it.items } +
                     exploreShelves.flatMap { it.items } +
@@ -424,7 +534,7 @@ object YtMusicRepository {
                     item.title.normalizeIdentity() !in knownAlbumNames
             }
 
-            val alreadyShown = (favoriteArtistNewAlbums + similarNewAlbums)
+            val alreadyShown = (favoriteArtistNewAlbums + similarNewAlbums + albumsForYou)
                 .mapNotNullTo(hashSetOf()) { it.browseId }
             val freshSuggestions = recommendationPool.filter { item ->
                 val browseId = item.browseId ?: return@filter false
@@ -433,12 +543,13 @@ object YtMusicRepository {
             // History/library exclusion is a preference, not a reason for an
             // entire section to disappear. If the personalised pool is already
             // familiar, fall back to other account/explore albums while still
-            // excluding cards already used by New albums.
+            // preferring cards not used by the earlier rows. If the source pool
+            // is exhausted, reuse real recommendations instead of hiding the row.
             val albumSuggestions = distinctShelfItems(
                 freshSuggestions + recommendationCandidates.filter { item ->
                     val browseId = item.browseId ?: return@filter false
                     browseId !in alreadyShown
-                },
+                } + recommendationPool + recommendationCandidates,
             )
 
             buildList {
@@ -446,21 +557,34 @@ object YtMusicRepository {
                     FAVORITE_ALBUM_RELEASES_TITLE,
                     favoriteArtistNewAlbums.take(ALBUM_ALERT_LIMIT),
                 )
-                addIfItems("New albums", similarNewAlbums.take(ALBUM_SHELF_LIMIT))
+                addIfItems(
+                    "New albums",
+                    distinctShelfItems(favoriteArtistNewAlbums + similarNewAlbums)
+                        .take(ALBUM_SHELF_LIMIT),
+                )
+                addIfItems("Albums for you", albumsForYou)
                 addIfItems("Albums you may like", albumSuggestions.take(ALBUM_SHELF_LIMIT))
             }
         }
     }
 
     /**
-     * Dedicated Em alta feed. Current YouTube Music charts expose country
-     * selection through `formData.selectedValues`; Global is the special ZZ
-     * country. Authenticated accounts can receive separate Daily and Weekly
-     * playlist carousels. Orb reads the ranked Top Songs shelf directly for
-     * the two Top 10 lists; Daily/Weekly playlist carousels remain separate
-     * because those are YouTube's music-video chart playlists.
+     * Dedicated Em alta feed.
+     *
+     * Orb mirrors the four surfaces the user sees in YouTube Music's trending
+     * experience, in this exact order:
+     *   1. personalised trending songs;
+     *   2. songs that surfaced in Shorts;
+     *   3. Daily Charts playlists;
+     *   4. Weekly Charts playlists.
+     *
+     * The first two rows are account/region-sensitive Home/Explore shelves and
+     * can be pushed into Home continuation pages by YouTube experiments. Scan a
+     * bounded number of pages, then use the local ranked chart as a conservative
+     * fallback for Trending songs only. Daily/Weekly continue to come from
+     * FEmusic_charts because those are YouTube's dedicated chart playlists.
      */
-    suspend fun trendingHub(): Result<List<HomeShelf>> = call("home:trending-hub") {
+    suspend fun trendingHub(onPartial: (List<HomeShelf>) -> Unit = {}): Result<List<HomeShelf>> = call("home:trending-hub") {
         coroutineScope {
             val region = deviceCountry()
             val localChartsDeferred = async {
@@ -476,8 +600,6 @@ object YtMusicRepository {
                 // ZZ is the special *chart selection* for Global, but it is not
                 // a valid client geolocation (`context.client.gl`). Keep a real
                 // country in the client context and send ZZ only in formData.
-                // Sending gl=ZZ makes Innertube reject the browse request with
-                // HTTP 400 INVALID_ARGUMENT.
                 runCatching {
                     Innertube.browse(
                         browseId = "FEmusic_charts",
@@ -486,8 +608,58 @@ object YtMusicRepository {
                     )
                 }.getOrNull()
             }
+            val personalisedDeferred = async {
+                runCatching {
+                    val shelves = mutableListOf<HomeShelf>()
+                    val first = Innertube.browse(
+                        browseId = "FEmusic_home",
+                        regionOverride = region,
+                    )
+                    shelves += InnertubeParser.parseHome(first)
+
+                    var continuation = InnertubeParser.continuationToken(first)
+                    var page = 0
+                    while (continuation != null && page++ < TRENDING_HOME_PAGES) {
+                        val response = runCatching {
+                            Innertube.browseContinuation(continuation)
+                        }.getOrNull() ?: break
+                        shelves += InnertubeParser.parseHomeContinuation(response)
+                        continuation = InnertubeParser.continuationToken(response)
+                    }
+
+                    // Some experiments move these recommendation shelves to
+                    // Explore instead of Home. Append Explore only as a second
+                    // source so the account-personalised Home ordering wins.
+                    shelves += runCatching {
+                        InnertubeParser.parseHome(
+                            Innertube.browse(
+                                browseId = "FEmusic_explore",
+                                regionOverride = region,
+                            ),
+                        )
+                    }.getOrDefault(emptyList())
+                    shelves
+                }.getOrDefault(emptyList())
+            }
+
+            fun publishCharts(local: JsonObject?, global: JsonObject?) {
+                val localGroups = local?.let { InnertubeParser.parseChartPlaylistCarousels(it) }.orEmpty()
+                val globalGroups = global?.let { InnertubeParser.parseChartPlaylistCarousels(it) }.orEmpty()
+                val songs = local?.let(InnertubeParser::parseChartSongs).orEmpty()
+                    .distinctBy { it.videoId }.take(TRENDING_SONG_SHELF_LIMIT)
+                    .mapIndexed { index, song -> song.asShelfItem().copy(rank = index + 1) }
+                val preview = buildList {
+                    addIfItems("Trending songs", songs)
+                    addIfItems("Daily Charts", distinctShelfItems(localGroups.getOrNull(0).orEmpty() + globalGroups.getOrNull(0).orEmpty()))
+                    addIfItems("Weekly Charts", distinctShelfItems(localGroups.getOrNull(1).orEmpty() + globalGroups.getOrNull(1).orEmpty()))
+                }
+                if (preview.isNotEmpty()) onPartial(preview)
+            }
             val localResponse = localChartsDeferred.await()
+            publishCharts(localResponse, null)
             val globalResponse = globalChartsDeferred.await()
+            publishCharts(localResponse, globalResponse)
+            val personalisedShelves = personalisedDeferred.await()
             val localGroups = localResponse
                 ?.let { InnertubeParser.parseChartPlaylistCarousels(it) }
                 .orEmpty()
@@ -495,25 +667,59 @@ object YtMusicRepository {
                 ?.let { InnertubeParser.parseChartPlaylistCarousels(it) }
                 .orEmpty()
 
-            fun rankedTopTen(response: kotlinx.serialization.json.JsonObject?): List<ShelfItem> =
-                response
-                    ?.let(InnertubeParser::parseChartSongs)
-                    .orEmpty()
-                    .distinctBy { it.videoId }
-                    .take(10)
-                    .mapIndexed { index, song ->
-                        song.asShelfItem().copy(rank = index + 1)
-                    }
+            fun normalized(value: String): String = Normalizer
+                .normalize(value, Normalizer.Form.NFD)
+                .replace(Regex("\\p{Mn}+"), "")
+                .lowercase(Locale.ROOT)
+                .replace('&', ' ')
+                .replace(Regex("""[^\p{L}\p{N}]+"""), " ")
+                .trim()
 
-            // IMPORTANT: Top Songs comes from the ranked musicShelfRenderer in
-            // FEmusic_charts itself. The chart carousels below are Daily/Weekly
-            // *music-video* playlists and must never be used as the Top 10 song
-            // source.
-            val localTop = rankedTopTen(localResponse)
-            val globalTop = rankedTopTen(globalResponse)
+            fun shelfText(shelf: HomeShelf): String =
+                normalized("${shelf.title} ${shelf.subtitle}")
+
+            fun isShortsShelf(shelf: HomeShelf): Boolean {
+                val text = shelfText(shelf)
+                return text.contains("shorts")
+            }
+
+            fun isTrendingSongsShelf(shelf: HomeShelf): Boolean {
+                val text = shelfText(shelf)
+                if (text.contains("shorts") || text.contains("chart")) return false
+                return text.contains("trending songs") ||
+                    text.contains("songs trending") ||
+                    text.contains("trending for you") ||
+                    text.contains("music trending") ||
+                    text.contains("musicas em alta") ||
+                    text.contains("em alta para voce") ||
+                    text.contains("canciones en tendencia") ||
+                    text.contains("tendencias para ti")
+            }
+
+            fun songsFrom(predicate: (HomeShelf) -> Boolean): List<ShelfItem> =
+                distinctShelfItems(
+                    personalisedShelves
+                        .filter(predicate)
+                        .flatMap { it.items }
+                        .filter { !it.videoId.isNullOrBlank() },
+                ).take(TRENDING_SONG_SHELF_LIMIT)
+
+            val chartSongs = localResponse
+                ?.let(InnertubeParser::parseChartSongs)
+                .orEmpty()
+                .distinctBy { it.videoId }
+                .take(TRENDING_SONG_SHELF_LIMIT)
+                .mapIndexed { index, song ->
+                    song.asShelfItem().copy(rank = index + 1)
+                }
+
+            val trendingSongs = songsFrom(::isTrendingSongsShelf)
+                .ifEmpty { chartSongs }
+            val shortsSongs = songsFrom(::isShortsShelf)
+
             // YouTube currently uses carousel order to distinguish Daily from
             // Weekly when both are present. If only one carousel is returned,
-            // keep it under Daily rather than pretending a Weekly feed exists.
+            // keep it under Daily rather than inventing a Weekly feed.
             val dailyPlaylists = distinctShelfItems(
                 localGroups.getOrNull(0).orEmpty() + globalGroups.getOrNull(0).orEmpty(),
             )
@@ -522,8 +728,8 @@ object YtMusicRepository {
             )
 
             buildList {
-                addIfItems("Top 10 global", globalTop)
-                addIfItems("Top 10 nacional", localTop)
+                addIfItems("Trending songs", trendingSongs)
+                addIfItems("Played in Shorts", shortsSongs)
                 addIfItems("Daily Charts", dailyPlaylists)
                 addIfItems("Weekly Charts", weeklyPlaylists)
             }
@@ -540,40 +746,48 @@ object YtMusicRepository {
      * like ordinary public PL playlists with a non-YouTube creator, and exclude
      * the currently selected channel by name/handle when that metadata is known.
      */
-    suspend fun communityPlaylistsHub(): Result<List<HomeShelf>> = call("home:community-playlists") {
+    suspend fun communityPlaylistsHub(onPartial: (List<HomeShelf>) -> Unit = {}): Result<List<HomeShelf>> = call("home:community-playlists") {
         coroutineScope {
             val accountDeferred = async {
                 if (!Innertube.hasAccountSession) null else account().getOrNull()
             }
             val first = Innertube.browse("FEmusic_home")
             val shelves = InnertubeParser.parseHome(first).toMutableList()
-            var continuation = InnertubeParser.continuationToken(first)
-            var page = 0
-            while (continuation != null && page++ < COMMUNITY_HOME_PAGES) {
-                val response = runCatching { Innertube.browseContinuation(continuation) }
-                    .getOrNull() ?: break
-                shelves += InnertubeParser.parseHomeContinuation(response)
-                continuation = InnertubeParser.continuationToken(response)
-            }
-
             val account = accountDeferred.await()
             val ownIdentities = listOfNotNull(
                 account?.name?.normalizeIdentity()?.takeIf { it.isNotBlank() },
                 account?.handle?.removePrefix("@")?.normalizeIdentity()?.takeIf { it.isNotBlank() },
             ).toSet()
-            val playlists = distinctShelfItems(
-                shelves.flatMap { shelf ->
-                    val explicitCommunityShelf = shelf.title.isCommunityPlaylistShelfLabel()
-                    shelf.items.filter { item ->
-                        item.type == BrowseType.PLAYLIST &&
-                            item.browseId != null &&
-                            (explicitCommunityShelf || item.looksLikeCommunityPlaylist(ownIdentities))
-                    }
-                },
-            ).take(COMMUNITY_PLAYLIST_LIMIT)
+            fun snapshot(): List<HomeShelf> {
+                val playlists = distinctShelfItems(
+                    shelves.flatMap { shelf ->
+                        val explicitCommunityShelf = shelf.title.isCommunityPlaylistShelfLabel()
+                        shelf.items.filter { item ->
+                            item.type == BrowseType.PLAYLIST &&
+                                item.browseId != null &&
+                                (explicitCommunityShelf || item.looksLikeCommunityPlaylist(ownIdentities))
+                        }
+                    },
+                ).take(COMMUNITY_PLAYLIST_LIMIT)
 
-            if (playlists.isEmpty()) emptyList()
-            else listOf(HomeShelf(title = "Community playlists", items = playlists))
+                return if (playlists.isEmpty()) emptyList()
+                    else listOf(HomeShelf(title = "Community playlists", items = playlists))
+            }
+            var visible = snapshot()
+            if (visible.isNotEmpty()) onPartial(visible)
+            var continuation = InnertubeParser.continuationToken(first)
+            var page = 0
+            while (continuation != null && page++ < COMMUNITY_HOME_PAGES &&
+                visible.sumOf { it.items.size } < COMMUNITY_PLAYLIST_LIMIT) {
+                val response = runCatching { Innertube.browseContinuation(continuation) }
+                    .getOrNull() ?: break
+                shelves += InnertubeParser.parseHomeContinuation(response)
+                continuation = InnertubeParser.continuationToken(response)
+                val next = snapshot()
+                if (next != visible && next.isNotEmpty()) onPartial(next)
+                visible = next
+            }
+            visible
         }
     }
 
@@ -584,76 +798,125 @@ object YtMusicRepository {
      * therefore unions history + Liked Music + library songs and also compares
      * normalized title/artist signatures.
      */
-    suspend fun discoverHub(): Result<List<HomeShelf>> = call("home:discover-hub") {
+    /**
+     * A first-paint catalogue snapshot lets Explore show useful music before
+     * YouTube has finished walking the listener's entire remote history.
+     * Final filtering below still uses every remote page as before.
+     * The preview is intentionally transient and is only published for a
+     * page that has no previous successful data.
+     */
+    suspend fun discoverHub(
+        seedKnownSongs: List<Song> = emptyList(),
+        seedCatalogue: List<HomeShelf> = emptyList(),
+        onPreview: (List<HomeShelf>) -> Unit = {},
+    ): Result<List<HomeShelf>> = call("home:discover-hub") {
+        // One visible catalogue response gets network priority. Starting six
+        // expensive account/catalogue fetches at once delayed the first card,
+        // particularly when the audio stream was sharing mobile bandwidth.
+        val primaryShelves = seedCatalogue.takeIf { it.isNotEmpty() }
+            ?: runCatching { shelvesOf("FEmusic_home") }
+                .getOrElse { error ->
+                    if (error is CancellationException) throw error
+                    emptyList()
+                }
+        val recentKnown = RecentPlaybackStore.snapshotEntries().map { it.song }
+        val quickKnown = (seedKnownSongs + recentKnown).distinctBy { it.videoId }
+        val firstCandidates = distinctShelfItems(primaryShelves.flatMap { it.items })
+        if (firstCandidates.isNotEmpty()) {
+            val preview = buildDiscoverSuggestions(firstCandidates, quickKnown)
+            if (preview.isNotEmpty()) onPreview(preview)
+        }
+
         coroutineScope {
+            // Only after first paint do we start the more expensive complete
+            // exclusions. The final set is authoritative (full paging kept).
             val historyDeferred = async {
                 if (!Innertube.hasAccountSession) emptyList()
-                else runCatching { historySongsRaw() }.getOrDefault(emptyList())
+                else runCatching { historySongsRaw() }.getOrElse { error ->
+                    if (error is CancellationException) throw error
+                    emptyList()
+                }
             }
             val likedDeferred = async {
                 if (!Innertube.hasAccountSession) emptyList()
-                else runCatching { songsPaged(LIKED_MUSIC) }.getOrDefault(emptyList())
+                else runCatching { songsPaged(LIKED_MUSIC, authenticatedOnly = true) }.getOrElse { error ->
+                    if (error is CancellationException) throw error
+                    emptyList()
+                }
             }
             val libraryDeferred = async {
                 if (!Innertube.hasAccountSession) emptyList()
-                else runCatching { songsPaged(LIBRARY_SONGS) }.getOrDefault(emptyList())
-            }
-            val candidatesDeferred = listOf(
-                "FEmusic_home",
-                "FEmusic_explore",
-                "FEmusic_new_releases",
-            ).map { browseId ->
-                async { runCatching { shelvesOf(browseId) }.getOrDefault(emptyList()) }
-            }
-
-            val knownSongs = (historyDeferred.await() + likedDeferred.await() + libraryDeferred.await())
-                .distinctBy { it.videoId }
-            val candidates = distinctShelfItems(
-                candidatesDeferred.awaitAll().flatten().flatMap { it.items },
-            )
-
-            val knownVideoIds = knownSongs.mapTo(hashSetOf()) { it.videoId }
-            val knownSignatures = knownSongs.mapTo(hashSetOf()) { it.recordingSignature() }
-            val knownArtistIds = knownSongs.mapNotNullTo(hashSetOf()) { it.artistId }
-            val knownAlbumIds = knownSongs.mapNotNullTo(hashSetOf()) { it.albumId }
-            val knownAlbumNames = knownSongs.mapNotNullTo(hashSetOf()) { song ->
-                song.albumName?.normalizeIdentity()?.takeIf { it.isNotBlank() }
-            }
-            val knownArtistNames = knownSongs.mapTo(hashSetOf()) { normalizedArtist(it.artist) }
-
-            val unheardSongs = candidates.filter { item ->
-                val videoId = item.videoId ?: return@filter false
-                videoId !in knownVideoIds && item.recordingSignature() !in knownSignatures
-            }
-            val unheardArtists = candidates.filter { item ->
-                item.type == BrowseType.ARTIST &&
-                    !item.browseId.isNullOrBlank() &&
-                    item.browseId !in knownArtistIds &&
-                    normalizedArtist(item.title) !in knownArtistNames
-            }
-            val unheardAlbums = candidates.filter { item ->
-                item.type == BrowseType.ALBUM &&
-                    !item.browseId.isNullOrBlank() &&
-                    item.browseId !in knownAlbumIds &&
-                    item.title.normalizeIdentity() !in knownAlbumNames
-            }
-
-            val discoveryPools = listOf(
-                unheardSongs.take(DISCOVER_SHELF_LIMIT),
-                unheardArtists.take(DISCOVER_SHELF_LIMIT),
-                unheardAlbums.take(DISCOVER_SHELF_LIMIT),
-            )
-            val mixedSuggestions = buildList {
-                val longest = discoveryPools.maxOfOrNull { it.size } ?: 0
-                repeat(longest) { index ->
-                    discoveryPools.forEach { pool -> pool.getOrNull(index)?.let(::add) }
+                else runCatching { songsPaged(LIBRARY_SONGS, authenticatedOnly = true) }.getOrElse { error ->
+                    if (error is CancellationException) throw error
+                    emptyList()
                 }
             }
+            val secondary = listOf("FEmusic_explore", "FEmusic_new_releases")
+                .map { browseId ->
+                    async {
+                        runCatching { shelvesOf(browseId) }.getOrElse { error ->
+                            if (error is CancellationException) throw error
+                            emptyList()
+                        }
+                    }
+                }
+            val allKnown = (
+                quickKnown + historyDeferred.await() + likedDeferred.await() + libraryDeferred.await()
+            ).distinctBy { it.videoId }
+            val allCandidates = distinctShelfItems(
+                (primaryShelves + secondary.awaitAll().flatten()).flatMap { it.items },
+            )
+            buildDiscoverSuggestions(allCandidates, allKnown)
+        }
+    }
 
-            buildList {
-                addIfItems("You may like this", distinctShelfItems(mixedSuggestions))
+    /** Same exclusion, ranking and interleaving for quick and complete results. */
+    private fun buildDiscoverSuggestions(
+        candidates: List<ShelfItem>,
+        knownSongs: List<Song>,
+    ): List<HomeShelf> {
+        val knownVideoIds = knownSongs.mapTo(hashSetOf()) { it.videoId }
+        val knownSignatures = knownSongs.mapTo(hashSetOf()) { it.recordingSignature() }
+        val knownArtistIds = knownSongs.mapNotNullTo(hashSetOf()) { it.artistId }
+        val knownAlbumIds = knownSongs.mapNotNullTo(hashSetOf()) { it.albumId }
+        val knownAlbumNames = knownSongs.mapNotNullTo(hashSetOf()) { song ->
+            song.albumName?.normalizeIdentity()?.takeIf { it.isNotBlank() }
+        }
+        val knownArtistNames = knownSongs.mapTo(hashSetOf()) { normalizedArtist(it.artist) }
+
+        val unheardSongs = candidates.filter { item ->
+            val videoId = item.videoId ?: return@filter false
+            videoId !in knownVideoIds && item.recordingSignature() !in knownSignatures
+        }
+        val unheardArtists = candidates.filter { item ->
+            item.type == BrowseType.ARTIST &&
+                !item.browseId.isNullOrBlank() &&
+                item.browseId !in knownArtistIds &&
+                normalizedArtist(item.title) !in knownArtistNames
+        }
+        val unheardAlbums = candidates.filter { item ->
+            item.type == BrowseType.ALBUM &&
+                !item.browseId.isNullOrBlank() &&
+                item.browseId !in knownAlbumIds &&
+                item.title.normalizeIdentity() !in knownAlbumNames
+        }
+
+        val discoveryPools = listOf(
+            unheardSongs.take(DISCOVER_SHELF_LIMIT),
+            unheardArtists.take(DISCOVER_SHELF_LIMIT),
+            unheardAlbums.take(DISCOVER_SHELF_LIMIT),
+        )
+        val mixedSuggestions = buildList {
+            val longest = discoveryPools.maxOfOrNull { it.size } ?: 0
+            repeat(longest) { index ->
+                discoveryPools.forEach { pool -> pool.getOrNull(index)?.let(::add) }
             }
         }
+
+        return buildList {
+            addIfItems("You may like this", distinctShelfItems(mixedSuggestions))
+        }
+
     }
 
     private fun deviceCountry(): String = Locale.getDefault().country
@@ -765,6 +1028,17 @@ object YtMusicRepository {
         return value == "released" || value.startsWith("released ")
     }
 
+    private fun String.isAlbumsForYouShelfLabel(): Boolean {
+        val value = Normalizer.normalize(lowercase(Locale.ROOT), Normalizer.Form.NFD)
+            .replace(Regex("\\p{M}+"), "")
+            .replace(Regex("[^a-z0-9]+"), " ")
+            .trim()
+        return value == "albums for you" ||
+            value == "albuns para voce" ||
+            value == "albumes para ti" ||
+            value == "albumes para usted"
+    }
+
     private fun String.isReleaseShelfLabel(): Boolean {
         val value = Normalizer.normalize(lowercase(Locale.ROOT), Normalizer.Form.NFD)
             .replace(Regex("\\p{M}+"), "")
@@ -829,9 +1103,12 @@ object YtMusicRepository {
 
     private const val COMMUNITY_HOME_PAGES = 5
     private const val COMMUNITY_PLAYLIST_LIMIT = 60
-    private const val FOR_YOU_RECAP_HOME_PAGES = 6
+    private const val FOR_YOU_RECAP_HOME_PAGES = 12
+    private const val FOR_YOU_PERSONALIZED_HOME_PAGES = 5
+    private const val FOR_YOU_OLD_FAVORITES_HOME_PAGES = 12
+    private const val TRENDING_HOME_PAGES = 5
+    private const val TRENDING_SONG_SHELF_LIMIT = 20
     private const val FOR_YOU_LIBRARY_LIMIT = 30
-    private const val FOR_YOU_RECAP_LIMIT = 30
 
     private const val FAVORITE_ALBUM_RELEASES_TITLE = "__orb_favorite_album_releases__"
     private const val ALBUM_ALERT_LIMIT = 12
@@ -840,6 +1117,11 @@ object YtMusicRepository {
 
     suspend fun search(query: String, filter: SearchFilter): Result<List<SearchResult>> =
         call("search:${filter.name}") {
+            // Trust YouTube Music's own relevance/popularity order. Mixed search
+            // includes a dedicated Top Result card which InnertubeParser now reads
+            // directly; do not prepend an exact-title artist/album candidate here.
+            // Exact-title injection made short queries such as "michael" prefer an
+            // obscure artist literally named Michael over Michael Jackson.
             val parsed = InnertubeParser.parseSearch(Innertube.search(query, filter.params))
             if (filter == SearchFilter.SONGS && AppSettings.prioritizeAlbumVersions.value) {
                 preferAlbumVersionsInSearch(parsed)
@@ -855,6 +1137,35 @@ object YtMusicRepository {
         InnertubeParser.parseSearch(Innertube.search(query, SearchFilter.SONGS.params))
             .filterIsInstance<SearchResult.Track>()
             .map { it.song }
+
+    /**
+     * Strict YouTube Music carrier rematch for playback failures tied to one
+     * specific video id (for example a Premium-only carrier).
+     *
+     * Only candidates that [TrackMatcher] proves are the same recording are
+     * returned. A transport failure must never be "fixed" by playing a cover,
+     * live take, clean/explicit mismatch or different edition under the
+     * original Orb metadata.
+     */
+    suspend fun playbackAlternatives(
+        target: TrackMatcher.Target,
+        excludedVideoIds: Set<String>,
+        limit: Int = 4,
+    ): List<Song> {
+        val candidates = LinkedHashMap<String, Song>()
+        for (query in TrackMatcher.queries(target).take(3)) {
+            val rows = runCatching { rawSongSearch(query) }.getOrDefault(emptyList())
+            rows.forEach { song ->
+                if (song.videoId !in excludedVideoIds) {
+                    candidates.putIfAbsent(song.videoId, song)
+                }
+            }
+            if (candidates.size >= limit * 4) break
+        }
+        return TrackMatcher.ranked(candidates.values.toList(), target)
+            .filterNot { it.videoId in excludedVideoIds }
+            .take(limit)
+    }
 
     /**
      * What YouTube Music would suggest completing [input] to, for the search
@@ -902,6 +1213,58 @@ object YtMusicRepository {
         return song
     }
 
+    /** A catalogue ID has been shown to point to an unrelated recording. */
+    class WrongRecordingException : IllegalStateException(
+        "Selected track ID belongs to a different recording"
+    )
+
+    /**
+     * Before direct user-initiated playback, check that the selected YouTube ID
+     * really belongs to the displayed track. Homepage/recents renderers can
+     * occasionally carry a valid ID for an entirely different recording; title
+     * matching *after* opening that ID is too late to fix the wrong artist/audio.
+     *
+     * A failed metadata network request is not evidence of a mismatch; a
+     * positive disagreement is. Refuse to play a proven-wrong ID if an exact
+     * catalogue rematch cannot be found, rather than playing a cover/remix.
+     */
+    suspend fun resolveTrustedPlaybackVersion(song: Song): Song {
+        if (song.localUri != null || song.localPath != null ||
+            song.videoId in com.music.orb.download.Downloads.saved.value ||
+            com.music.orb.data.sources.SourceRegistry.parseTrackKey(song.videoId) != null ||
+            song.title.isBlank() || song.artist.isBlank()
+        ) return resolvePreferredPlaybackVersion(song)
+
+        val wanted = TrackMatcher.targetOf(song)
+        val catalog = trackLinks(song.videoId).getOrNull()
+        // For the selected ID, title, full credited artist and edition must
+        // agree. A known but different album/year is a proven mismatch too.
+        // Missing album/year remains unknown rather than a fabricated match.
+        val original = if (catalog != null && TrackMatcher.score(catalog, wanted) == null) {
+            val alternatives = playbackAlternatives(
+                target = wanted,
+                excludedVideoIds = setOf(song.videoId),
+                limit = 8,
+            )
+            val matched = alternatives.firstOrNull { candidate ->
+                TrackMatcher.verifiedForSubstitution(candidate, wanted) &&
+                    (wanted.durationSec == null ||
+                        TrackMatcher.withinSeconds(candidate, wanted, 3))
+            } ?: throw WrongRecordingException()
+            matched.withPlaybackContextFrom(song)
+        } else song
+
+        val preferred = resolvePreferredPlaybackVersion(original)
+        // Album-version preference may change the release, not the singer,
+        // title or live/remix identity. Check without an album/year veto.
+        if (TrackMatcher.score(
+                preferred,
+                wanted.copy(durationSec = null, albumName = null, releaseYear = null),
+            ) == null
+        ) throw WrongRecordingException()
+        return preferred
+    }
+
     /**
      * Playback-facing edition resolver for the optional "Prioritize album versions" setting.
      *
@@ -911,7 +1274,27 @@ object YtMusicRepository {
      * or remix with the canonical album recording when YouTube Music exposes one.
      */
     suspend fun resolvePreferredPlaybackVersion(song: Song): Song {
+        // A downloaded copy is already the listener's chosen recording. Do not
+        // remap its video ID to a different release before Media3 can use it.
+        if (song.localUri != null || song.localPath != null ||
+            song.videoId in com.music.orb.download.Downloads.saved.value
+        ) return song
         val audio = resolveAudio(song)
+
+        // Album-page playback is authoritative. The listener selected this
+        // exact release, so the preference that normally promotes a single to
+        // an album cut must not rewrite it to another package/compilation.
+        // Keep the selected release identity even if resolveAudio() had to swap
+        // a video carrier for its audio carrier first.
+        if (song.preserveAlbumRelease) {
+            return audio.copy(
+                albumId = song.albumId ?: audio.albumId,
+                albumName = song.albumName ?: audio.albumName,
+                releaseYear = song.releaseYear ?: audio.releaseYear,
+                preserveAlbumRelease = true,
+            ).withPlaybackContextFrom(song)
+        }
+
         if (!AppSettings.prioritizeAlbumVersions.value || audio.localUri != null) return audio
         if (!audio.needsAlbumVersionLookup()) return audio
 
@@ -1044,9 +1427,21 @@ object YtMusicRepository {
         sourcePlaylistId = source.sourcePlaylistId,
         sourcePlaylistTitle = source.sourcePlaylistTitle,
         sourcePlaylistArtworkUrl = source.sourcePlaylistArtworkUrl,
+        preserveAlbumRelease = source.preserveAlbumRelease,
     )
 
-    /** Signed-in profile for the settings header. Null when signed out. */
+    /**
+     * A lightweight, authenticated-only Music library check. A channel
+     * returned by YouTube Data API is not proof the Music private backend
+     * grants access; this checks the actual saved-playlists feed.
+     */
+    suspend fun verifyMusicLibraryAccess(): Result<Unit> = call("library:verify") {
+        val response = Innertube.browseAccount("FEmusic_liked_playlists")
+        check(response.containsKey("contents") || response.containsKey("continuationContents")) {
+            "YouTube Music did not return an authenticated library page"
+        }
+    }
+
     suspend fun account(): Result<Account> = call("account") {
         InnertubeParser.parseAccount(Innertube.accountMenu())
             ?: error("No account details")
@@ -1064,34 +1459,48 @@ object YtMusicRepository {
      * YouTube Music has no single "my library" feed: Liked Music is the `LM`
      * auto-playlist, the songs added to the library are a separate feed, and
      * every saved collection has its own browse id. They're fetched in
-     * parallel and a feed that fails or is simply empty (a fresh account has
-     * no saved albums) is dropped rather than failing the whole page.
+     * parallel; failed sections retain their previous contents and expose a
+     * retry prompt without removing the sections that loaded successfully.
      */
-    suspend fun library(): Result<LibraryPage> = call("library") {
+    suspend fun library(previous: LibraryPage? = null): Result<LibraryPage> = call("library") {
         coroutineScope {
-            val liked = async { runCatching { songsPaged(LIKED_MUSIC) }.getOrDefault(emptyList()) }
-            val added = async { runCatching { songsPaged(LIBRARY_SONGS) }.getOrDefault(emptyList()) }
-            val shelves = LIBRARY_FEEDS
-                .map { (title, browseId) ->
-                    async {
-                        val items = runCatching {
-                            libraryItemsPaged(browseId)
-                        }.getOrDefault(emptyList())
-                        HomeShelf(title, items)
-                    }
+            val failedSections = java.util.concurrent.atomic.AtomicInteger(0)
+            suspend fun <T> accountFeed(label: String, fallback: List<T>, block: suspend () -> List<T>): List<T> {
+                repeat(2) {
+                    try { return block() }
+                    catch (cancelled: CancellationException) { throw cancelled }
+                    catch (_: Exception) { /* Retry once before preserving this section. */ }
                 }
-                .awaitAll()
-                .filter { it.items.isNotEmpty() }
-
+                Log.w(TAG, "Library section unavailable: $label")
+                failedSections.incrementAndGet()
+                // Keep other successful sections visible, and expose an explicit retry
+                // in the UI instead of claiming the failed section is truly empty.
+                return fallback
+            }
+            val liked = async {
+                accountFeed("liked", previous?.likedSongs.orEmpty()) {
+                    songsPaged(LIKED_MUSIC, authenticatedOnly = true)
+                }
+            }
+            val added = async {
+                accountFeed("songs", previous?.librarySongs.orEmpty()) {
+                    songsPaged(LIBRARY_SONGS, authenticatedOnly = true)
+                }
+            }
+            val shelves = LIBRARY_FEEDS.map { (title, browseId) ->
+                async {
+                    val cached = previous?.shelves?.firstOrNull { it.title == title }?.items
+                    val items = accountFeed(title, cached.orEmpty()) { libraryItemsPaged(browseId, authenticatedOnly = true) }
+                    HomeShelf(title, items)
+                }
+            }.awaitAll()
             val likedSongs = liked.await()
             val likedIds = likedSongs.mapTo(HashSet()) { it.videoId }
             LibraryPage(
                 likedSongs = likedSongs,
-                // Thumbs-up'd tracks are also in the library feed; only what
-                // the "Liked Music" list doesn't already cover is worth a
-                // second section.
                 librarySongs = added.await().filterNot { it.videoId in likedIds },
-                shelves = shelves,
+                shelves = shelves.filter { it.items.isNotEmpty() },
+                incomplete = failedSections.get() > 0,
             )
         }
     }
@@ -1161,6 +1570,55 @@ object YtMusicRepository {
         return ArtistLink(searched.browseId, clean).also {
             resolvedArtistLinksCache[cacheKey] = listOf(it)
         }
+    }
+
+    /**
+     * A song's credit can contain an artist name paired with a collaborator's
+     * browseId (e.g. Vanessa da Mata / Ben Harper on a duet). Never treat the
+     * browseId as proof of identity: verify the landing header, and recover by
+     * exact artist-name search when the supplied endpoint belongs to someone
+     * else. Only verified name/id pairs are retained.
+     */
+    suspend fun resolveVerifiedArtistLink(name: String, suggestedId: String? = null): ArtistLink? {
+        val clean = name.trim().replace(Regex("""\s+"""), " ")
+        if (clean.isBlank()) return null
+        val key = "verified:${clean.artistLinkKey()}"
+
+        suspend fun isCorrectArtist(id: String): Boolean {
+            if (!id.startsWith("UC")) return false
+            val landing = artistLandingPageForeground(id).getOrNull()
+            return ArtistProfileIdentity.matches(clean, landing?.name)
+        }
+
+        // The hint may be from a collaboration, a playlist header, or a stale
+        // queue entry. Verify it even if its displayed text looks right.
+        val hint = suggestedId?.trim().orEmpty()
+        if (hint.isNotBlank() && isCorrectArtist(hint)) {
+            return ArtistLink(hint, clean).also { resolvedArtistLinksCache[key] = listOf(it) }
+        }
+
+        resolvedArtistLinksCache[key]?.firstOrNull()?.let { saved ->
+            // Verified cache entries are written only after a landing check.
+            return saved.copy(name = clean)
+        }
+
+        val results = search(clean, SearchFilter.ARTISTS).getOrNull().orEmpty()
+            .filterIsInstance<SearchResult.Browse>()
+            .map { it.item }
+            .filter { it.type == BrowseType.ARTIST && ArtistProfileIdentity.matches(clean, it.title) }
+            .distinctBy { it.browseId }
+
+        for (candidate in results.take(12)) {
+            if (candidate.browseId == hint) continue // already rejected
+            if (isCorrectArtist(candidate.browseId)) {
+                return ArtistLink(candidate.browseId, clean).also {
+                    resolvedArtistLinksCache[key] = listOf(it)
+                    Log.d("OrbArtist", "Verified artist link for '$clean': ${candidate.browseId}")
+                }
+            }
+        }
+        Log.w("OrbArtist", "No verified artist browse page for '$clean' (hint=$hint)")
+        return null
     }
 
     /**
@@ -1306,6 +1764,8 @@ object YtMusicRepository {
         val songs: List<Song>,
         val continuation: String?,
         val suggested: List<Song> = emptyList(),
+        /** Collection title from the page header, never inferred from row 1. */
+        val title: String? = null,
         /** Collection artwork from the page header, never inferred from row 1. */
         val thumbnailUrl: String? = null,
         /**
@@ -1336,7 +1796,7 @@ object YtMusicRepository {
         pageOf(Innertube.browse(browseId))
     }
 
-    /** One catalogue response, including its local header metadata (BitChord v1.5.2). */
+    /** One catalogue response, including its local header metadata (Orb v1.5.2). */
     suspend fun browseSongsV151(browseId: String): Result<SongPage> = call("browse:v151:$browseId") {
         val networkStarted = System.nanoTime()
         val response = Innertube.browseV151(browseId)
@@ -1370,15 +1830,53 @@ object YtMusicRepository {
     suspend fun moreSongsForeground(token: String): Result<SongPage> =
         moreSongs(token)
 
+    /**
+     * Resolves whether a playlist contains at least one explicit track without
+     * waiting for the user to open it. The walk stops immediately on the first
+     * positive match; a negative result is returned only after every available
+     * continuation has been exhausted. This makes playlist cards trustworthy
+     * while keeping explicit-heavy playlists cheap to validate.
+     */
+    suspend fun playlistHasExplicit(browseId: String): Result<Boolean> = call("playlist:explicit:$browseId") {
+        var response = Innertube.browse(browseId)
+        val seenTokens = HashSet<String>()
+        var pages = 0
+        var result: Boolean? = null
+        while (result == null) {
+            val shelf = InnertubeParser.parsePlaylistShelf(response)
+            val songs = shelf?.songs ?: InnertubeParser.collectSongsDeep(response)
+            if (songs.any { it.isExplicit }) {
+                result = true
+                continue
+            }
+
+            val token = shelf?.continuation ?: InnertubeParser.continuationToken(response)
+            if (token == null) {
+                result = false
+                continue
+            }
+            if (!seenTokens.add(token)) {
+                error("Playlist explicit scan repeated a continuation token")
+            }
+            if (++pages >= PLAYLIST_EXPLICIT_SCAN_MAX_PAGES) {
+                error("Playlist explicit scan exceeded safety page limit")
+            }
+            response = Innertube.browseContinuation(token)
+        }
+        result
+    }
+
     /** Exact Orb v1.5.1 page parser: no newer release/header enrichment is done here. */
     private fun pageOfV151(response: JsonObject): SongPage {
         val library = InnertubeParser.parseLibraryState(response)
+        val pageTitle = InnertubeParser.parsePageTitle(response)
         val thumbnailUrl = InnertubeParser.parsePageThumbnail(response)
         InnertubeParser.parsePlaylistShelf(response)?.let { shelf ->
             return SongPage(
                 songs = shelf.songs,
                 continuation = shelf.continuation,
                 suggested = shelf.suggested,
+                title = pageTitle,
                 thumbnailUrl = thumbnailUrl,
                 library = library,
                 sections = InnertubeParser.parseOtherVersionsShelf(response)?.let(::listOf).orEmpty(),
@@ -1387,6 +1885,7 @@ object YtMusicRepository {
         return SongPage(
             songs = InnertubeParser.collectSongsDeep(response).distinctBy { it.videoId },
             continuation = InnertubeParser.continuationToken(response),
+            title = pageTitle,
             thumbnailUrl = thumbnailUrl,
             library = library,
             sections = InnertubeParser.parseOtherVersionsShelf(response)?.let(::listOf).orEmpty(),
@@ -1395,6 +1894,7 @@ object YtMusicRepository {
 
     private fun pageOf(response: JsonObject): SongPage {
         val library = InnertubeParser.parseLibraryState(response)
+        val pageTitle = InnertubeParser.parsePageTitle(response)
         val thumbnailUrl = InnertubeParser.parsePageThumbnail(response)
         val releaseSubtitle = InnertubeParser.parseReleaseSubtitle(response)
         val releaseYear = releaseSubtitle
@@ -1415,6 +1915,7 @@ object YtMusicRepository {
                 songs = withReleaseYear(shelf.songs),
                 continuation = shelf.continuation,
                 suggested = shelf.suggested,
+                title = pageTitle,
                 thumbnailUrl = thumbnailUrl,
                 library = library,
                 releaseSubtitle = releaseSubtitle,
@@ -1428,6 +1929,7 @@ object YtMusicRepository {
             // map used to take care of that; paging by hand means saying so.
             songs = withReleaseYear(InnertubeParser.collectSongsDeep(response).distinctBy { it.videoId }),
             continuation = InnertubeParser.continuationToken(response),
+            title = pageTitle,
             thumbnailUrl = thumbnailUrl,
             library = library,
             releaseSubtitle = releaseSubtitle,
@@ -1448,9 +1950,10 @@ object YtMusicRepository {
      * nobody is watching — the library sync, an artist's back catalogue. For
      * anything a screen is waiting on, use [browseSongs] and [moreSongs].
      */
-    private suspend fun songsPaged(browseId: String): List<Song> {
+    private suspend fun songsPaged(browseId: String, authenticatedOnly: Boolean = false): List<Song> {
         val out = LinkedHashMap<String, Song>()
-        var response = Innertube.browse(browseId)
+        var response = if (authenticatedOnly) Innertube.browseAccount(browseId) else Innertube.browse(browseId)
+        val seenTokens = HashSet<String>()
         var page = 1
         while (true) {
             // Same shelf-scoping as pageOf: a playlist (Liked Music and the
@@ -1459,26 +1962,50 @@ object YtMusicRepository {
             val shelf = InnertubeParser.parsePlaylistShelf(response)
             (shelf?.songs ?: InnertubeParser.collectSongsDeep(response)).forEach { out[it.videoId] = it }
             val token = shelf?.continuation ?: InnertubeParser.continuationToken(response)
-            if (token == null || page++ >= MAX_PAGES) break
-            response = runCatching { Innertube.browseContinuation(token) }.getOrNull() ?: break
+            if (token == null) break
+            if (!seenTokens.add(token)) break
+            val limit = if (authenticatedOnly) LIBRARY_COLLECTION_MAX_PAGES else MAX_PAGES
+            if (page++ >= limit) {
+                if (authenticatedOnly) error("YouTube Music library pagination limit reached")
+                break
+            }
+            response = if (authenticatedOnly) {
+                // A failure halfway through a private library is not success.
+                // Let library() keep the previous list and mark it incomplete.
+                Innertube.browseAccountContinuation(token)
+            } else runCatching { Innertube.browseContinuation(token) }.getOrNull() ?: break
         }
         return out.values.toList()
     }
 
     const val MAX_PAGES = 10
+    private const val PLAYLIST_EXPLICIT_SCAN_MAX_PAGES = 100
 
     /** Fully pages account-owned library collections such as albums and playlists. */
-    private suspend fun libraryItemsPaged(browseId: String): List<ShelfItem> {
+    private suspend fun libraryItemsPaged(
+        browseId: String,
+        maxPages: Int = LIBRARY_COLLECTION_MAX_PAGES,
+        authenticatedOnly: Boolean = false,
+    ): List<ShelfItem> {
         val out = LinkedHashMap<String, ShelfItem>()
-        var response = Innertube.browse(browseId)
+        var response = if (authenticatedOnly) Innertube.browseAccount(browseId) else Innertube.browse(browseId)
+        val seenTokens = HashSet<String>()
         var page = 0
-        while (page++ < LIBRARY_COLLECTION_MAX_PAGES) {
+        while (true) {
+            page++
             InnertubeParser.parseLibraryItems(response).forEach { item ->
                 val key = item.browseId ?: item.videoId ?: item.title
                 if (key.isNotBlank()) out.putIfAbsent(key, item)
             }
             val token = InnertubeParser.continuationToken(response) ?: break
-            response = runCatching { Innertube.browseContinuation(token) }.getOrNull() ?: break
+            if (!seenTokens.add(token)) break
+            if (page >= maxPages) {
+                if (authenticatedOnly) error("YouTube Music library pagination limit reached")
+                break
+            }
+            response = if (authenticatedOnly) {
+                Innertube.browseAccountContinuation(token)
+            } else runCatching { Innertube.browseContinuation(token) }.getOrNull() ?: break
         }
         return out.values.toList()
     }
@@ -1559,14 +2086,18 @@ object YtMusicRepository {
      */
     suspend fun userPlaylists(): Result<List<UserPlaylist>> = call("playlists") {
         val out = LinkedHashMap<String, UserPlaylist>()
-        var response = Innertube.browse(LIBRARY_PLAYLISTS)
+        var response = Innertube.browseAccount(LIBRARY_PLAYLISTS)
+        val seenTokens = HashSet<String>()
         var page = 0
-        while (page++ < LIBRARY_COLLECTION_MAX_PAGES) {
+        while (true) {
+            page++
             InnertubeParser.parseUserPlaylists(response).forEach { playlist ->
                 out.putIfAbsent(playlist.browseId, playlist)
             }
             val token = InnertubeParser.continuationToken(response) ?: break
-            response = runCatching { Innertube.browseContinuation(token) }.getOrNull() ?: break
+            if (!seenTokens.add(token)) break
+            if (page >= LIBRARY_COLLECTION_MAX_PAGES) error("YouTube Music playlists pagination limit reached")
+            response = Innertube.browseAccountContinuation(token)
         }
         out.values.toList()
     }

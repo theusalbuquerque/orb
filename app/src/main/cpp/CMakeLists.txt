@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22.1)
-project(bitchord_analysis LANGUAGES CXX)
+project(orb_analysis LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(ANALYZER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/analyzer)
@@ -13,6 +13,8 @@ add_library(bitchord_analysis SHARED
     jni/mel_jni.cpp
     jni/vocal_jni.cpp
 )
+# Legacy target retained for existing externalNativeBuild target filters.
+set_target_properties(bitchord_analysis PROPERTIES OUTPUT_NAME orb_analysis)
 target_include_directories(bitchord_analysis PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${ANALYZER_DIR})
 target_compile_options(bitchord_analysis PRIVATE -O3 -fvisibility=hidden)
 # Keep ELF LOAD and RELRO boundaries compatible with 16 KB Android devices.

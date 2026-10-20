@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="artist_profile_identity_error">Unable to verify this artist profile. Try searching again.</string>
+</resources>

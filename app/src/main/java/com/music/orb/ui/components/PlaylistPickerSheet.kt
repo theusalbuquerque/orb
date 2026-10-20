@@ -15,7 +15,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -31,11 +32,14 @@ import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Public
-import androidx.compose.material3.Button
+import com.music.orb.ui.components.OrbGlassButton as Button
+import com.music.orb.ui.components.OrbGlassFilledTonalButton as FilledTonalButton
+import androidx.compose.material3.Surface
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import com.music.orb.ui.components.OrbGlassIconButton as IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -63,7 +67,7 @@ import com.music.orb.data.model.ROW_ART_PX
 import com.music.orb.data.model.Song
 import com.music.orb.data.model.UserPlaylist
 import com.music.orb.data.model.artworkAt
-import com.music.orb.ui.icons.BitChordIcons
+import com.music.orb.ui.icons.OrbIcons
 import com.music.orb.ui.flavor.OrbFlavorUi
 
 /**
@@ -88,9 +92,27 @@ fun PlaylistPickerSheet(
     modifier: Modifier = Modifier,
     song: Song? = null,
     startCreating: Boolean = false,
+    showTrackHeader: Boolean = true,
+    // The inline Action Button has its own artwork-derived sheet color; standalone
+    // pickers inherit the surrounding Orb glass sheet color.
+    sheetPageColor: androidx.compose.ui.graphics.Color? = null,
 ) {
     var creating by remember { mutableStateOf(startCreating) }
+    val tactileContext = LocalContext.current
+    val pickerPageColor = sheetPageColor ?: orbOverlayGlassBaseColor()
+    val glassForegrounds = artworkSurfaceForegrounds(orbExpressiveGlassTone(pickerPageColor))
 
+    // Do not inherit the floating artwork hero's foreground: that foreground is
+    // computed for the dimmed album art OUTSIDE the sheet. On light glass it can
+    // be dark while playlist rows are dark, making the row labels unreadable.
+    MaterialTheme(
+        colorScheme = MaterialTheme.colorScheme.copy(
+            primary = glassForegrounds.primary,
+            onBackground = glassForegrounds.primary,
+            onSurface = glassForegrounds.primary,
+            onSurfaceVariant = glassForegrounds.secondary,
+        ),
+    ) {
     if (creating) {
         NewPlaylistForm(
             // Nowhere to go back to when the sheet opened straight onto the
@@ -99,22 +121,40 @@ fun PlaylistPickerSheet(
             onCreate = onCreate,
             modifier = modifier,
         )
-        return
+        return@MaterialTheme
     }
 
-    Column(modifier.fillMaxWidth()) {
-        if (song != null) {
-            SheetTrackHeader(song)
-            HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outline)
+    Column(modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
+        // The track context/hero already says what this flow is for. Avoid repeating
+        // “Add to playlist” as a second title; Library's standalone picker keeps its
+        // “Your playlists” heading because it has no track/action sheet behind it.
+        if (song == null) {
+            Text(
+                text = stringResource(R.string.playlist_picker_your_playlists_heading),
+                style = MaterialTheme.typography.headlineSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.padding(top = 8.dp, bottom = 16.dp),
+            )
         }
-        SheetHeading(stringResource(if (song != null) R.string.playlist_picker_add_to_playlist_heading else R.string.playlist_picker_your_playlists_heading))
-
-        ActionRow(
-            icon = BitChordIcons.Plus,
-            label = stringResource(R.string.playlist_picker_new_playlist),
-            onClick = { creating = true },
-        )
-
+        if (song != null && showTrackHeader) {
+            Surface(shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                modifier = Modifier.fillMaxWidth()) { SheetTrackHeader(song) }
+            Spacer(Modifier.height(16.dp))
+        }
+        FilledTonalButton(
+            onClick = {
+                OrbHaptics.perform(tactileContext, OrbHaptics.Kind.ACTION)
+                creating = true
+            },
+            shape = RoundedCornerShape(20.dp),
+            modifier = Modifier.fillMaxWidth().height(56.dp),
+            pageColor = pickerPageColor,
+        ) {
+            Icon(OrbIcons.Plus, contentDescription = null)
+            Spacer(Modifier.width(12.dp))
+            Text(stringResource(R.string.playlist_picker_new_playlist), style = MaterialTheme.typography.titleMedium)
+        }
+        Spacer(Modifier.height(16.dp))
         when {
             // Only while there is nothing to show: re-fetching under a list
             // that is already up would replace it with a spinner for no gain.
@@ -138,40 +178,66 @@ fun PlaylistPickerSheet(
             )
 
             else -> {
-                HorizontalDivider(
-                    modifier = Modifier.padding(vertical = 6.dp),
-                    thickness = 0.5.dp,
-                    color = MaterialTheme.colorScheme.outline,
-                )
                 // Capped so a long list can't push the sheet past the screen;
                 // it scrolls inside the sheet instead.
-                LazyColumn(Modifier.heightIn(max = 320.dp)) {
-                    items(playlists, key = { it.playlistId }) { playlist ->
-                        PlaylistRow(playlist = playlist, onClick = { onPick(playlist) })
+                val playlistScroll = rememberLazyListState()
+                LazyColumn(
+                    Modifier.heightIn(max = 360.dp),
+                    state = playlistScroll,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    itemsIndexed(playlists, key = { _, item -> item.playlistId }) { index, playlist ->
+                        Box(Modifier.orbSheetProgressiveLazyItem(playlistScroll, index)) {
+                            PlaylistRow(
+                                playlist = playlist,
+                                sheetPageColor = pickerPageColor,
+                                onClick = { onPick(playlist) },
+                            )
+                        }
                     }
                 }
             }
         }
         Spacer(Modifier.height(24.dp))
     }
+    }
 }
 
 @Composable
-private fun PlaylistRow(playlist: UserPlaylist, onClick: () -> Unit) {
+private fun PlaylistRow(
+    playlist: UserPlaylist,
+    sheetPageColor: androidx.compose.ui.graphics.Color,
+    onClick: () -> Unit,
+) {
+    val context = LocalContext.current
+    val rowForegrounds = artworkSurfaceForegrounds(orbExpressiveGlassTone(sheetPageColor))
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 22.dp, vertical = 8.dp),
+            .clip(RoundedCornerShape(22.dp))
+            .orbGlassSurface(
+                pageColor = sheetPageColor,
+                cornerRadius = 22.dp,
+                overlayOpacity = 0.68f,
+                contentColorHint = rowForegrounds.primary,
+                // The sheet already manages its own dialog blur and touch feedback.
+                manageDialogBackdrop = false,
+                observeTapFeedback = false,
+            )
+            .clickable {
+                OrbHaptics.perform(context, OrbHaptics.Kind.ACTION)
+                onClick()
+            }
+            .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         AsyncImage(
             model = playlist.thumbnailUrl.artworkAt(ROW_ART_PX),
             contentDescription = null,
             modifier = Modifier
-                .size(44.dp)
-                .clip(RoundedCornerShape(7.dp))
-                .thumbnailBorder(RoundedCornerShape(7.dp))
+                .size(56.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .thumbnailBorder(RoundedCornerShape(14.dp))
                 .background(MaterialTheme.colorScheme.surfaceVariant),
         )
         Spacer(Modifier.width(16.dp))
@@ -179,7 +245,7 @@ private fun PlaylistRow(playlist: UserPlaylist, onClick: () -> Unit) {
             Text(
                 text = playlist.title,
                 style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onBackground,
+                color = rowForegrounds.primary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -187,7 +253,7 @@ private fun PlaylistRow(playlist: UserPlaylist, onClick: () -> Unit) {
                 Text(
                     text = playlist.subtitle,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = rowForegrounds.secondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -210,6 +276,7 @@ private fun NewPlaylistForm(
     var privacy by remember { mutableStateOf(PlaylistPrivacy.PRIVATE) }
     val focusRequester = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
+    val tactileContext = LocalContext.current
 
     // The form exists to be typed into; opening it with the keyboard already
     // up saves the tap that would otherwise always follow.
@@ -237,7 +304,10 @@ private fun NewPlaylistForm(
         ) {
             onBack?.let {
                 IconButton(
-                    onClick = it,
+                    onClick = {
+                        OrbHaptics.perform(tactileContext, OrbHaptics.Kind.NAVIGATION)
+                        it()
+                    },
                     modifier = Modifier.then(
                         if (OrbFlavorUi.expressive) Modifier.size(44.dp) else Modifier
                     ),
@@ -300,7 +370,10 @@ private fun NewPlaylistForm(
                     modifier = Modifier
                         .size(28.dp)
                         .clip(CircleShape)
-                        .clickable { name = "" },
+                        .clickable {
+                            OrbHaptics.perform(tactileContext, OrbHaptics.Kind.ACTION)
+                            name = ""
+                        },
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
@@ -325,14 +398,20 @@ private fun NewPlaylistForm(
                     icon = option.icon,
                     label = option.localizedLabel(),
                     selected = option == privacy,
-                    onClick = { privacy = option },
+                    onClick = {
+                        OrbHaptics.perform(tactileContext, OrbHaptics.Kind.TOGGLE)
+                        privacy = option
+                    },
                 )
             }
         }
 
         Spacer(Modifier.height(20.dp))
         Button(
-            onClick = submit,
+            onClick = {
+                OrbHaptics.perform(tactileContext, OrbHaptics.Kind.ACTION)
+                submit()
+            },
             enabled = name.isNotBlank(),
             modifier = Modifier
                 .fillMaxWidth()
@@ -404,7 +483,7 @@ fun PlaylistActionsSheet(
                             overflow = TextOverflow.Ellipsis,
                         )
                         Text(
-                            text = playlist.subtitle.ifBlank { "Playlist" },
+                            text = playlist.subtitle.takeIf { it.isNotBlank() } ?: stringResource(R.string.orb_l10n_playlist_generic),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
@@ -420,13 +499,13 @@ fun PlaylistActionsSheet(
             index = 1,
             itemKey = "playlist:${playlist.browseId}:open",
         ) {
-            ActionRow(Icons.Rounded.PlayArrow, "Open playlist", onClick = onOpen)
+            ActionRow(Icons.Rounded.PlayArrow, stringResource(R.string.orb_l10n_playlist_open), onClick = onOpen)
         }
         ProgressiveActionSheetItem(
             index = 2,
             itemKey = "playlist:${playlist.browseId}:rename",
         ) {
-            ActionRow(Icons.Rounded.Edit, "Rename") { renaming = true }
+            ActionRow(Icons.Rounded.Edit, stringResource(R.string.orb_l10n_playlist_rename_action)) { renaming = true }
         }
         ProgressiveActionSheetItem(
             index = 3,
@@ -435,12 +514,12 @@ fun PlaylistActionsSheet(
             if (confirmingDelete) {
                 ActionRow(
                     icon = Icons.Rounded.DeleteForever,
-                    label = "Delete \"${playlist.title}\" — tap to confirm",
+                    label = stringResource(R.string.orb_l10n_playlist_delete_confirm, playlist.title),
                     tint = MaterialTheme.colorScheme.error,
                     onClick = onDelete,
                 )
             } else {
-                ActionRow(Icons.Rounded.Delete, "Delete playlist") { confirmingDelete = true }
+                ActionRow(Icons.Rounded.Delete, stringResource(R.string.orb_l10n_playlist_delete)) { confirmingDelete = true }
             }
         }
         Spacer(Modifier.height(24.dp))
@@ -493,7 +572,7 @@ private fun RenamePlaylistForm(
                 )
             }
             Text(
-                text = "Rename playlist",
+                text = stringResource(R.string.orb_l10n_playlist_rename_title),
                 style = MaterialTheme.typography.titleLarge,
                 color = MaterialTheme.colorScheme.onBackground,
                 modifier = Modifier.weight(1f),
@@ -531,7 +610,7 @@ private fun RenamePlaylistForm(
                 .fillMaxWidth()
                 .padding(horizontal = 22.dp),
         ) {
-            Text("Save name")
+            Text(stringResource(R.string.orb_l10n_playlist_save_name))
         }
         Spacer(Modifier.height(28.dp))
     }

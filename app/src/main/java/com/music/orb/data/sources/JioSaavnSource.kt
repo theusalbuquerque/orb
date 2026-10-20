@@ -28,7 +28,7 @@ class JioSaavnSource(override val config: SourceConfig) : MusicSource, SourceReg
         val stream = JioSaavnService.getStreamUrl(trackId) ?: return null
         if (stream.url.isBlank()) return null
         if (stream.kbps != null && stream.kbps <= 96) {
-            TrackLog.d("BitChord", "JioSaavn ${stream.kbps} kbps refused; YouTube is the better fallback")
+            TrackLog.d("Orb", "JioSaavn ${stream.kbps} kbps refused; YouTube is the better fallback")
             return null
         }
         return SourceStream(stream.url, StreamFormat(codec = "mp4", kbps = stream.kbps))

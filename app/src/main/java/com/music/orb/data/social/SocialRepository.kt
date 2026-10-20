@@ -60,6 +60,24 @@ object SocialRepository {
     fun currentUserId(): String? =
         if (OrbSupabase.configured) supabase.auth.currentUserOrNull()?.id else null
 
+    suspend fun deleteOwnAccount(): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val token = requireNotNull(supabase.auth.currentSessionOrNull()?.accessToken) {
+                "The Orb session has expired."
+            }
+            val request = Request.Builder()
+                .url("${OrbSupabase.baseUrl}/functions/v1/orb-delete-account")
+                .header("Authorization", "Bearer $token")
+                .header("apikey", OrbSupabase.publishableKey)
+                .post("{}".toRequestBody("application/json".toMediaType()))
+                .build()
+            Http.client.newCall(request).execute().use { response ->
+                check(response.isSuccessful) { "Account deletion failed (${response.code})." }
+            }
+            clearMyProfileState()
+        }
+    }
+
     fun clearMyProfileState() {
         _myProfileState.value = null
     }
@@ -87,6 +105,45 @@ object SocialRepository {
         }
         return resolved
     }
+
+    /** Latest album ratings visible to the current viewer. RLS keeps private
+     * ratings owner-only and exposes public ratings to signed-in profile viewers. */
+    suspend fun albumRatingsForUser(
+        userId: String,
+        limit: Int = 10,
+    ): List<ProfileAlbumRatingRow> {
+        if (userId.isBlank()) return emptyList()
+        val safeLimit = limit.coerceIn(1, 50)
+        return supabase.from("album_ratings")
+            .select {
+                filter { eq("user_id", userId) }
+                order("updated_at", Order.DESCENDING)
+                range(0L..(safeLimit - 1).toLong())
+            }
+            .decodeList<ProfileAlbumRatingRow>()
+    }
+
+    /**
+     * Keeps the legacy album_ratings.is_public column usable as an activity
+     * participation flag. Fine-grained profile visibility is enforced by the
+     * profile recent_ratings_visibility audience in Supabase RLS/RPCs.
+     */
+    suspend fun setAlbumRatingsVisibility(audience: String): Result<Unit> = runCatching {
+        val userId = requireNotNull(currentUserId()) { "Orb account is not signed in." }
+        val visible = when (audience.lowercase()) {
+            "nobody", "private", "none" -> false
+            else -> true
+        }
+        supabase.from("album_ratings").update(
+            { set("is_public", visible) },
+        ) {
+            filter { eq("user_id", userId) }
+        }
+    }
+
+    /** Backward-compatible public/private entry point. */
+    suspend fun setAlbumRatingsSharing(enabled: Boolean): Result<Unit> =
+        setAlbumRatingsVisibility(if (enabled) "everyone" else "nobody")
 
     suspend fun profileByUsername(username: String): OrbProfile? {
         val normalized = normalizeUsername(username) ?: return null
@@ -127,6 +184,15 @@ object SocialRepository {
             .filter { it.username?.startsWith(prefix) == true }
             .take(safeLimit)
             .toList()
+    }
+
+    suspend fun followingStartedAt(): Map<String, Instant> {
+        val me = currentUserId() ?: return emptyMap()
+        return supabase.from("follows").select {
+            filter { eq("follower_id", me) }
+        }.decodeList<FollowStatsRow>().mapNotNull { row ->
+            runCatching { row.followingId to Instant.parse(row.createdAt) }.getOrNull()
+        }.toMap()
     }
 
     suspend fun followingIds(): List<String> {
@@ -794,6 +860,7 @@ object SocialRepository {
         favoriteArtistsVisibility: String = "everyone",
         favoriteAlbumsVisibility: String = "everyone",
         favoriteSongsVisibility: String = "everyone",
+        recentRatingsVisibility: String? = null,
         // Kept for source compatibility with older call sites. When supplied,
         // it is only used as a fallback for category values still at defaults.
         favoriteContentVisibility: String? = null,
@@ -816,6 +883,7 @@ object SocialRepository {
         val artists = normalized(favoriteArtistsVisibility, favoriteContentVisibility)
         val albums = normalized(favoriteAlbumsVisibility, favoriteContentVisibility)
         val songs = normalized(favoriteSongsVisibility, favoriteContentVisibility)
+        val ratings = recentRatingsVisibility?.let { normalized(it) }
         val legacyUnifiedFavorites = if (artists == albums && albums == songs) {
             artists
         } else {
@@ -835,6 +903,7 @@ object SocialRepository {
                 set("favorite_artists_visibility", artists)
                 set("favorite_albums_visibility", albums)
                 set("favorite_songs_visibility", songs)
+                if (ratings != null) set("recent_ratings_visibility", ratings)
                 set("favorite_content_visibility", legacyUnifiedFavorites)
             },
         ) {
@@ -853,6 +922,7 @@ object SocialRepository {
                 favoriteArtistsVisibility = artists,
                 favoriteAlbumsVisibility = albums,
                 favoriteSongsVisibility = songs,
+                recentRatingsVisibility = ratings ?: current.recentRatingsVisibility,
             )
         }
     }
@@ -974,7 +1044,7 @@ object SocialRepository {
         objectName: String,
     ): Result<String> = runCatching {
         require(bytes.isNotEmpty()) { "The selected image is empty." }
-        require(bytes.size <= MAX_PROFILE_IMAGE_BYTES) { "Profile images can be at most 5 MB." }
+        require(bytes.size <= MAX_PROFILE_IMAGE_BYTES) { "Profile images can be at most 50 MB." }
         require(mimeType.startsWith("image/")) { "The selected file is not an image." }
 
         val userId = requireNotNull(currentUserId()) { "Orb account is not signed in." }
@@ -1136,6 +1206,7 @@ object SocialRepository {
             album = song.albumName,
         )
         val statsRow = ListeningActivityInsert(
+            sessionToken = java.util.UUID.nameUUIDFromBytes("$userId|${song.videoId}|$startedAt".toByteArray(Charsets.UTF_8)).toString(),
             userId = userId,
             videoId = song.videoId,
             title = song.title,
@@ -1153,7 +1224,7 @@ object SocialRepository {
         )
 
         val extendedWrite = runCatching {
-            supabase.from("listening_activity").insert(statsRow)
+            supabase.from("listening_activity").upsert(statsRow) { onConflict = "user_id,session_token" }
         }
         if (extendedWrite.isSuccess) return true
 
@@ -1527,6 +1598,6 @@ object SocialRepository {
         Instant.ofEpochMilli(epochMs.coerceAtLeast(0L)).toString()
 
     private const val MAX_BATCH_SIZE = 100
-    private const val MAX_PROFILE_IMAGE_BYTES = 5 * 1024 * 1024
+    private const val MAX_PROFILE_IMAGE_BYTES = 50 * 1024 * 1024
     private val USERNAME = Regex("^[a-z0-9._]+$")
 }

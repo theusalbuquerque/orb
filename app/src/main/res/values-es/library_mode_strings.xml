@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="account_library_sync_header">Integración de la Biblioteca</string>
+    <string name="account_library_sync_title">Sincronización con YouTube Music</string>
+    <string name="settings_youtube_music_library_linked">Vinculada tu biblioteca de YouTube Music con Orb.</string>
+    <string name="settings_youtube_music_library_unlinked">Desvincula tu biblioteca de YouTube Music y pasa a usar una biblioteca exclusiva de la app.</string>
+    <string name="orb_library_empty">Tu biblioteca de Orb está vacía. Añade canciones, álbumes o sencillos desde sus acciones.</string>
+    <string name="song_action_add_to_library">Añadir a la biblioteca</string>
+    <string name="song_action_remove_from_library">Quitar de la biblioteca</string>
+    <string name="library_downloads_empty">Aún no hay canciones descargadas.</string>
+    <string name="downloads_remove_all">Eliminar todas las descargas</string>
+    <string name="downloads_remove_all_title">¿Eliminar todas las descargas?</string>
+    <string name="downloads_remove_all_message">Todas las canciones descargadas por Orb se eliminarán de este dispositivo.</string>
+    <string name="downloads_remove_all_confirm">Eliminar todo</string>
+
+    <!-- Album/playlist collection download confirmations. -->
+    <string name="collection_download_cancel_title">¿Cancelar descarga?</string>
+    <string name="collection_download_cancel_message">La descarga del álbum o playlist sigue en curso. Las canciones pendientes se cancelarán y las ya descargadas se eliminarán.</string>
+    <string name="collection_download_cancel_confirm">Cancelar descarga</string>
+    <string name="collection_download_remove_title">¿Eliminar descarga?</string>
+    <string name="collection_download_remove_message">Este álbum o playlist ya se descargó por completo. ¿Eliminar las canciones descargadas de este dispositivo?</string>
+    <string name="collection_download_remove_confirm">Eliminar descarga</string>
+</resources>

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="beta_updates_header">Actualizaciones</string>
-    <string name="beta_updates_join_title">Participar en el Programa Beta</string>
+    <string name="beta_updates_join_title">Participar en el programa beta</string>
     <string name="beta_updates_join_subtitle_off">Recibe versiones de prueba antes de la versión estable.</string>
     <string name="beta_updates_join_subtitle_beta">Recibirás notificaciones cuando haya nuevas versiones disponibles.</string>
     <string name="beta_updates_join_subtitle_stable_auto">Recibirás notificaciones cuando haya nuevas versiones disponibles.</string>
@@ -26,7 +26,7 @@
     <string name="beta_updates_in_app_message">%1$s se ha descargado y está listo para instalar.</string>
     <string name="beta_updates_install_now">Instalar ahora</string>
     <string name="beta_updates_in_app_icon_description">Actualización: %1$s</string>
-    <string name="update_manual_title">Buscar actualizaciones ahora</string>
+    <string name="update_manual_title">Buscar actualizaciones</string>
     <string name="update_manual_checking">Buscando actualizaciones…</string>
     <string name="update_manual_up_to_date">Ya estás usando la versión más reciente.</string>
     <string name="update_manual_no_release">No se encontró una versión más reciente.</string>

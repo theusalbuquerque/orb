@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_download_preferences">Download preferences</string>
+    <string name="settings_storage_limit">Storage limit</string>
+    <string name="settings_cache_page_title">Cache</string>
+    <string name="settings_cache_page_subtitle">Manage music, album artwork and temporary files</string>
+    <string name="settings_cache_page_description">Clear temporary files without deleting your offline downloads, account or preferences.</string>
+    <string name="settings_cache_back">Back to settings</string>
+    <string name="settings_clear_covers_cache">Clear artwork cache</string>
+    <string name="settings_clear_app_cache">Clear app cache</string>
+    <string name="settings_clear_app_cache_subtitle">Removes other temporary app files, leaving music and artwork caches intact</string>
+    <string name="settings_clear_cache_confirm">Remove these temporary files? Downloaded music and your preferences will be kept.</string>
+    <string name="settings_clear_cache_cancel">Cancel</string>
+    <string name="settings_clear_cache_confirm_action">Clear cache</string>
+    <string name="settings_clear_cache_success">Cache cleared</string>
+    <string name="settings_clear_cache_failed">Some temporary files could not be removed</string>
+    <string name="settings_lyrics_origin">Lyrics sources</string>
+    <string name="settings_nerd_stats_short">Stats for nerds</string>
+    <string name="settings_display_hide_status_bar">Hide status bar</string>
+</resources>

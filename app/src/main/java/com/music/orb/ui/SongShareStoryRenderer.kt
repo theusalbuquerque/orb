@@ -2,231 +2,247 @@ package com.music.orb.ui
 
 import android.content.Context
 import android.content.Intent
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.RectF
-import android.graphics.Typeface
+import android.graphics.*
 import android.net.Uri
-import androidx.annotation.DrawableRes
 import androidx.core.content.FileProvider
 import com.music.orb.R
 import com.music.orb.data.model.Song
+import com.music.orb.data.model.artworkAt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.net.URL
 import kotlin.math.max
 
-/** Renders a 9:16 music card ready for Stories-style image sharing. */
+/** Shared glass-card artwork for the sheet preview and portrait exports. */
 object SongShareStoryRenderer {
     const val WIDTH = 1080
-    const val HEIGHT = 1920
-    private const val SHARE_LINK = "https://theusalbuquerque.github.io/orb/"
+    const val HEIGHT = 1080
+    fun link(song: Song): String = "https://music.youtube.com/watch?v=${Uri.encode(song.videoId)}"
 
-    suspend fun render(context: Context, song: Song): Bitmap = withContext(Dispatchers.IO) {
-        val output = Bitmap.createBitmap(WIDTH, HEIGHT, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(output)
-        val artwork = load(song.thumbnailUrl)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-
-        if (artwork != null) drawBlurredBackdrop(canvas, artwork, paint)
-        else canvas.drawColor(Color.rgb(45, 61, 52))
-
-        // Dim the blurred cover so the central card remains the focus.
-        paint.color = Color.argb(92, 10, 18, 13)
-        canvas.drawRect(0f, 0f, WIDTH.toFloat(), HEIGHT.toFloat(), paint)
-
-        // Faithful central card: portrait card with square cover on top and text below.
-        // Tuned to match the approved reference more closely.
-        val card = RectF(206f, 404f, 874f, 1228f)
-        drawStoryCard(canvas, artwork, song, card)
-        drawFooterBranding(canvas, context, artwork)
-        output
-    }
-
-    suspend fun share(context: Context, song: Song) {
-        val bitmap = render(context, song)
-        val uri = withContext(Dispatchers.IO) {
-            val folder = File(context.cacheDir, "song_share").apply { mkdirs() }
-            val file = File(folder, "orb-song-${song.videoId}.png")
-            file.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
-            FileProvider.getUriForFile(context, "${context.packageName}.orb-updates.files", file)
-        }
-        withContext(Dispatchers.Main) {
-            val shareText = "${song.title} — ${song.artist}\n$SHARE_LINK"
-            val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                // ACTION_SEND targets match primarily on the MIME type. Do not
-                // also set the intent data to the Orb https link: doing that
-                // requires receiving apps to advertise ACTION_SEND + image/png
-                // + https simultaneously, which removes almost every normal
-                // share target from Android's chooser. The URL belongs in
-                // EXTRA_TEXT; the generated story artwork stays in EXTRA_STREAM.
-                type = "image/png"
-                putExtra(Intent.EXTRA_STREAM, uri)
-                putExtra(Intent.EXTRA_TEXT, shareText)
-                putExtra(Intent.EXTRA_SUBJECT, song.title)
-                clipData = android.content.ClipData.newUri(context.contentResolver, "orb-song-share", uri)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            val initialIntents = mutableListOf<Intent>()
-            val instagramStoryIntent = Intent("com.instagram.share.ADD_TO_STORY").apply {
-                setDataAndType(uri, "image/png")
-                putExtra("content_url", SHARE_LINK)
-                putExtra("source_application", context.packageName)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                clipData = android.content.ClipData.newUri(context.contentResolver, "orb-song-share", uri)
-                `package` = "com.instagram.android"
-            }
-            if (instagramStoryIntent.resolveActivity(context.packageManager) != null) {
-                initialIntents += instagramStoryIntent
-            }
-            val chooser = Intent.createChooser(sendIntent, context.getString(R.string.song_action_share)).apply {
-                if (initialIntents.isNotEmpty()) {
-                    putExtra(Intent.EXTRA_INITIAL_INTENTS, initialIntents.toTypedArray())
-                }
-            }
-            context.startActivity(chooser)
-        }
-    }
-
-    private fun drawStoryCard(canvas: Canvas, artwork: Bitmap?, song: Song, card: RectF) {
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-        paint.color = Color.argb(220, 45, 46, 49)
-        paint.setShadowLayer(70f, 0f, 28f, Color.argb(136, 0, 0, 0))
-        canvas.drawRoundRect(card, 30f, 30f, paint)
-        paint.clearShadowLayer()
-
-        val sidePadding = 34f
-        val topPadding = 34f
-        val coverSize = card.width() - sidePadding * 2f
-        val coverRect = RectF(
-            card.left + sidePadding,
-            card.top + topPadding,
-            card.left + sidePadding + coverSize,
-            card.top + topPadding + coverSize,
-        )
-        if (artwork != null) {
-            drawCenterCrop(canvas, artwork, coverRect, paint)
-        } else {
-            paint.color = Color.rgb(206, 206, 206)
-            canvas.drawRoundRect(coverRect, 8f, 8f, paint)
-        }
-
-        val textLeft = coverRect.left
-        val textWidth = coverRect.width()
-        val titleBase = coverRect.bottom + 64f
-
-        paint.typeface = Typeface.create("sans-serif", Typeface.BOLD)
-        paint.textSize = 44f
-        paint.color = Color.WHITE
-        paint.isSubpixelText = true
-        val title = ellipsize(song.title, paint, textWidth)
-        canvas.drawText(title, textLeft, titleBase, paint)
-
-        paint.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-        paint.textSize = 34f
-        paint.color = Color.argb(232, 255, 255, 255)
-        val artist = ellipsize(song.artist, paint, textWidth)
-        canvas.drawText(artist, textLeft, titleBase + 40f, paint)
-    }
-
-    private fun drawFooterBranding(canvas: Canvas, context: Context, artwork: Bitmap?) {
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-        val listen = context.getString(R.string.song_share_listen_on)
-        paint.color = Color.argb(238, 255, 255, 255)
-        paint.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-        paint.textSize = 34f
-        val listenWidth = paint.measureText(listen)
-        canvas.drawText(listen, (WIDTH - listenWidth) / 2f, 1512f, paint)
-
-        // Use the official Orb share logo resources derived from the app assets.
-        val logoRes = if (artwork != null && averageLuminance(artwork) < 0.42f) {
-            R.drawable.orb_share_logo_light
-        } else {
-            R.drawable.orb_share_logo_dark
-        }
-        val logo = trimTransparent(resourceBitmap(context, logoRes))
-        if (logo != null) {
-            val logoWidth = 192f
-            val logoHeight = logoWidth * (logo.height.toFloat() / logo.width.toFloat())
-            val dst = RectF(
-                (WIDTH - logoWidth) / 2f,
-                1540f,
-                (WIDTH + logoWidth) / 2f,
-                1540f + logoHeight,
-            )
-            canvas.drawBitmap(logo, null, dst, paint)
-        }
-    }
-
-    private fun load(url: String?): Bitmap? {
-        if (url.isNullOrBlank()) return null
-        return runCatching {
-            URL(url.replace("w120-h120", "w1200-h1200")).openStream().use(BitmapFactory::decodeStream)
+    suspend fun render(context: Context, song: Song, story: Boolean = false, cardOnly: Boolean = false): Bitmap = withContext(Dispatchers.IO) {
+        val artwork = runCatching {
+            val connection = URL(song.artworkAt(1200)).openConnection()
+            connection.connectTimeout = 10000
+            connection.readTimeout = 10000
+            connection.getInputStream().use { BitmapFactory.decodeStream(it) }
         }.getOrNull()
-    }
-
-    private fun resourceBitmap(context: Context, @DrawableRes resId: Int): Bitmap? =
-        runCatching { BitmapFactory.decodeResource(context.resources, resId) }.getOrNull()
-
-    private fun averageLuminance(bitmap: Bitmap): Float {
-        val sample = Bitmap.createScaledBitmap(bitmap, 24, 24, true)
-        val pixels = IntArray(sample.width * sample.height)
-        sample.getPixels(pixels, 0, sample.width, 0, 0, sample.width, sample.height)
-        var sum = 0f
-        for (color in pixels) sum += luminance(color)
-        sample.recycle()
-        return if (pixels.isNotEmpty()) sum / pixels.size else 0f
-    }
-
-    private fun luminance(color: Int): Float {
-        fun c(channel: Int): Float {
-            val value = channel / 255f
-            return if (value <= 0.03928f) value / 12.92f else Math.pow(((value + 0.055f) / 1.055f).toDouble(), 2.4).toFloat()
+        if (cardOnly) return@withContext renderGlassCardPreview(song, artwork)
+        if (story) return@withContext renderStory(context, song, artwork)
+        val bitmap = Bitmap.createBitmap(WIDTH, HEIGHT, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        val rect = RectF(0f, 0f, WIDTH.toFloat(), HEIGHT.toFloat())
+        canvas.drawColor(Color.rgb(23, 35, 43))
+        if (artwork != null) {
+            drawCenterCrop(canvas, artwork, rect, paint)
+            val small = Bitmap.createScaledBitmap(artwork, 90, 90, true)
+            val blurred = boxBlur(small, 7)
+            val layer = canvas.saveLayer(rect, null)
+            drawCenterCrop(canvas, blurred, rect, paint)
+            paint.shader = LinearGradient(0f, HEIGHT * .52f, 0f, HEIGHT * .80f,
+                Color.TRANSPARENT, Color.WHITE, Shader.TileMode.CLAMP)
+            paint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+            canvas.drawRect(rect, paint)
+            paint.shader = null
+            paint.xfermode = null
+            canvas.restoreToCount(layer)
+            small.recycle()
+            blurred.recycle()
+            artwork.recycle()
         }
-        return 0.2126f * c(Color.red(color)) + 0.7152f * c(Color.green(color)) + 0.0722f * c(Color.blue(color))
+        paint.shader = LinearGradient(0f, HEIGHT * .53f, 0f, HEIGHT.toFloat(),
+            Color.TRANSPARENT, Color.argb(180, 0, 8, 14), Shader.TileMode.CLAMP)
+        canvas.drawRect(rect, paint)
+        paint.shader = null
+        paint.color = Color.WHITE
+        paint.typeface = Typeface.create("sans-serif", Typeface.BOLD)
+        paint.textSize = 58f
+        canvas.drawText(ellipsize(song.title, paint, WIDTH - 112f), 56f, HEIGHT - 220f, paint)
+        paint.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+        paint.textSize = 40f
+        paint.color = Color.rgb(232, 238, 241)
+        canvas.drawText(ellipsize(song.artist, paint, WIDTH - 112f), 56f, HEIGHT - 150f, paint)
+        paint.textSize = 34f
+        val album = listOfNotNull(song.albumName?.takeIf { it.isNotBlank() }, song.releaseYear?.toString()).joinToString(" · ")
+        if (album.isNotBlank()) canvas.drawText(ellipsize(album, paint, WIDTH - 112f), 56f, HEIGHT - 92f, paint)
+        drawBrandFooter(context, bitmap, canvas, 1006f, 28f, 20f)
+        bitmap
     }
 
-    private fun trimTransparent(bitmap: Bitmap?): Bitmap? {
-        if (bitmap == null) return null
-        val width = bitmap.width
-        val height = bitmap.height
-        var left = width
-        var top = height
-        var right = -1
-        var bottom = -1
-        val pixels = IntArray(width * height)
-        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
-        for (y in 0 until height) {
-            for (x in 0 until width) {
-                val alpha = Color.alpha(pixels[y * width + x])
-                if (alpha > 8) {
-                    if (x < left) left = x
-                    if (y < top) top = y
-                    if (x > right) right = x
-                    if (y > bottom) bottom = y
-                }
+    /** Vertical export: original square cover, caption and glass frame in safe central area. */
+    private fun renderStory(context: Context, song: Song, artwork: Bitmap?): Bitmap {
+        val output = Bitmap.createBitmap(1080, 1920, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(output)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        val background = RectF(0f, 0f, 1080f, 1920f)
+        canvas.drawColor(Color.rgb(30, 38, 55))
+        if (artwork != null) {
+            val small = Bitmap.createScaledBitmap(artwork, 64, 64, true)
+            val first = boxBlur(small, 12)
+            val blurred = boxBlur(first, 12)
+            drawCenterCrop(canvas, blurred, background, paint)
+            small.recycle(); first.recycle(); blurred.recycle()
+        }
+        drawGlassCard(canvas, song, artwork)
+        drawBrandFooter(context, output, canvas, 1660f, 56f, 28f)
+        artwork?.recycle()
+        return output
+    }
+
+    /** Only the framed story card; transparent outside its rounded outline. */
+    private fun renderGlassCardPreview(song: Song, artwork: Bitmap?): Bitmap {
+        val output = Bitmap.createBitmap(872, 1108, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(output)
+        canvas.translate(-104f, -406f)
+        // Without the blurred story backdrop, a translucent tint inside the frame
+        // keeps the white caption readable over either sheet theme.
+        val tint = Paint(Paint.ANTI_ALIAS_FLAG)
+        val sampled = artwork?.getPixel(artwork.width / 2, artwork.height - 1)
+            ?: Color.rgb(30, 38, 55)
+        tint.color = Color.argb(220, (Color.red(sampled) * .25f).toInt(),
+            (Color.green(sampled) * .25f).toInt(), (Color.blue(sampled) * .25f).toInt())
+        canvas.drawRoundRect(RectF(104f, 406f, 976f, 1514f), 44f, 44f, tint)
+        drawGlassCard(canvas, song, artwork)
+        artwork?.recycle()
+        return output
+    }
+
+    private fun drawGlassCard(canvas: Canvas, song: Song, artwork: Bitmap?) {
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        val frame = RectF(104f, 406f, 976f, 1514f)
+        paint.color = Color.argb(48, 255, 255, 255)
+        canvas.drawRoundRect(frame, 44f, 44f, paint)
+        paint.shader = LinearGradient(0f, 1230f, 0f, 1514f,
+            Color.TRANSPARENT, Color.argb(100, 0, 12, 28), Shader.TileMode.CLAMP)
+        canvas.drawRoundRect(frame, 44f, 44f, paint)
+        paint.shader = null
+        val cover = RectF(136f, 438f, 944f, 1246f)
+        canvas.save()
+        canvas.clipPath(Path().apply { addRoundRect(cover, 26f, 26f, Path.Direction.CW) })
+        paint.color = Color.WHITE
+        if (artwork != null) drawCenterCrop(canvas, artwork, cover, paint)
+        canvas.restore()
+        paint.color = Color.WHITE
+        paint.typeface = Typeface.create("sans-serif", Typeface.BOLD)
+        paint.textSize = 56f
+        // Reserve actual space for E inside the same title row in Story/Status
+        // exports and in the sharing preview (both use this card renderer).
+        drawStoryTitleWithExplicitBadge(canvas, song, paint)
+        paint.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+        paint.textSize = 40f
+        canvas.drawText(ellipsize(song.artist, paint, 780f), 152f, 1390f, paint)
+        paint.color = Color.argb(190, 255, 255, 255)
+        paint.textSize = 32f
+        val album = listOfNotNull(song.albumName?.takeIf { it.isNotBlank() }, song.releaseYear?.toString()).joinToString(" · ")
+        canvas.drawText(ellipsize(album, paint, 780f), 152f, 1450f, paint)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 2f
+        paint.shader = LinearGradient(104f, 406f, 976f, 1514f,
+            Color.argb(210, 255, 255, 255), Color.argb(95, 255, 255, 255), Shader.TileMode.CLAMP)
+        canvas.drawRoundRect(frame, 44f, 44f, paint)
+    }
+
+    /** Compact, high-contrast E marker immediately following the visible title. */
+    private fun drawStoryTitleWithExplicitBadge(canvas: Canvas, song: Song, titlePaint: Paint) {
+        val left = 152f
+        val baseline = 1330f
+        val badgeWidth = 38f
+        val badgeGap = 12f
+        val reserved = if (song.isExplicit) badgeWidth + badgeGap else 0f
+        val displayedTitle = ellipsize(song.title, titlePaint, 780f - reserved)
+        canvas.drawText(displayedTitle, left, baseline, titlePaint)
+        if (!song.isExplicit) return
+
+        val badgeLeft = left + titlePaint.measureText(displayedTitle) + badgeGap
+        // Center the seal on the *visible glyphs*, not on a guessed offset from
+        // the text baseline. Descenders (e.g. the "y" in "Pyramids") otherwise
+        // make a fixed-position E appear slightly too high alongside the title.
+        val measuredTitle = displayedTitle.ifBlank { "H" }
+        val titleGlyphBounds = Rect()
+        titlePaint.getTextBounds(measuredTitle, 0, measuredTitle.length, titleGlyphBounds)
+        val visualTitleCenterY = baseline + (titleGlyphBounds.top + titleGlyphBounds.bottom) / 2f
+        val badgeHeight = 37f
+        val badgeTop = visualTitleCenterY - badgeHeight / 2f
+        val bounds = RectF(badgeLeft, badgeTop, badgeLeft + badgeWidth, badgeTop + badgeHeight)
+        val badgePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(222, 241, 241, 241)
+        }
+        canvas.drawRoundRect(bounds, 7f, 7f, badgePaint)
+        badgePaint.apply {
+            color = Color.rgb(28, 28, 28)
+            typeface = Typeface.create("sans-serif", Typeface.BOLD)
+            textSize = 27f
+            textAlign = Paint.Align.CENTER
+        }
+        val centeredBaseline = bounds.centerY() - (badgePaint.ascent() + badgePaint.descent()) / 2f
+        canvas.drawText("E", bounds.centerX(), centeredBaseline, badgePaint)
+    }
+
+    private fun drawBrandFooter(
+        context: Context,
+        bitmap: Bitmap,
+        canvas: Canvas,
+        top: Float,
+        logoHeight: Float,
+        textSize: Float,
+    ) {
+        val dark = Color.luminance(bitmap.getPixel(bitmap.width / 2, top.toInt())) < 0.45f
+        val resource = if (dark) R.drawable.orb_share_wordmark_light else R.drawable.orb_share_wordmark_dark
+        val logo = BitmapFactory.decodeResource(context.resources, resource) ?: return
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        val width = logoHeight * logo.width.toFloat() / logo.height
+        val left = (bitmap.width - width) / 2f
+        canvas.drawBitmap(logo, null, RectF(left, top, left + width, top + logoHeight), paint)
+        logo.recycle()
+        paint.color = if (dark) Color.WHITE else Color.BLACK
+        paint.textSize = textSize
+        paint.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+        paint.textAlign = Paint.Align.CENTER
+        canvas.drawText(context.getString(R.string.song_share_android_exclusive),
+            bitmap.width / 2f, top + logoHeight + textSize + 8f, paint)
+    }
+
+    suspend fun prepare(context: Context, bitmap: Bitmap): Uri = withContext(Dispatchers.IO) {
+        val folder = File(context.cacheDir, "song_share").apply { mkdirs() }
+        val file = File(folder, "song-${java.util.UUID.randomUUID()}.png")
+        file.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        FileProvider.getUriForFile(context, "${context.packageName}.orb-updates.files", file)
+    }
+
+    fun sharePrepared(
+        context: Context,
+        song: Song,
+        uri: Uri,
+        targetPackage: String? = null,
+        shareLinkOverride: String? = null,
+    ) {
+        if (targetPackage == "com.instagram.android") {
+            val storyIntent = Intent("com.instagram.share.ADD_TO_STORY").apply {
+                setDataAndType(uri, "image/png")
+                setPackage(targetPackage)
+                clipData = android.content.ClipData.newUri(context.contentResolver, "song-story", uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            try { context.startActivity(storyIntent); return }
+            catch (_: android.content.ActivityNotFoundException) { /* Fall back to image sharing. */ }
+        }
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "image/png"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            putExtra(Intent.EXTRA_TEXT, "${song.title} — ${song.artist}\n${shareLinkOverride ?: link(song)}")
+            putExtra(Intent.EXTRA_SUBJECT, song.title)
+            clipData = android.content.ClipData.newUri(context.contentResolver, "song-share", uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        if (targetPackage != null) {
+            intent.setPackage(targetPackage)
+            try { context.startActivity(intent); return } catch (_: android.content.ActivityNotFoundException) {
+                intent.setPackage(null)
             }
         }
-        return if (right < left || bottom < top) bitmap else Bitmap.createBitmap(bitmap, left, top, right - left + 1, bottom - top + 1)
+        context.startActivity(Intent.createChooser(intent, song.title))
     }
-
-    private fun drawBlurredBackdrop(canvas: Canvas, artwork: Bitmap, paint: Paint) {
-        val smallW = WIDTH / 8
-        val smallH = HEIGHT / 8
-        val small = Bitmap.createBitmap(smallW, smallH, Bitmap.Config.ARGB_8888)
-        drawCenterCrop(Canvas(small), artwork, RectF(0f, 0f, smallW.toFloat(), smallH.toFloat()), paint)
-        val blurredSmall = boxBlur(small, radius = 14)
-        val blurred = Bitmap.createScaledBitmap(blurredSmall, WIDTH, HEIGHT, true)
-        canvas.drawBitmap(blurred, 0f, 0f, paint)
-        if (blurredSmall !== small) blurredSmall.recycle()
-        small.recycle()
-        blurred.recycle()
-    }
-
     private fun boxBlur(source: Bitmap, radius: Int): Bitmap {
         if (radius <= 0) return source
         val width = source.width

@@ -1,7 +1,7 @@
 package com.music.orb.data.sources
 
 /**
- * Audio source protocols used by the BitChord v1.5 playback policy.
+ * Audio source protocols used by the Orb v1.5 playback policy.
  * Declaration order is playback priority.
  */
 enum class SourceKind(

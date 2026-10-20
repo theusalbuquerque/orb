@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="orb_download_quality_title">Calidad de descarga</string>
+    <string name="orb_download_quality_medium">Media · hasta 128 kbps</string>
+    <string name="orb_download_quality_high">Alta · hasta 320 kbps</string>
+    <string name="orb_download_quality_maximum">Máxima · Lossless / Hi-Res Lossless</string>
+    <string name="orb_download_quality_premium">Exclusivo de Orb Premium</string>
+    <string name="orb_download_quality_download">Descargar</string>
+    <string name="orb_download_maximum_unavailable">Lossless no está disponible para esta canción ahora. No se descargó un archivo de menor calidad. Vuelve a intentarlo más tarde o elige Alta.</string>
+    <string name="orb_download_quality_cancel">Cancelar</string>
+</resources>

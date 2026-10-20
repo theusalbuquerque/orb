@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="song_action_remove_liked_music">Quitar de canciones que te gustan</string>
+    <string name="song_action_like">Me gusta</string>
+    <string name="song_action_undo_dislike">Deshacer No me gusta</string>
+    <string name="song_action_dislike">No me gusta</string>
+    <string name="song_action_add_to_playlist">Añadir a una lista de reproducción</string>
+    <string name="song_action_remove_from_playlist">Quitar de esta lista de reproducción</string>
+    <string name="song_action_play_next">Reproducir a continuación</string>
+    <string name="song_action_add_to_queue">Añadir a la cola</string>
+    <string name="song_action_open_album">Abrir álbum</string>
+    <string name="song_action_open_artist">Abrir artista</string>
+    <string name="song_action_sleep_timer">Temporizador</string>
+    <string name="song_action_share">Compartir</string>
+    <string name="song_action_copy_log">Copiar registro</string>
+    <string name="song_action_queued">En cola</string>
+    <string name="song_action_cancel">Cancelar</string>
+    <string name="song_action_downloading">Descargando</string>
+    <string name="song_action_retry">Reintentar</string>
+    <string name="song_action_saved_to_downloads">Guardado en Descargas</string>
+    <string name="song_action_delete">Eliminar</string>
+    <string name="song_action_download">Descargar</string>
+    <string name="song_action_back">Atrás</string>
+    <string name="song_action_sleep_countdown">%1$s hasta pausar la reproducción</string>
+    <string name="song_action_pausing_when_song_ends">Se pausará cuando termine esta canción</string>
+    <string name="song_action_pause_after_a_while">Pausar la reproducción después de un tiempo</string>
+    <string name="song_action_after_this_song">Después de esta canción</string>
+    <string name="song_action_one_hour">1 hora</string>
+    <string name="song_action_minutes">%1$d minutos</string>
+    <string name="song_action_turn_off_timer">Desactivar temporizador</string>
+    <string name="song_action_running">Activo</string>
+    <string name="song_action_remove_download">Eliminar descarga</string>
+</resources>

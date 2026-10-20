@@ -10,5 +10,5 @@
     <string name="playback_history_today">Hoy</string>
     <string name="playback_history_yesterday">Ayer</string>
     <string name="album_do_not_play">No reproducir este álbum</string>
-    <string name="album_allow_playback">Permitir reproducir este álbum de nuevo</string>
+    <string name="album_allow_playback">Reproducir este álbum de nuevo</string>
 </resources>

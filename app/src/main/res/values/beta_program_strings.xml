@@ -26,7 +26,7 @@
     <string name="beta_updates_in_app_message">%1$s has been downloaded and is ready to install.</string>
     <string name="beta_updates_install_now">Install Now</string>
     <string name="beta_updates_in_app_icon_description">Update: %1$s</string>
-    <string name="update_manual_title">Check for updates now</string>
+    <string name="update_manual_title">Check for updates</string>
     <string name="update_manual_checking">Checking for updates…</string>
     <string name="update_manual_up_to_date">You are already using the latest version.</string>
     <string name="update_manual_no_release">No newer version was found.</string>

@@ -48,7 +48,7 @@ data class CachedListeningStats(
 /** Compact cold-start cache for the five Stats periods. */
 object StatsSnapshotStore {
     private const val PREFS_NAME = "orb_stats_snapshots"
-    private const val KEY_PREFIX = "stats_v1_"
+    private const val KEY_PREFIX = "stats_v2_"
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private lateinit var prefs: SharedPreferences
 

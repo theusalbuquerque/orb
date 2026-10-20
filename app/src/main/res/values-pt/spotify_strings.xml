@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="spotify_session_note">Importe suas playlists e músicas curtidas do Spotify. As curtidas no Orb não alteram o Spotify. Sua sessão é criptografada neste dispositivo e, quando a sincronização está disponível, salva com proteção na conta Orb para outros dispositivos.</string>
+    <string name="spotify_connect">Vincular Spotify</string>
+    <string name="spotify_connection_error">Não foi possível conectar ao Spotify. Tente novamente.</string>
+    <string name="spotify_retry">Tentar novamente</string>
+    <string name="spotify_liked_songs">Músicas curtidas</string>
+    <string name="spotify_loading">Carregando Spotify…</string>
+    <string name="spotify_connected">Spotify vinculado</string>
+    <string name="spotify_library_sync_note">Vincule sua biblioteca do Spotify.</string>
+    <string name="spotify_disconnect">Desvincular</string>
+    <string name="spotify_login">Entrar no Spotify</string>
+    <string name="spotify_login_action">Entrar</string>
+    <string name="spotify_no_playable_tracks">Não foram encontradas faixas reproduzíveis para esta playlist do Spotify.</string>
+    <string name="spotify_from_section">Do Spotify</string>
+</resources>

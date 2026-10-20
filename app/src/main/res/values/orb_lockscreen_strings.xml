@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_orb_lockscreen">Orb Lock</string>
+    <string name="settings_orb_lockscreen_subtitle">Customize Orb Lock, screen and permissions.</string>
+    <string name="orb_lockscreen_previous">Previous</string>
+    <string name="orb_lockscreen_next">Next</string>
+    <string name="orb_lockscreen_pause">Pause</string>
+    <string name="orb_lockscreen_play">Play</string>
+    <string name="orb_lockscreen_cast">Cast</string>
+    <string name="orb_lockscreen_shuffle">Shuffle</string>
+    <string name="orb_lockscreen_repeat">Repeat</string>
+    <string name="orb_lockscreen_lyrics">Lyrics</string>
+    <string name="orb_lockscreen_queue">Queue</string>
+    <string name="orb_lockscreen_sync_lyrics">Synchronized lyrics</string>
+    <string name="orb_lockscreen_close">Close</string>
+    <string name="orb_lockscreen_play_queue">Play</string>
+    <string name="orb_lockscreen_lyrics_unavailable">Lyrics unavailable</string>
+    <string name="orb_lockscreen_lyrics_loading">Looking for lyrics…</string>
+    <string name="orb_lockscreen_swipe_to_unlock">Swipe up to unlock</string>
+    <string name="orb_lockscreen_overlay_permission_title">Allow automatic launch</string>
+    <string name="orb_lockscreen_overlay_permission_subtitle">Grant “Display over other apps” so Orb can appear after locking, even from another app.</string>
+    <string name="orb_lockscreen_overlay_permission_granted">Permission granted · only while the phone is locked</string>
+    <string name="orb_lockscreen_always_on_title">Always-on Orb Lock</string>
+    <string name="orb_lockscreen_always_on_subtitle">Keeps Orb Lock visible. This is not the system low-power AOD; it uses more battery and may cause OLED burn-in.</string>
+    <string name="orb_lockscreen_brightness_title">Orb Lock brightness</string>
+    <string name="orb_lockscreen_brightness_subtitle">Only adjusts this screen; device-wide brightness is unchanged.</string>
+    <string name="orb_lock_settings_header">Orb Lock settings</string>
+    <string name="orb_lock_power_saving_title">Power-saving background</string>
+    <string name="orb_lock_power_saving_subtitle">Use a completely black background instead of blurred artwork to reduce processing and OLED power use.</string>
+    <string name="orb_lock_premium_info">Orb Lock is available with Orb Premium.</string>
+    <string name="orb_lock_premium_label">Premium</string>
+    <string name="orb_lock_enabled_subtitle">Enabled only for Premium</string>
+    <string name="orb_lock_mode_always">Always on</string>
+    <string name="orb_lock_mode_notifications">When screen turns on</string>
+    <string name="orb_lock_mode_on_wake_explanation">Shows Orb Lock when you wake a locked screen during playback. It does not read other apps’ notifications or wake the display for alerts.</string>
+    <string name="orb_lock_mode_off">Off</string>
+    <string name="orb_lock_brightness_auto">Automatic brightness</string>
+</resources>

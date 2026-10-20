@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="artist_beta_songs">Músicas</string>
+    <string name="artist_beta_albums">Álbuns</string>
+    <string name="artist_beta_singles">Singles e EPs</string>
+    <string name="artist_beta_playlists">Playlists</string>
+    <string name="artist_beta_empty">Ainda não há itens nesta categoria.</string>
+    <string name="artist_beta_rating_description">Sua média de avaliações dos álbuns: %1$s de 5.</string>
+</resources>

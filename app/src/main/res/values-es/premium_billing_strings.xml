@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="premium_billing_retry">Intentar de nuevo</string>
+    <string name="premium_billing_sign_in">Inicia sesión de nuevo en tu cuenta Orb para gestionar tu suscripción.</string>
+    <string name="premium_billing_error">No se pudo completar la solicitud. Inténtalo de nuevo.</string>
+    <string name="premium_payment_title">Suscribirse a Orb Premium</string>
+    <string name="premium_payment_total">Total del pago</string>
+    <string name="premium_payment_zero_notice">Confirma para activar tu suscripción. No se te cobrará ningún importe.</string>
+    <string name="premium_payment_provider_notice">Continúa a la página de pago seguro para completar tu suscripción.</string>
+    <string name="premium_payment_confirm">Confirmar suscripción</string>
+    <string name="premium_payment_continue">Continuar al pago</string>
+    <string name="premium_payment_back">Volver</string>
+    <string name="premium_payment_check">Verificar pago</string>
+    <string name="premium_payment_pending">Tu pago aún no se ha confirmado. Vuelve a verificar en unos instantes.</string>
+    <string name="premium_payment_success">Orb Premium activado.</string>
+    <string name="premium_cancel_success">Renovación cancelada. Orb Premium seguirá disponible hasta que termine el período pagado.</string>
+    <string name="premium_demo_badge">Cortesía del desarrollador · validación real de tarjeta, R$ 0,00</string>
+    <string name="premium_demo_cancel_message">¿Cancelar la suscripción de cortesía? El registro se cancelará en el servidor de Orb; no habrá cobros programados. Conservarás el acceso de desarrollador.</string>
+    <string name="premium_demo_cancel_success">Suscripción de cortesía cancelada en el servidor. Conservas el acceso de desarrollador.</string>
+    <string name="premium_demo_payment_title">Validar tarjeta · Orb Premium</string>
+    <string name="premium_demo_payment_notice">Autorización real de tarjeta de importe cero (ZDA) en Mercado Pago. La página segura valida tu tarjeta sin cargo. No se crea una suscripción financiera recurrente.</string>
+    <string name="premium_demo_subscribe_success">Tarjeta validada y suscripción de cortesía activada.</string>
+    <string name="premium_demo_canceled">Suscripción de cortesía inactiva · R$ 0,00</string>
+    <string name="premium_billing_credentials_rejected">Mercado Pago rechazó las credenciales de pago de Orb. Contacta con el soporte.</string>
+    <string name="premium_billing_request_rejected">Mercado Pago rechazó la solicitud de suscripción. Comparte el código que aparece con el soporte de Orb.</string>
+    <string name="premium_billing_rate_limited">Demasiados intentos de pago. Espera unos minutos antes de volver a intentarlo.</string>
+    <string name="premium_billing_link_missing">Mercado Pago no proporcionó un enlace de suscripción válido. Contacta con el soporte de Orb.</string>
+    <string name="premium_billing_invalid_response">Mercado Pago devolvió una respuesta inesperada. Inténtalo más tarde.</string>
+    <string name="premium_billing_service_unavailable">El servicio de pago no está disponible temporalmente. Comprueba la conexión o inténtalo más tarde.</string>
+    <string name="premium_billing_already_active">Es posible que tu suscripción ya esté activa. Comprueba tu estado Premium.</string>
+</resources>

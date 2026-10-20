@@ -5,7 +5,7 @@
 #include <complex>
 #include <vector>
 
-namespace bitchord::smart {
+namespace orb::smart {
 namespace {
 constexpr double PI = 3.14159265358979323846;
 
@@ -150,4 +150,4 @@ std::vector<std::vector<float>> ReconstructVocalStem(
 
   return output;
 }
-}  // namespace bitchord::smart
+}  // namespace orb::smart

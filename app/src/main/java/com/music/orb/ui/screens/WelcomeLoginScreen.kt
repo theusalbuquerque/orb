@@ -1,4 +1,12 @@
 package com.music.orb.ui.screens
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import com.music.orb.ui.components.orbExpressiveGlassContentColor
+import com.music.orb.ui.components.orbOverlayGlassBaseColor
+import com.music.orb.ui.components.orbGlassSurface
 
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.tween
@@ -267,14 +275,28 @@ private fun GoogleSignInButton(
     modifier: Modifier = Modifier,
 ) {
     val buttonShape = RoundedCornerShape(26.dp)
+    val source = remember { MutableInteractionSource() }
+    val pressed by source.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.96f else 1f,
+        animationSpec = spring(dampingRatio = 0.70f, stiffness = 520f),
+        label = "googleSignInGlassPress",
+    )
+    val glassColor = orbOverlayGlassBaseColor()
 
     Row(
         modifier = modifier
             .fillMaxWidth()
             .height(58.dp)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(buttonShape)
-            .background(Color(0xFFF6F4F0))
-            .clickable(onClick = onClick)
+            .orbGlassSurface(
+                pageColor = glassColor,
+                cornerRadius = 26.dp,
+                observeTapFeedback = false,
+                manageDialogBackdrop = false,
+            )
+            .clickable(interactionSource = source, indication = null, onClick = onClick)
             .padding(horizontal = 18.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center,
@@ -288,7 +310,7 @@ private fun GoogleSignInButton(
         Text(
             text = stringResource(R.string.welcome_continue_google),
             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.W600),
-            color = Color(0xFF17181B),
+            color = orbExpressiveGlassContentColor(glassColor),
         )
     }
 }

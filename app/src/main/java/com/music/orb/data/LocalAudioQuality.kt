@@ -29,6 +29,14 @@ object LocalAudioQuality {
     private val positive = ConcurrentHashMap<String, StreamFormat>()
     private val negative = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
 
+    /** A re-download may replace the exact same filename with a new codec. */
+    fun invalidate(uri: String?) {
+        val value = uri?.takeIf { it.isNotBlank() } ?: return
+        val key = "u:$value"
+        positive.remove(key)
+        negative.remove(key)
+    }
+
     fun cached(song: Song): StreamFormat? = cached(song.localUri, song.localPath)
 
     fun cached(uri: String?, path: String?): StreamFormat? {
@@ -80,7 +88,7 @@ object LocalAudioQuality {
             out.copyOf(count)
         } ?: return null
 
-        return parseFlac(bytes) ?: parseWave(bytes)
+        return parseFlac(bytes) ?: parseWave(bytes) ?: parseFragmentedMp4Flac(bytes)
     }
 
     /**
@@ -96,19 +104,70 @@ object LocalAudioQuality {
             (bytes[7].toInt() and 0xff)
         if (blockType != 0 || length < 34 || bytes.size < 8 + length) return null
 
-        val o = 8
-        val b10 = bytes[o + 10].toInt() and 0xff
-        val b11 = bytes[o + 11].toInt() and 0xff
-        val b12 = bytes[o + 12].toInt() and 0xff
-        val b13 = bytes[o + 13].toInt() and 0xff
-        val sampleRate = (b10 shl 12) or (b11 shl 4) or (b12 ushr 4)
-        val bitsPerSample = (((b12 and 0x01) shl 4) or (b13 ushr 4)) + 1
+        return parseStreamInfo(bytes, 8)
+    }
 
-        return StreamFormat(
-            codec = "flac",
-            sampleRateHz = sampleRate.takeIf { it > 0 },
-            bitDepth = bitsPerSample.takeIf { it > 0 },
-        )
+    /**
+     * Read the FLACSpecificBox in an MP4 initialization segment. For DASH the
+     * file starts with ftyp and contains the fLaC sample entry with a dfLa box.
+     * Its payload has four version/flags bytes followed by native FLAC metadata
+     * blocks; do not treat the Android decoder's PCM format as source depth.
+     *
+     * Some muxers prefix their STREAMINFO metadata with the fLaC marker and
+     * others expose the raw 34-byte STREAMINFO without a metadata-block header.
+     * These cases are supported without guessing the bit depth from a bitrate.
+     */
+    internal fun parseFragmentedMp4Flac(bytes: ByteArray): StreamFormat? {
+        if (bytes.size < 48 || String(bytes, 4, 4, Charsets.US_ASCII) != "ftyp") return null
+        val marker = "dfLa".toByteArray(Charsets.US_ASCII)
+        for (offset in 4 until bytes.size - marker.size) {
+            if (!marker.indices.all { index -> bytes[offset + index] == marker[index] }) continue
+            // ISO BMFF box size precedes type; dfLa is a FullBox (version/flags).
+            if (offset < 4) continue
+            val boxSize = bigEndianInt(bytes, offset - 4)
+            if (boxSize < 12 || boxSize.toLong() > bytes.size.toLong() - (offset - 4)) continue
+            val payload = offset + 8
+            val end = offset - 4 + boxSize
+            if (payload >= end) continue
+            // Native FLAC marker (if present), then a complete metadata block.
+            if (payload + 4 <= end && String(bytes, payload, 4, Charsets.US_ASCII) == "fLaC") {
+                parseFlac(bytes.copyOfRange(payload, end))?.let { return it }
+            }
+            // Standard FLACSpecificBox: STREAMINFO metadata block header + 34 bytes.
+            if (payload + 38 <= end) {
+                val wrapped = ByteArray(42)
+                "fLaC".toByteArray(Charsets.US_ASCII).copyInto(wrapped)
+                bytes.copyInto(wrapped, 4, payload, payload + 38)
+                parseFlac(wrapped)?.let { return it }
+            }
+            // Some decoders expose the STREAMINFO block directly (34 bytes).
+            if (end - payload == 34) {
+                parseStreamInfo(bytes, payload)?.let { return it }
+            }
+        }
+        return null
+    }
+
+    /** FLAC STREAMINFO: sample rate (20 bits), channels (3), depth (5). */
+    private fun parseStreamInfo(bytes: ByteArray, start: Int): StreamFormat? {
+        if (start < 0 || start + 18 > bytes.size) return null
+        val a = bytes[start + 10].toInt() and 0xff
+        val b = bytes[start + 11].toInt() and 0xff
+        val c = bytes[start + 12].toInt() and 0xff
+        val d = bytes[start + 13].toInt() and 0xff
+        val sampleRate = (a shl 12) or (b shl 4) or (c ushr 4)
+        val bitDepth = (((c and 1) shl 4) or (d ushr 4)) + 1
+        // Reject junk or shifted offsets rather than advertising invented Hi-Res.
+        if (sampleRate !in 8_000..384_000 || bitDepth !in 4..32) return null
+        return StreamFormat(codec = "flac", sampleRateHz = sampleRate, bitDepth = bitDepth)
+    }
+
+    private fun bigEndianInt(bytes: ByteArray, start: Int): Int {
+        if (start < 0 || start + 4 > bytes.size) return -1
+        return ((bytes[start].toInt() and 0xff) shl 24) or
+            ((bytes[start + 1].toInt() and 0xff) shl 16) or
+            ((bytes[start + 2].toInt() and 0xff) shl 8) or
+            (bytes[start + 3].toInt() and 0xff)
     }
 
     /** Parses PCM/float WAV and WAVE_FORMAT_EXTENSIBLE `fmt ` metadata. */
@@ -177,6 +236,22 @@ object LocalAudioQuality {
                 if (!mime.startsWith("audio/")) continue
                 val codec = codecFrom(mime, uriString, localPath) ?: continue
                 val sampleRate = format.intOrNull(MediaFormat.KEY_SAMPLE_RATE)
+                if (codec == "flac") {
+                    val csd = runCatching { format.getByteBuffer("csd-0")?.duplicate() }.getOrNull()
+                    if (csd != null && csd.remaining() in 34..(HEADER_BYTES)) {
+                        val raw = ByteArray(csd.remaining())
+                        csd.get(raw)
+                        val native = parseFlac(raw)
+                            ?: if (raw.size >= 38) {
+                                val wrapped = ByteArray(raw.size + 4)
+                                "fLaC".toByteArray(Charsets.US_ASCII).copyInto(wrapped)
+                                raw.copyInto(wrapped, 4)
+                                parseFlac(wrapped)
+                            } else null
+                            ?: if (raw.size == 34) parseStreamInfo(raw, 0) else null
+                        if (native != null) return native
+                    }
+                }
                 val bits = sequenceOf("bits-per-sample", "bit-width", "bitsPerSample")
                     .mapNotNull { key -> format.intOrNull(key) }
                     .firstOrNull { it > 0 }

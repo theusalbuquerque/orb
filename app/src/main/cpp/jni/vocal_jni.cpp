@@ -53,8 +53,8 @@ Java_com_music_orb_playback_smart_VocalSpectrogram_nativeCompute(
   if (left_count > 0) env->GetFloatArrayRegion(left, 0, left_count, channels[0].data());
   if (right_count > 0) env->GetFloatArrayRegion(right, 0, right_count, channels[1].data());
 
-  const bitchord::smart::VocalSpectrogram spectrogram =
-      bitchord::smart::ComputeVocalSpectrogram(channels, sample_rate);
+  const orb::smart::VocalSpectrogram spectrogram =
+      orb::smart::ComputeVocalSpectrogram(channels, sample_rate);
 
   const jsize produced = static_cast<jsize>(spectrogram.values.size());
   jfloatArray result = env->NewFloatArray(produced);
@@ -68,25 +68,25 @@ Java_com_music_orb_playback_smart_VocalSpectrogram_nativeCompute(
 JNIEXPORT jint JNICALL
 Java_com_music_orb_playback_smart_VocalSpectrogram_nativeBins(
     JNIEnv* /* env */, jclass /* clazz */) {
-  return static_cast<jint>(bitchord::smart::kVocalSpectrogramBins);
+  return static_cast<jint>(orb::smart::kVocalSpectrogramBins);
 }
 
 JNIEXPORT jdouble JNICALL
 Java_com_music_orb_playback_smart_VocalSpectrogram_nativeSampleRate(
     JNIEnv* /* env */, jclass /* clazz */) {
-  return bitchord::smart::kVocalSpectrogramSampleRate;
+  return orb::smart::kVocalSpectrogramSampleRate;
 }
 
 JNIEXPORT jint JNICALL
 Java_com_music_orb_playback_smart_VocalSpectrogram_nativeHop(
     JNIEnv* /* env */, jclass /* clazz */) {
-  return static_cast<jint>(bitchord::smart::kVocalSpectrogramHop);
+  return static_cast<jint>(orb::smart::kVocalSpectrogramHop);
 }
 
 JNIEXPORT jint JNICALL
 Java_com_music_orb_playback_smart_VocalSpectrogram_nativeFftSize(
     JNIEnv* /* env */, jclass /* clazz */) {
-  return static_cast<jint>(bitchord::smart::kVocalSpectrogramFft);
+  return static_cast<jint>(orb::smart::kVocalSpectrogramFft);
 }
 
 }  // extern "C"
@@ -113,7 +113,7 @@ Java_com_music_orb_playback_smart_VocalSpectrogram_nativeReconstructVocals(
   if (left_count > 0) env->GetFloatArrayRegion(left, 0, left_count, channels[0].data());
   if (right_count > 0) env->GetFloatArrayRegion(right, 0, right_count, channels[1].data());
 
-  const auto stems = bitchord::smart::ReconstructVocalStem(
+  const auto stems = orb::smart::ReconstructVocalStem(
       channels,
       sample_rate,
       target,

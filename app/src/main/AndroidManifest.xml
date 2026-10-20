@@ -5,12 +5,22 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Tells Wi-Fi from mobile data, so the matching quality ceiling applies. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <!-- Saving a track to Music outlives the screen it was asked from. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Optional, explicitly granted special access for background lockscreen launches. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!-- Orb Touch Transfer (Premium): nearby-device discovery without NFC. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" tools:targetApi="31" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" tools:targetApi="31" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" tools:targetApi="31" />
 
     <!-- Reading local audio files across the device -->
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
@@ -34,6 +44,9 @@
       device that ships the Atmos app.
     -->
     <queries>
+        <package android:name="com.whatsapp" />
+        <package android:name="com.instagram.android" />
+        <package android:name="com.instagram.barcelona" />
         <package android:name="com.dolby.dax2appui" />
         <package android:name="com.dolby.daxappui" />
         <package android:name="com.dolby.dolby234" />
@@ -44,7 +57,7 @@
     </queries>
 
     <application
-        android:name=".BitChordApplication"
+        android:name=".OrbApplication"
         android:allowBackup="true"
         android:enableOnBackInvokedCallback="true"
         android:usesCleartextTraffic="false"
@@ -53,10 +66,13 @@
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/orb_icon"
         android:label="@string/app_name"
+        android:appCategory="audio"
         android:roundIcon="@mipmap/orb_icon_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.BitChord"
+        android:theme="@style/Theme.Orb"
         tools:targetApi="34">
+        <meta-data android:name="com.google.android.gms.cast.framework.OPTIONS_PROVIDER_CLASS_NAME"
+            android:value="com.music.orb.cast.OrbCastOptions" />
 
         <!--
           One UI 7+ only routes an app's ongoing notification to Live
@@ -69,18 +85,21 @@
             android:value="true" />
 
         <!--
-          Phones stay portrait outside Now Playing. When the user explicitly enables
-          Now Playing rotation, MainActivity temporarily requests sensor orientation.
-          Handle configuration changes in-place so the open player survives rotation
-          and animates between portrait and the shared two-pane landscape layout.
+          Do not mark the Activity as portrait-only in the manifest: on some
+          tablets and OEM builds Android letterboxes a fixed-orientation app
+          before MainActivity can request landscape at runtime. This activity
+          supports resizing and both window orientations. MainActivity still
+          requests portrait on phones outside Now Playing; when the user enables
+          player rotation it requests sensor orientation instead.
+          Keep configuration changes in-place so the open player is retained.
         -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
+            android:resizeableActivity="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
-            android:screenOrientation="portrait"
-            android:theme="@style/Theme.BitChord">
+            android:theme="@style/Theme.Orb">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -93,16 +112,49 @@
                     android:scheme="spotiflac"
                     android:host="session-grant" />
             </intent-filter>
+            <!-- music.youtube.com belongs to Google: this is an unverified
+                 handler. Android 12+ may require the user's manual association. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="music.youtube.com" android:path="/watch" />
+                <data android:scheme="http" android:host="music.youtube.com" android:path="/watch" />
+            </intent-filter>
         </activity>
+
+        <!-- Separate, non-exported task: closing it returns to the last open app. -->
+        <activity
+            android:name=".ui.lockscreen.OrbLockscreenActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity="com.music.orb.lockscreen"
+            android:launchMode="singleTask"
+            android:showWhenLocked="true"
+            android:screenOrientation="portrait"
+            android:theme="@style/Theme.Orb.Lockscreen" />
 
         <service
             android:name=".playback.PlaybackService"
             android:exported="true"
+            android:stopWithTask="false"
             android:foregroundServiceType="mediaPlayback">
             <intent-filter>
+                <!-- Keep the legacy service action so existing Media3 controllers keep working. -->
                 <action android:name="androidx.media3.session.MediaSessionService" />
+                <action android:name="androidx.media3.session.MediaLibraryService" />
+                <action android:name="android.media.browse.MediaBrowserService" />
             </intent-filter>
         </service>
+
+        <!-- A terminated playback service can be restarted by a headset or System UI. -->
+        <receiver
+            android:name="androidx.media3.session.MediaButtonReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
 
         <!--
           Downloads. Not exported: it is started by the app and by its own

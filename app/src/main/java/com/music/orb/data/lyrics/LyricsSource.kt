@@ -1,8 +1,8 @@
 package com.music.orb.data.lyrics
 
 /**
- * Databases Orb may query for lyrics. Providers are ranked by recording identity
- * and lyric agreement inside [LyricsRepository], not by declaration order.
+ * Lyrics providers in their effective lookup priority (highest priority first).
+ * A disabled or unavailable provider is skipped in favour of the next one.
  */
 enum class LyricsSource(
     val label: String,
@@ -10,79 +10,15 @@ enum class LyricsSource(
     /** Whether this source can return per-word/per-syllable timing. */
     val wordSynced: Boolean,
 ) {
-    BINI_LYRICS(
-        label = "BiniLyrics",
-        detail = "Apple Music timings, matched to the recording with ISRC",
-        wordSynced = true,
-    ),
-    BETTER_LYRICS(
-        label = "BetterLyrics",
-        detail = "Apple Music timings, word by word",
-        wordSynced = true,
-    ),
-    BETTER_LYRICS_PORTATO(
-        label = "BetterLyrics Portato",
-        detail = "QQ Music karaoke timings through BetterLyrics",
-        wordSynced = true,
-    ),
-    PAXSENIX(
-        label = "PaxSenix",
-        detail = "Apple Music timings through the keyless provider",
-        wordSynced = true,
-    ),
-    PAXSENIX_SPOTIFY(
-        label = "PaxSenix: Spotify",
-        detail = "Spotify lyrics through PaxSenix; API key required",
-        wordSynced = false,
-    ),
-    PAXSENIX_MUSIXMATCH(
-        label = "PaxSenix: Musixmatch",
-        detail = "Musixmatch timings through PaxSenix; API key required",
-        wordSynced = true,
-    ),
-    LYRICS_PLUS(
-        label = "LyricsPlus",
-        detail = "Syllable-by-syllable lyrics from community mirrors",
-        wordSynced = true,
-    ),
-    SIMP_MUSIC(
-        label = "SimpMusic",
-        detail = "Matched to the exact playing video",
-        wordSynced = true,
-    ),
-    UNISON(
-        label = "Unison",
-        detail = "Listener-contributed TTML, LRC and plain lyrics",
-        wordSynced = true,
-    ),
-    YOUTUBE_TRANSCRIPT(
-        label = "YouTube captions",
-        detail = "Timed captions matched to the exact playing video",
-        wordSynced = false,
-    ),
-    MEGALOBIZ(
-        label = "Megalobiz",
-        detail = "Community-made, whole-line LRC",
-        wordSynced = false,
-    ),
-    KUGOU(
-        label = "KuGou",
-        detail = "Whole-line lyrics with broad international coverage",
-        wordSynced = false,
-    ),
-    LRCLIB(
-        label = "LRCLIB",
-        detail = "Reliable whole-line synchronized lyrics",
-        wordSynced = false,
-    ),
-    MUSIXMATCH(
-        label = "Musixmatch",
-        detail = "Whole-line lyrics from the Musixmatch catalogue",
-        wordSynced = false,
-    ),
-    GENIUS(
-        label = "Genius",
-        detail = "Plain-text fallback with a very large catalogue",
-        wordSynced = false,
-    ),
+    BINI_LYRICS("BiniLyrics", "Apple Music timings, matched to the recording with ISRC", true),
+    LRCLIB("LRCLIB", "Reliable whole-line synchronized lyrics", false),
+    BETTER_LYRICS("BetterLyrics", "Apple Music timings, word by word", true),
+    BETTER_LYRICS_PORTATO("BetterLyrics Portato", "QQ Music karaoke timings through BetterLyrics", true),
+    LYRICS_PLUS("LyricsPlus", "Syllable-by-syllable lyrics from community mirrors", true),
+    SIMP_MUSIC("SimpMusic", "Matched to the exact playing video", true),
+    MUSIXMATCH("Musixmatch", "Whole-line lyrics from the Musixmatch catalogue", false),
+    UNISON("Unison", "Listener-contributed TTML, LRC and plain lyrics", true),
+    MEGALOBIZ("Megalobiz", "Community-made, whole-line LRC", false),
+    KUGOU("KuGou", "Whole-line lyrics with broad international coverage", false),
+    YOUTUBE_TRANSCRIPT("YouTube captions", "Timed captions matched to the exact playing video", false),
 }

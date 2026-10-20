@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="premium_price_unavailable">Месячная цена недоступна</string>
+    <string name="premium_price_approximate">Примерная конвертация; банк может применить другой курс или комиссии.</string>
+    <string name="premium_price_actual_brl">Оплата в BRL: %1$s</string>
+</resources>

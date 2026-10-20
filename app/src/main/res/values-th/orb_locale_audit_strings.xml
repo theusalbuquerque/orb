@@ -1,0 +1,21 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<resources>
+  <string name="orb_l10n_listenbrainz_title">โทเค็น ListenBrainz</string>
+  <string name="orb_l10n_listenbrainz_hint">วางโทเค็นผู้ใช้ ListenBrainz เพื่อเปิดการบันทึกประวัติการฟัง</string>
+  <string name="orb_l10n_api_token">โทเค็น API</string>
+  <string name="orb_l10n_discord_title">โทเค็น Discord</string>
+  <string name="orb_l10n_discord_hint">วางโทเค็นบัญชี Discord ของคุณ โทเค็นจะถูกเข้ารหัสและเก็บไว้บนอุปกรณ์นี้ และส่งไปยัง Discord เท่านั้น</string>
+  <string name="orb_l10n_token">โทเค็น</string>
+  <string name="orb_l10n_save">บันทึก</string>
+  <string name="orb_l10n_cancel">ยกเลิก</string>
+  <string name="orb_l10n_checking">กำลังตรวจสอบ…</string>
+  <string name="orb_l10n_selected">เลือกแล้ว</string>
+  <string name="orb_l10n_playlist_generic">เพลย์ลิสต์</string>
+  <string name="orb_l10n_playlist_open">เปิดเพลย์ลิสต์</string>
+  <string name="orb_l10n_playlist_rename_action">เปลี่ยนชื่อ</string>
+  <string name="orb_l10n_playlist_delete">ลบเพลย์ลิสต์</string>
+  <string name="orb_l10n_playlist_delete_confirm" formatted="true">ลบ “%1$s” — แตะเพื่อยืนยัน</string>
+  <string name="orb_l10n_playlist_rename_title">เปลี่ยนชื่อเพลย์ลิสต์</string>
+  <string name="orb_l10n_playlist_save_name">บันทึกชื่อ</string>
+  <string name="orb_l10n_got_it">เข้าใจแล้ว</string>
+<string name="settings_lossless_audio">เสียงแบบไม่สูญเสียข้อมูล</string><string name="settings_lossless_audio_subtitle">ให้ความสำคัญกับ FLAC และ Hi-Res จากแหล่งเสียงที่รองรับ</string></resources>

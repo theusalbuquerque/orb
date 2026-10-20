@@ -1,0 +1,21 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<resources>
+  <string name="orb_l10n_listenbrainz_title">ListenBrainz टोकन</string>
+  <string name="orb_l10n_listenbrainz_hint">स्क्रॉबलिंग चालू करने के लिए अपना ListenBrainz उपयोगकर्ता टोकन पेस्ट करें।</string>
+  <string name="orb_l10n_api_token">API टोकन</string>
+  <string name="orb_l10n_discord_title">Discord टोकन</string>
+  <string name="orb_l10n_discord_hint">अपना Discord खाता टोकन पेस्ट करें। यह इस डिवाइस पर एन्क्रिप्ट करके रखा जाता है और केवल Discord को भेजा जाता है।</string>
+  <string name="orb_l10n_token">टोकन</string>
+  <string name="orb_l10n_save">सहेजें</string>
+  <string name="orb_l10n_cancel">रद्द करें</string>
+  <string name="orb_l10n_checking">जाँच जारी है…</string>
+  <string name="orb_l10n_selected">चयनित</string>
+  <string name="orb_l10n_playlist_generic">प्लेलिस्ट</string>
+  <string name="orb_l10n_playlist_open">प्लेलिस्ट खोलें</string>
+  <string name="orb_l10n_playlist_rename_action">नाम बदलें</string>
+  <string name="orb_l10n_playlist_delete">प्लेलिस्ट हटाएँ</string>
+  <string name="orb_l10n_playlist_delete_confirm" formatted="true">“%1$s” हटाएँ — पुष्टि के लिए टैप करें</string>
+  <string name="orb_l10n_playlist_rename_title">प्लेलिस्ट का नाम बदलें</string>
+  <string name="orb_l10n_playlist_save_name">नाम सहेजें</string>
+  <string name="orb_l10n_got_it">समझ गया</string>
+<string name="settings_lossless_audio">बिना गुणवत्ता हानि वाला ऑडियो</string><string name="settings_lossless_audio_subtitle">संगत स्रोतों से FLAC और Hi-Res को प्राथमिकता दें</string></resources>

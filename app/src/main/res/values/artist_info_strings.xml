@@ -6,5 +6,5 @@
     <string name="artist_like">I like this artist</string>
     <string name="artist_liked">Artist liked</string>
     <string name="artist_block">Don’t play this artist</string>
-    <string name="artist_blocked">Artist blocked</string>
+    <string name="artist_blocked">Play this artist again</string>
 </resources>

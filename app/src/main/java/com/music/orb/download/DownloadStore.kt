@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import com.music.orb.data.DebugLog as Log
+import com.music.orb.data.LocalAudioQuality
 import com.music.orb.data.model.Song
 import java.io.File
 import java.io.OutputStream
@@ -27,7 +28,7 @@ import java.util.concurrent.ConcurrentHashMap
  */
 object DownloadStore {
 
-    private const val TAG = "BitChord"
+    private const val TAG = "Orb"
 
     /** Historical public subfolder name, retained for legacy cleanup only. */
     const val FOLDER = "BitChord"
@@ -123,12 +124,24 @@ object DownloadStore {
             Log.w(TAG, "audio validation failed for $uri: ${it.message}")
         }.getOrDefault(false)
 
-        if (valid) validatedAudioUris.add(key) else validatedAudioUris.remove(key)
-        return valid
+        // Android's platform MediaExtractor does not consistently recognise
+        // FLAC carried inside fragmented MP4. Media3's FragmentedMp4Extractor
+        // (used by Orb's player) supports it. Accept only files whose native
+        // FLAC STREAMINFO is present inside the MP4 initialization fragment;
+        // all segments must still have been fetched before commit.
+        val supportedByMedia3 = if (!valid && uri.scheme == "file" &&
+            uri.path?.endsWith(".m4a", ignoreCase = true) == true
+        ) {
+            LocalAudioQuality.inspect(context, uri.toString(), null)?.codec == "flac"
+        } else false
+        val playable = valid || supportedByMedia3
+        if (playable) validatedAudioUris.add(key) else validatedAudioUris.remove(key)
+        return playable
     }
 
     fun delete(context: Context, uri: Uri): Boolean = runCatching {
         validatedAudioUris.remove(uri.toString())
+        LocalAudioQuality.invalidate(uri.toString())
         if (uri.scheme == "file") {
             val file = uri.path?.let(::File) ?: return@runCatching false
             !file.exists() || file.delete()
@@ -136,6 +149,22 @@ object DownloadStore {
             context.contentResolver.delete(uri, null, null) > 0 || !exists(context, uri)
         }
     }.onFailure { Log.w(TAG, "could not delete $uri: ${it.message}") }.getOrDefault(false)
+
+    /** Reindex only Orb-owned local MP4s; never rewrite a user's library file. */
+    fun ensureSeekableOffline(context: Context, uri: Uri): Boolean {
+        if (uri.scheme != "file") return false
+        val path = uri.path ?: return false
+        if (!path.endsWith(".m4a", ignoreCase = true)) return false
+        val file = File(path)
+        val owned = runCatching {
+            file.canonicalPath.startsWith(managedRoot(context).canonicalPath + File.separator)
+        }.getOrDefault(false)
+        if (!owned || !file.isFile) return false
+        return runCatching {
+            FragmentedMp4SeekIndex.ensureIndexed(file)
+        }.onFailure { Log.w(TAG, "could not index local MP4 for seeking: ${it.message}") }
+            .getOrDefault(false)
+    }
 
     // ---- Writing ------------------------------------------------------------
 
@@ -145,18 +174,59 @@ object DownloadStore {
         private val part: File,
         private val target: File,
     ) {
+        private val backup = File(target.parentFile, "$name.previous")
+        private var committed = false
+        private var previousBackedUp = false
+
         fun openStream(): OutputStream = part.outputStream()
 
+        /** Make the downloaded FLAC-in-MP4 seekable before publishing it. */
+        fun addFragmentIndex(): Boolean = FragmentedMp4SeekIndex.ensureIndexed(part)
+
         fun commit(): Uri {
-            if (target.exists() && !target.delete()) {
-                error("Could not replace existing $name")
+            if (target.exists()) {
+                check(!backup.exists() || backup.delete()) { "Could not prepare backup for $name" }
+                check(target.renameTo(backup)) { "Could not back up existing $name" }
+                previousBackedUp = true
             }
-            if (!part.renameTo(target)) error("Could not finish writing $name")
-            return Uri.fromFile(target)
+            if (!part.renameTo(target)) {
+                restorePrevious()
+                error("Could not finish writing $name")
+            }
+            committed = true
+            val result = Uri.fromFile(target)
+            LocalAudioQuality.invalidate(result.toString())
+            return result
         }
 
+        /** Keep the new file only after container and native quality checks pass. */
+        fun finish() {
+            if (previousBackedUp && !backup.delete()) {
+                Log.w(TAG, "Could not remove old backup for $name")
+            }
+            previousBackedUp = false
+            committed = false
+        }
+
+        /** Cancel or roll back a failed verification without losing the prior valid copy. */
         fun abort() {
             part.delete()
+            if (committed) {
+                target.delete()
+                LocalAudioQuality.invalidate(uri.toString())
+                committed = false
+            }
+            restorePrevious()
+        }
+
+        private fun restorePrevious() {
+            if (previousBackedUp) {
+                if (!backup.renameTo(target)) {
+                    Log.w(TAG, "Could not restore previous download $name from $backup")
+                }
+                LocalAudioQuality.invalidate(uri.toString())
+                previousBackedUp = false
+            }
         }
     }
 
@@ -247,7 +317,7 @@ object DownloadStore {
                 while (cursor.moveToNext()) {
                     val relative = cursor.getString(pathCol).orEmpty()
                     // Avoid deleting an unrelated folder merely because its name
-                    // contains the same letters; require a real BitChord path segment.
+                    // contains the same letters; require a real Orb path segment.
                     val segments = relative.replace('\\', '/').split('/').filter { it.isNotBlank() }
                     if (segments.any { it.equals(FOLDER, ignoreCase = true) }) {
                         ids += cursor.getLong(idCol)

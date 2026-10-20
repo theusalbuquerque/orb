@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_spatial_audio">Áudio 360</string>
+    <string name="settings_spatial_subtitle_unsupported">O Áudio 360 é processado pelo Orb e não exige Dolby Atmos.</string>
+    <string name="settings_spatial_subtitle_disabled">O Áudio 360 é processado pelo Orb e funciona independentemente do Dolby Atmos.</string>
+    <string name="settings_spatial_subtitle_enabled">Processamento espacial do Orb para um estéreo mais amplo e imersivo. Funciona independentemente do Dolby Atmos.</string>
+    <string name="settings_dolby_atmos">Dolby Atmos</string>
+    <string name="settings_dolby_atmos_available">Disponível neste dispositivo/saída. O estado atual é gerenciado pelo sistema e não pode ser lido pelo Orb.</string>
+    <string name="settings_dolby_atmos_active">Ativo neste dispositivo/saída. Gerenciado pelas configurações de áudio do sistema.</string>
+    <string name="settings_dolby_atmos_disabled">Disponível, mas desativado no momento. Toque para abrir as configurações de áudio do sistema.</string>
+    <string name="settings_dolby_atmos_unsupported">Indisponível no dispositivo/saída atual.</string>
+    <string name="settings_dolby_atmos_on">Ativo</string>
+    <string name="settings_dolby_atmos_off">Inativo</string>
+    <string name="settings_dolby_atmos_system">Sistema</string>
+</resources>

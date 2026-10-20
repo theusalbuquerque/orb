@@ -11,6 +11,8 @@ import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import com.music.orb.data.NerdStats
+import com.music.orb.data.rooms.RoomRepository
+import com.music.orb.data.rooms.RoomMixAuthority
 import com.music.orb.data.settings.AppSettings
 import com.music.orb.data.settings.AutomixVisualTransition
 import com.music.orb.data.settings.AutomixVersion
@@ -566,7 +568,21 @@ class CrossfadeController(
 
     // ---- Ticker -------------------------------------------------------------
 
+    private fun roomEffectiveSpeed(): Float {
+        val room = RoomRepository.playbackRoom.value
+        return if (room != null && !room.host) {
+            RoomMixAuthority.guestState(room)?.playbackSpeed ?: 1f
+        } else AppSettings.playbackSpeed.value
+    }
+
     private fun tick() {
+        // The host plans the normal Automix; guests render only the host recipe.
+        // RoomSession follows the lagged timeline without seeking during transitions.
+        // Cast still owns transport outside our dual-deck renderer.
+        if (com.music.orb.cast.OrbCastBridge.active) {
+            onQueueCleared()
+            return
+        }
         // A pause has to take the other player with it, or one half of the blend
         // carries on alone over a stopped one. Mirrored every tick rather than
         // handled as an event, so audio focus loss, the sleep timer and the
@@ -622,15 +638,46 @@ class CrossfadeController(
             AppSettings.smartTransitionWindow.value = null
             return
         }
-
+        val nextIndex = player.nextMediaItemIndex
         val duration = player.duration
         if (duration == C.TIME_UNSET || duration <= 0L) return
+
+        val room = RoomRepository.playbackRoom.value
+        if (room != null && !room.host) {
+            // Host authority outranks the guest's local enabled/version/Premium flags.
+            // No compatible host recipe means no mix, never an independent guest plan.
+            val shared = RoomMixAuthority.guestState(room)
+            val outgoingId = player.currentMediaItem?.mediaId ?: return
+            val incomingId = player.getMediaItemAt(nextIndex).mediaId
+            val recipe = shared?.recipeFor(room, outgoingId, incomingId)
+            if (recipe != null && shared != null &&
+                canRunAutomixOnNetwork(AppSettings.internetAvailable.value)) {
+                considerHostAuthoredTransition(duration, recipe, shared.version)
+            } else {
+                AppSettings.smartTransitionWindow.value = null
+            }
+            return
+        }
+
+        // Preserve the host's original-album running order. Guests only obey
+        // an explicit host recipe, and never consult their own shuffle preference.
+        if (!QueueShuffle.enabled.value && nextIndex != C.INDEX_UNSET &&
+            player.currentMediaItem?.albumSequential == true &&
+            player.getMediaItemAt(nextIndex).albumSequential
+        ) {
+            AppSettings.smartTransitionWindow.value = null
+            return
+        }
 
         // Automix is its own on/off, independent of the manual crossfade
         // length: it decides its own duration from each pair of tracks (beats,
         // tempo, structure), so requiring a nonzero [AppSettings.crossfadeSeconds]
         // first would tie an automatic feature to a manual one it doesn't use.
         if (AppSettings.smartFadeEnabled.value) {
+            if (!canRunAutomixOnNetwork(AppSettings.internetAvailable.value)) {
+                AppSettings.smartTransitionWindow.value = null
+                return
+            }
             considerSmartTransition(duration)
             return
         }
@@ -646,6 +693,62 @@ class CrossfadeController(
         if (remaining > fade + STANDARD_ARM_LEAD_MS) return
 
         begin(fade, startMs = (duration - fade).coerceAtLeast(0L), endMs = duration, smart = false)
+    }
+
+    /** Render the host's selected plan verbatim instead of running a local planner. */
+    private fun considerHostAuthoredTransition(duration: Long,
+                                                 recipe: com.music.orb.data.rooms.RoomMixRecipe,
+                                                 version: String) {
+        val plan = recipe.plan
+        val player = active()
+        val startMs = (plan.transitionStart * 1000.0).roundToLong()
+        val fade = plan.fadeMs
+        if (fade <= 0L || startMs >= duration || player.currentPosition >
+            (plan.transitionEnd * 1000.0).roundToLong()) return
+        val lead = if (AppSettings.meteredConnection.value == true)
+            METERED_SMART_ARM_LEAD_MS else SMART_ARM_LEAD_MS
+        if (startMs - player.currentPosition > lead) return
+        // Render the same overlay/stem style that the host planned, when the
+        // decoder can prepare the stem. This does not select a local recipe.
+        val wantsRealStems = isInstrumentalOverlayPlan(plan.transitionStyle) &&
+            plan.vocalOverlap >= REAL_STEM_VOCAL_OVERLAP_TRIGGER
+        if (wantsRealStems) {
+            val nextIndex = player.nextMediaItemIndex
+            if (nextIndex != C.INDEX_UNSET) {
+                val incoming = player.getMediaItemAt(nextIndex)
+                val cue = (plan.incomingCueTime * 1000.0).roundToLong().coerceAtLeast(0L)
+                val windowEnd = (maxOf(
+                    plan.incomingHandoffTime + REAL_STEM_HANDOFF_TAIL_SECONDS,
+                    plan.loopEndTime + REAL_STEM_LOOP_TAIL_SECONDS,
+                    plan.incomingCueTime + REAL_STEM_MIN_WINDOW_SECONDS,
+                ) * 1000.0).roundToLong()
+                requestIncomingStems(incoming, cue, windowEnd)
+            }
+        }
+        // Transition choice, cue, gains, envelopes and tempo come exclusively
+        // from the host, never from guest audio-analysis preferences.
+        begin(
+            fade, startMs = startMs,
+            endMs = (plan.transitionEnd * 1000.0).roundToLong(), smart = true,
+            cueTimeMs = (plan.incomingCueTime * 1000.0).roundToLong(),
+            playbackRate = plan.incomingPlaybackRate, outgoingRate = plan.outgoingPlaybackRate,
+            loopTarget = plan.loopTarget,
+            loopStartMs = (plan.loopStartTime * 1000.0).roundToLong(),
+            loopEndMs = (plan.loopEndTime * 1000.0).roundToLong(),
+            loopRepeats = plan.loopRepeats,
+            preferRealStems = wantsRealStems,
+            renderStyle = Render(
+                style = plan.transitionStyle, bassSwap = plan.bassSwap,
+                bassSwapFraction = plan.bassSwapFraction,
+                filterSweep = plan.filterSweep, vocalOverlap = plan.vocalOverlap,
+                gainEnvelope = plan.gainEnvelope, tempoEnvelope = plan.tempoEnvelope,
+                incomingPitchSemitones = plan.incomingPitchSemitones,
+                outgoingBpm = plan.outgoingBpm, incomingBpm = plan.incomingBpm,
+                initialBeatPhaseOffsetMs = recipe.phaseOffsetMs,
+                beatLockEnabled = recipe.beatLockEnabled,
+                handoffFraction = plan.handoffFraction, automix25 = version == "2.5",
+            ),
+        )
     }
 
     /**
@@ -968,6 +1071,13 @@ class CrossfadeController(
         // tick reconsider as soon as evidence lands.
         if (!musicallyReady) return
 
+        RoomRepository.playbackRoom.value?.takeIf { it.host }?.let { hostRoom ->
+            RoomMixAuthority.onHostPlan(hostRoom, currentItem.mediaId, nextItem.mediaId,
+                plan, if (useAutomix25) "2.5" else "2.0",
+                initialBeatPhaseOffsetMs(currentAnalysis, nextAnalysis, plan),
+                shouldBeatLock(plan, currentAnalysis, nextAnalysis))
+        }
+
         val fade = plan.fadeMs
         if (fade <= 0L) return
 
@@ -1127,7 +1237,7 @@ class CrossfadeController(
         return if (seconds > 0) seconds * 1000L else 0L
     }
 
-    /** BitChord doesn't carry album metadata on [MediaMetadata] yet, so [TransitionTrackInfo.album] stays blank. */
+    /** Orb doesn't carry album metadata on [MediaMetadata] yet, so [TransitionTrackInfo.album] stays blank. */
     private fun MediaItem.toTransitionInfo(durationMs: Long) = TransitionTrackInfo(
         id = mediaId,
         durationMs = durationMs,
@@ -1233,7 +1343,7 @@ class CrossfadeController(
         // Stacks on top of the listener's speed control rather than replacing
         // it, so a beatmatched transition and "play everything at 1.25x" don't
         // fight each other. Undone in [finish].
-        into.setPlaybackSpeed((AppSettings.playbackSpeed.value * incomingPlaybackRate).toFloat())
+        into.setPlaybackSpeed((roomEffectiveSpeed() * incomingPlaybackRate).toFloat())
         into.volume = 0f
         into.setMediaItems(items, nextIndex, incomingCueTimeMs)
         // Buffers without sounding. Started for real in [startFade].
@@ -1288,7 +1398,7 @@ class CrossfadeController(
             val prep = (1f - remainingToStart.toFloat() / TEMPO_PREP_MS.toFloat()).coerceIn(0f, 1f)
             val eased = prep * prep * (3f - 2f * prep)
             val relative = 1.0 + (outgoingPlaybackRate - 1.0) * eased
-            out.setPlaybackSpeed((AppSettings.playbackSpeed.value * relative).toFloat())
+            out.setPlaybackSpeed((roomEffectiveSpeed() * relative).toFloat())
         }
 
         if (realStemWanted && stemDeck()?.isPrepared != true) {
@@ -1369,7 +1479,7 @@ class CrossfadeController(
         }
         if (smartFadeActive && usesTempoBridgeStyle()) {
             out.setPlaybackSpeed(
-                (AppSettings.playbackSpeed.value * outgoingPlaybackRate).toFloat(),
+                (roomEffectiveSpeed() * outgoingPlaybackRate).toFloat(),
             )
             Log.d(
                 TAG,
@@ -1713,7 +1823,12 @@ class CrossfadeController(
             }
         }
 
-        if (smartFadeActive && usesTempoBridgeStyle()) {
+        if (smartFadeActive && usesTempoBridgeStyle() && !handedOff) {
+            // Freeze the last matched rate once B owns the foreground. Continuing to
+            // rewrite Sonic speed/pitch every 30 ms across the ownership boundary can
+            // leave its internal pitch-period buffer inconsistent when Media3 drains
+            // the old stream. The decks stay phase-locked at the last accepted rates;
+            // finish() releases B smoothly after A has actually left.
             rideTempoBridge(progress, out, player)
         }
 
@@ -1812,7 +1927,8 @@ class CrossfadeController(
         // [configuredFadeMs] at zero, and reading that as "turned off" would
         // end every Automix on its first tick.
         val settingSwitchedOff = if (smartFadeActive) {
-            !AppSettings.smartFadeEnabled.value
+            !AppSettings.smartFadeEnabled.value ||
+                !canRunAutomixOnNetwork(AppSettings.internetAvailable.value)
         } else {
             configuredFadeMs() <= 0L
         }
@@ -1839,7 +1955,7 @@ class CrossfadeController(
         val deck = stemDeck() ?: return
         if (deck.isPrepared) return
         val stems = stemsFor(item, incomingCueTimeMs) ?: return
-        val speed = (AppSettings.playbackSpeed.value * incomingPlaybackRate).toFloat()
+        val speed = (roomEffectiveSpeed() * incomingPlaybackRate).toFloat()
         deck.prepare(stems, incomingCueTimeMs, speed)
         Log.d(
             TAG,
@@ -2070,11 +2186,11 @@ class CrossfadeController(
 
     private fun finish() {
         val completedSmartMix = smartFadeActive && handedOff && phase == Phase.FADING
-        val winner = incoming
-        val incomingRateToRelease = winner?.playbackParameters?.speed?.toDouble()
-            ?.div(AppSettings.playbackSpeed.value.toDouble().coerceAtLeast(0.01))
-            ?: incomingPlaybackRate
-        val pitchNeedsRelease = winner?.playbackParameters?.pitch?.let { abs(it - 1f) > 0.0001f } == true
+        // Once the overlap is over, the winning deck must leave Sonic state in one step.
+        // The previous 36-step / 2.5 s release kept rewriting PlaybackParameters after handoff;
+        // Media3 could then drain/reconfigure Sonic while a quality swap was opening, producing
+        // ArrayIndexOutOfBoundsException inside Sonic.insertPitchPeriod(). The beat/pitch bridge
+        // still exists during the audible mix; only the post-handoff cleanup is now atomic.
         if (phase != Phase.IDLE) {
             Log.d(TAG, "finish from $phase")
             // Stamped under this guard rather than beside the assignment at the
@@ -2104,12 +2220,9 @@ class CrossfadeController(
             // and owns the queue from here, and the outgoing one is spare.
             incoming?.let {
                 it.volume = 1f
-                // Keep the winning deck on its matched rate for one instant longer; if it was
-                // stretched, release it smoothly after A has gone instead of snapping tempo at
-                // the exact seam the listener is paying attention to.
-                if (kotlin.math.abs(incomingRateToRelease - 1.0) < RATE_EPSILON && kotlin.math.abs(it.playbackParameters.pitch - 1f) < 0.0001f) {
-                    it.setPlaybackParameters(PlaybackParameters(AppSettings.playbackSpeed.value, 1f))
-                }
+                // A is already gone at finish(), so there is no longer a shared beat grid to
+                // protect. Reset once instead of mutating Sonic every 70 ms after handoff.
+                it.setPlaybackParameters(PlaybackParameters(roomEffectiveSpeed(), 1f))
             }
             outgoing?.let(::retire)
         } else {
@@ -2119,7 +2232,7 @@ class CrossfadeController(
             outgoing?.run {
                 pauseAtEndOfMediaItems = outgoingPauseAtEndBeforeTransition
                 volume = 1f
-                setPlaybackParameters(PlaybackParameters(AppSettings.playbackSpeed.value, 1f))
+                setPlaybackParameters(PlaybackParameters(roomEffectiveSpeed(), 1f))
             }
             incoming?.let(::retire)
         }
@@ -2147,22 +2260,22 @@ class CrossfadeController(
         mixClockAtMs = 0L
         smartFadeActive = false
         phase = Phase.IDLE
-        if (completedSmartMix && winner != null && (kotlin.math.abs(incomingRateToRelease - 1.0) >= RATE_EPSILON || pitchNeedsRelease)) {
-            releasePlaybackRateGradually(winner, incomingRateToRelease)
-        }
         if (completedSmartMix) NerdStats.onAutomixCompleted()
     }
 
     /** Still a next track, still playing, still switched on — by whichever setting armed this one. */
     private fun stillWorthFading(): Boolean {
-        val stillOn = if (smartFadeActive) AppSettings.smartFadeEnabled.value else configuredFadeMs() > 0L
+        val stillOn = if (smartFadeActive) {
+            AppSettings.smartFadeEnabled.value &&
+                canRunAutomixOnNetwork(AppSettings.internetAvailable.value)
+        } else configuredFadeMs() > 0L
         return stillOn && (outgoing ?: active()).hasNextMediaItem()
     }
 
     /** Returns B to its native/user tempo after A has completely left the mix. */
     private fun releasePlaybackRateGradually(player: ExoPlayer, relativeStart: Double) {
         val mediaId = player.currentMediaItem?.mediaId ?: run {
-            player.setPlaybackParameters(PlaybackParameters(AppSettings.playbackSpeed.value, 1f))
+            player.setPlaybackParameters(PlaybackParameters(roomEffectiveSpeed(), 1f))
             return
         }
         val pitchStart = player.playbackParameters.pitch.toDouble()
@@ -2172,11 +2285,11 @@ class CrossfadeController(
                 val x = (index + 1f) / TEMPO_RELEASE_STEPS
                 val eased = x * x * (3f - 2f * x)
                 val relative = relativeStart + (1.0 - relativeStart) * eased
-                player.setPlaybackParameters(PlaybackParameters((AppSettings.playbackSpeed.value * relative).toFloat(), (pitchStart + (1.0 - pitchStart) * eased).toFloat()))
+                player.setPlaybackParameters(PlaybackParameters((roomEffectiveSpeed() * relative).toFloat(), (pitchStart + (1.0 - pitchStart) * eased).toFloat()))
                 delay(TEMPO_RELEASE_STEP_MS)
             }
             if (player.currentMediaItem?.mediaId == mediaId) {
-                player.setPlaybackParameters(PlaybackParameters(AppSettings.playbackSpeed.value, 1f))
+                player.setPlaybackParameters(PlaybackParameters(roomEffectiveSpeed(), 1f))
             }
         }
     }
@@ -2194,7 +2307,7 @@ class CrossfadeController(
         player.stop()
         player.clearMediaItems()
         player.volume = 1f
-        player.setPlaybackParameters(PlaybackParameters(AppSettings.playbackSpeed.value, 1f))
+        player.setPlaybackParameters(PlaybackParameters(roomEffectiveSpeed(), 1f))
     }
 
     // ---- Numbers ------------------------------------------------------------
@@ -2613,7 +2726,7 @@ class CrossfadeController(
      * Follow the server tempo curves and bounded harmonic correction through the overlap.
      */
     private fun rideTempoBridge(progress: Float, out: ExoPlayer, into: ExoPlayer) {
-        val base = AppSettings.playbackSpeed.value.toDouble().coerceAtLeast(0.01)
+        val base = roomEffectiveSpeed().toDouble().coerceAtLeast(0.01)
         val handoff = render.handoffFraction.toFloat().coerceIn(0.42f, 0.97f)
         val phaseLockUntil = maxOf(
             TEMPO_RELEASE_MIN,
@@ -2743,6 +2856,14 @@ class CrossfadeController(
         val safeSpeed = speed.coerceIn(0.25, 4.0).toFloat()
         val safeSemitones = pitchSemitones.coerceIn(-1.0, 1.0)
         val pitch = 2.0.pow(safeSemitones / 12.0).toFloat()
+        val current = player.playbackParameters
+        // The tempo bridge ticks every 30 ms. Writing parameters when the audible
+        // change is below this threshold only rebuilds Sonic state; it does not
+        // improve beat lock. Coalescing those no-op writes materially reduces the
+        // chance of Media3 draining Sonic while its pitch-period state is changing.
+        if (abs(current.speed - safeSpeed) < PLAYBACK_SPEED_WRITE_EPSILON &&
+            abs(current.pitch - pitch) < PLAYBACK_PITCH_WRITE_EPSILON
+        ) return
         player.setPlaybackParameters(PlaybackParameters(safeSpeed, pitch))
     }
 
@@ -2939,7 +3060,7 @@ class CrossfadeController(
     // equal-power is right everywhere.
 
     private companion object {
-        const val TAG = "BitChordCrossfade"
+        const val TAG = "OrbCrossfade"
 
         /**
          * Used only before a pair has been analysed, or when the evidence is
@@ -2989,6 +3110,8 @@ class CrossfadeController(
         const val RATE_EPSILON = 0.0008
         const val TEMPO_RELEASE_STEPS = 36
         const val TEMPO_RELEASE_STEP_MS = 70L
+        const val PLAYBACK_SPEED_WRITE_EPSILON = 0.0015f
+        const val PLAYBACK_PITCH_WRITE_EPSILON = 0.0025f
         const val MIX_CLOCK_MAX_STEP_MS = 250L
         const val AUTOMIX_ARTWORK_DISSOLVE_MIN_MS = 900L
         const val AUTOMIX_ARTWORK_DISSOLVE_MAX_MS = 2_400L

@@ -2532,7 +2532,7 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
         const val REMOTE_CURVE_SCHEMA = 6
         const val LOCAL_METADATA_SCHEMA = 6
         const val LOCAL_TRANSITION_WINDOW_SECONDS = 60.0
-        const val TAG = "BitChordTrackAnalyzer"
+        const val TAG = "OrbTrackAnalyzer"
 
         /**
          * What an unmeasured instant reads as. Below the policy's VOCAL_ACTIVE_THRESHOLD by

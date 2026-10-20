@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="expressive_greeting_overnight">Hallo</string>
+    <string name="account_youtube_library_partial">YouTube-Kanal verbunden. Deine private YouTube Music-Mediathek ist noch nicht verfügbar.</string>
+    <string name="download_prefer_offline_online_summary">Wenn deaktiviert, wird außerhalb der Downloads normalerweise gestreamt. Offline werden immer gespeicherte Dateien verwendet.</string>
+    <string name="download_prefer_offline_online_title">Heruntergeladene Audiodateien auch online verwenden</string>
+    <string name="nerd_offline_automix_status">Offline · Analyse pausiert</string>
+    <string name="nerd_offline_automix_unavailable">Automix ist offline nicht verfügbar</string>
+    <string name="profile_photo_cannot_open">Dieses Foto konnte nicht geöffnet werden. Bitte wähle ein anderes Bild.</string>
+    <string name="profile_photo_too_large">Das ausgewählte Foto ist größer als 50 MB. Wähle ein Bild mit höchstens 50 MB.</string>
+    <string name="settings_download_fallback_lower_summary">Eine niedrigere Bitrate nur versuchen, wenn die gewählte nicht verfügbar ist. Aus bedeutet keine Herabstufung.</string>
+    <string name="settings_download_fallback_lower_title">Niedrigere Downloadqualität erlauben</string>
+    <string name="settings_download_strict_quality_summary">Downloads erfordern die gewählte Qualität; eine niedrigere Qualität wird nicht ohne Erlaubnis heruntergeladen.</string>
+</resources>

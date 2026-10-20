@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="expressive_greeting_overnight">Salut</string>
+    <string name="account_youtube_library_partial">Chaîne YouTube connectée. Votre bibliothèque YouTube Music privée n’est pas encore disponible.</string>
+    <string name="download_prefer_offline_online_summary">Si cette option est désactivée, le streaming est utilisé hors de Téléchargements. Hors ligne, les fichiers enregistrés sont toujours utilisés.</string>
+    <string name="download_prefer_offline_online_title">Utiliser les fichiers téléchargés même en ligne</string>
+    <string name="nerd_offline_automix_status">Hors ligne · analyse en pause</string>
+    <string name="nerd_offline_automix_unavailable">Automix indisponible hors ligne</string>
+    <string name="profile_photo_cannot_open">Impossible d’ouvrir cette photo. Choisissez une autre image.</string>
+    <string name="profile_photo_too_large">La photo sélectionnée dépasse 50 Mo. Choisissez une image de 50 Mo maximum.</string>
+    <string name="settings_download_fallback_lower_summary">Essayer un débit inférieur uniquement si celui choisi est indisponible. Désactivé : aucune baisse de qualité.</string>
+    <string name="settings_download_fallback_lower_title">Autoriser une qualité de téléchargement inférieure</string>
+    <string name="settings_download_strict_quality_summary">Les téléchargements exigent la qualité sélectionnée ; aucune qualité inférieure n’est téléchargée sans autorisation.</string>
+</resources>

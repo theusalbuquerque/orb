@@ -6,6 +6,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import com.music.orb.auth.AuthStore
+import com.music.orb.data.billing.ServerControlSnapshot
 import com.music.orb.data.lyrics.LyricsSource
 import kotlinx.coroutines.flow.MutableStateFlow
 import java.security.MessageDigest
@@ -13,7 +14,7 @@ import java.security.MessageDigest
 /**
  * Streaming quality below the separate per-network Lossless/Hi-Res ceiling.
  *
- * BitChord 1.5 treats HIGH as "best available" rather than as a fixed 320 kbps
+ * Orb 1.5 treats HIGH as "best available" rather than as a fixed 320 kbps
  * number. Orb additionally exposes AAC explicitly: when chosen, the YouTube
  * resolver prefers an AAC/M4A rendition and other sources receive an AAC
  * request where they support one. AAC is still lossy; Lossless remains the
@@ -31,6 +32,11 @@ enum class AudioQuality(
     AAC(320, "AAC", "Best AAC · up to ~320 kbps", "Up to ~144 MB/hr"),
 }
 
+/** Orb's overlay presentation, not the hardware/Doze always-on display service. */
+// ON_WAKE replaces the former NOTIFICATIONS mode without any access to other apps' alerts.
+// Stored NOTIFICATIONS preferences are migrated while loading existing installations.
+enum class OrbLockDisplayMode { OFF, ALWAYS, ON_WAKE }
+
 enum class OutputPcmMode(val label: String) {
     PCM_16("16-bit PCM"),
     FLOAT_32("32-bit float"),
@@ -47,10 +53,6 @@ enum class AutomixVersion {
 }
 
 /** App typography choices. The UI only exposes this experiment in the dev flavor. */
-enum class AppFont {
-    ORB_DEFAULT,
-    GOOGLE_SANS_FLEX,
-}
 
 /**
  * UI-only view of a long Automix overlap. The transport may already have moved
@@ -102,11 +104,32 @@ object AppSettings {
     val audioQualityWifiMaximum = MutableStateFlow(false)
     val audioQualityCellularMaximum = MutableStateFlow(false)
 
+    /** Default for new downloads. Per-track selections do not rewrite it. */
+    val downloadQuality = MutableStateFlow("HIGH")
+
+    /**
+     * Only a quality explicitly saved in Settings skips the per-download picker.
+     * The implicit HIGH default must not count as a user choice. This also
+     * recognizes preferences saved by earlier versions of Orb.
+     */
+    val hasConfiguredDownloadQuality: Boolean
+        get() = ::prefs.isInitialized &&
+            prefs.getString(KEY_DOWNLOAD_QUALITY, null) in setOf("MEDIUM", "HIGH", "MAXIMUM")
+
+    /** Only authorizes High/AAC fallback after an exhaustive Maximum/Lossless search. */
+    val downloadAllowLowerQuality = MutableStateFlow(false)
+
+    /** Stream normally while online; explicitly downloaded Library/Downloads files always remain local. */
+    val useDownloadsWhileOnline = MutableStateFlow(false)
+
     /** Whether the active network charges for data. `null` while offline. */
     val meteredConnection = MutableStateFlow<Boolean?>(null)
 
     /** True only when the active transport is Wi-Fi; null while offline/unknown. */
     val wifiConnection = MutableStateFlow<Boolean?>(null)
+
+    /** Android-validated Internet access, not just a connected Wi-Fi or carrier network. */
+    val internetAvailable = MutableStateFlow(false)
 
     /**
      * Availability switch for Orb's built-in Lossless sources.
@@ -130,12 +153,34 @@ object AppSettings {
     val automixVersion = MutableStateFlow(AutomixVersion.V2_0)
     val automix25Available = MutableStateFlow(false)
     val premiumEntitled = MutableStateFlow(false)
+
+    /** Last server-authoritative account/config snapshot, cached for offline startup. */
+    val serverControlReady = MutableStateFlow(false)
+    val premiumPlan = MutableStateFlow<String?>(null)
+    val premiumSource = MutableStateFlow<String?>(null)
+    val premiumExpiresAt = MutableStateFlow<String?>(null)
+    val serverAutomix25Enabled = MutableStateFlow(true)
+    val serverOrbSwitchEnabled = MutableStateFlow(true)
+    val serverPremiumCardEnabled = MutableStateFlow(true)
+    val serverRoomsEnabled = MutableStateFlow(true)
+    val serverLosslessMobileEnabled = MutableStateFlow(true)
+    val serverControlRefreshIntervalSeconds = MutableStateFlow(60L)
+
     /** True only for the Orb developer/owner account, independent of billing entitlement. */
     val isOwnerAccount = MutableStateFlow(false)
+
+    /** May see the Premium offer before launch, but has no automatic Premium entitlement. */
+    val premiumEarlyOfferAccess = MutableStateFlow(false)
+    /**
+     * Owner-only, LOCAL checkout preview. This is not billing entitlement and
+     * never talks to a payment provider. It lets the developer exercise the
+     * cancel / zero-total checkout / subscribe UI without a real charge.
+     */
+    val ownerPremiumTestSubscribed = MutableStateFlow(true)
     internal val automix25AccountHash = MutableStateFlow("")
     private var requestedAutomixVersion = AutomixVersion.V2_0
 
-    /** BitChord v1.5 smart-fade runtime alias; Orb keeps the existing Automix toggle in UI. */
+    /** Orb v1.5 smart-fade runtime alias; Orb keeps the existing Automix toggle in UI. */
     val smartFadeEnabled get() = automixEnabled
     val smartAnalysis = MutableStateFlow(SmartAnalysis())
     val smartTransitionWindow = MutableStateFlow<TransitionWindow?>(null)
@@ -172,7 +217,6 @@ object AppSettings {
 
     /** Home page Aura background gradient. Enabled by default; users may disable it to reduce battery/GPU use. */
     val homeAuraEnabled = MutableStateFlow(true)
-    val appFont = MutableStateFlow(AppFont.ORB_DEFAULT)
 
     /** Prefer canonical album cuts over single/remix editions when Orb can verify the same recording. */
     val prioritizeAlbumVersions = MutableStateFlow(false)
@@ -199,7 +243,11 @@ object AppSettings {
     val showNerdStats = MutableStateFlow(false)
 
     /** Optional tactile confirmations for key expressive actions. */
-    val hapticFeedback = MutableStateFlow(false)
+    val updateReminderUntil = MutableStateFlow(0L)
+    val hapticFeedback = MutableStateFlow(true)
+
+    /** Premium same-account playback handoff triggered by touching nearby Orb devices. */
+    val touchTransferEnabled = MutableStateFlow(true)
 
     /** Freezes the main player's mesh gradient instead of letting it drift/crossfade. */
     val reduceAnimation = MutableStateFlow(false)
@@ -207,14 +255,42 @@ object AppSettings {
     /** Hide the device status bar only while the full Now Playing window is open. */
     val hideStatusBarNowPlaying = MutableStateFlow(false)
 
+    /** Opt-in lockscreen view: never changes the device's PIN/biometric security. */
+    val orbLockscreenEnabled = MutableStateFlow(false)
+
+    /** Opt-in to keeping Orb's lockscreen lit; NOT Android's hardware low-power AOD. */
+    val orbLockscreenAlwaysOn = MutableStateFlow(false)
+
+    /** How Orb Lock behaves after the device is locked. */
+    val orbLockscreenMode = MutableStateFlow(OrbLockDisplayMode.OFF)
+
+    /** Follow the device's current display-brightness policy by default. */
+    val orbLockscreenAutoBrightness = MutableStateFlow(true)
+
+    /** Activity-local brightness, 5–100%; never changes the device-wide setting. */
+    val orbLockscreenBrightness = MutableStateFlow(0.25f)
+
+    /** True black background; the album art itself remains visible in the foreground. */
+    val orbLockscreenPowerSaving = MutableStateFlow(false)
+
+    /** Hides the status bar inside Orb Lock only; unrelated to Now Playing. */
+    val orbLockscreenHideStatusBar = MutableStateFlow(false)
+
     /** Keep the display awake only while the full Now Playing window is open. */
     val keepScreenOnNowPlaying = MutableStateFlow(false)
 
     /** Allow only the phone Now Playing window to follow device rotation. */
     val allowScreenRotation = MutableStateFlow(false)
 
-    /** Stop playback when the app is swiped away from the recent apps screen. */
-    val stopOnTaskRemoved = MutableStateFlow(false)
+    /**
+     * Premium opt-in: keep an active MediaSession playing when Orb's MAIN task
+     * is deliberately removed from Recents. Simply switching apps or turning
+     * the screen off never stops playback, for any user.
+     *
+     * This is account-scoped and defaults to false (swiping Orb away stops it).
+     * The service checks entitlement again when it receives onTaskRemoved().
+     */
+    val continuePlaybackAfterRecentRemoval = MutableStateFlow(false)
 
     /** Swiping a song row plays it next instead of adding it to the end of the queue. */
     val swipeToPlayNext = MutableStateFlow(false)
@@ -270,9 +346,6 @@ object AppSettings {
 
     /** Keep looking for syllable/word timing after a line-synced result is found. */
     val prioritizeSyllableSync = MutableStateFlow(false)
-
-    /** Optional credential for PaxSenix's Spotify and Musixmatch routes. */
-    val paxSenixApiKey = MutableStateFlow("")
 
     /** Disk budget for cached audio. [AudioCache][com.music.orb.playback.AudioCache] evicts past it. */
     val audioCacheLimitBytes = MutableStateFlow(DEFAULT_CACHE_LIMIT_BYTES)
@@ -379,11 +452,21 @@ object AppSettings {
     val effectiveMaximumAudioQuality: Boolean
         get() = losslessAudio.value && (
             (wifiConnection.value == true && audioQualityWifiMaximum.value) ||
-                (wifiConnection.value == false && premiumEntitled.value)
+                (wifiConnection.value == false && audioQualityCellularMaximum.value &&
+                    premiumEntitled.value && serverLosslessMobileEnabled.value)
             )
 
     fun init(context: Context) {
         prefs = context.getSharedPreferences("bitchord_settings", Context.MODE_PRIVATE)
+        serverAutomix25Enabled.value = prefs.getBoolean(KEY_SERVER_AUTOMIX25_ENABLED, true)
+        serverOrbSwitchEnabled.value = prefs.getBoolean(KEY_SERVER_ORB_SWITCH_ENABLED, true)
+        serverPremiumCardEnabled.value = prefs.getBoolean(KEY_SERVER_PREMIUM_CARD_ENABLED, true)
+        serverRoomsEnabled.value = prefs.getBoolean(KEY_SERVER_ROOMS_ENABLED, true)
+        serverLosslessMobileEnabled.value = prefs.getBoolean(KEY_SERVER_LOSSLESS_MOBILE_ENABLED, true)
+        serverControlRefreshIntervalSeconds.value = prefs.getLong(KEY_SERVER_REFRESH_INTERVAL_SECONDS, 60L).coerceIn(30L, 900L)
+        premiumPlan.value = prefs.getString(KEY_SERVER_PREMIUM_PLAN, null)
+        premiumSource.value = prefs.getString(KEY_SERVER_PREMIUM_SOURCE, null)
+        premiumExpiresAt.value = prefs.getString(KEY_SERVER_PREMIUM_EXPIRES_AT, null)
         migrateSingleQuality()
         migrateLegacyHighDefaultToAac()
         // Keep AAC as AAC. Earlier builds translated the stored AAC default
@@ -392,16 +475,15 @@ object AppSettings {
         audioQualityWifi.value = readQuality(KEY_QUALITY_WIFI)
         audioQualityCellular.value = readQuality(KEY_QUALITY_CELLULAR)
         audioQualityWifiMaximum.value = prefs.getBoolean(KEY_QUALITY_WIFI_MAXIMUM, false)
-        // Lossless/Hi-Res is Wi-Fi-only. Older builds exposed a mobile Maximum
-        // flag; migrate it off permanently and keep AAC as the mobile ceiling.
-        audioQualityCellularMaximum.value = false
-        if (prefs.getBoolean(KEY_QUALITY_CELLULAR_MAXIMUM, false)) {
-            prefs.edit()
-                .putBoolean(KEY_QUALITY_CELLULAR_MAXIMUM, false)
-                .putString(KEY_QUALITY_CELLULAR, AudioQuality.AAC.name)
-                .apply()
-            audioQualityCellular.value = AudioQuality.AAC
-        }
+        // Account entitlement is enforced at playback time. The stored opt-in
+        // cannot grant mobile Lossless to free accounts by itself.
+        audioQualityCellularMaximum.value = prefs.getBoolean(KEY_QUALITY_CELLULAR_MAXIMUM, false)
+        downloadQuality.value = prefs.getString(KEY_DOWNLOAD_QUALITY, "HIGH")
+            ?.takeIf { it in setOf("MEDIUM", "HIGH", "MAXIMUM") } ?: "HIGH"
+        // A new key avoids inheriting obsolete off-by-default behavior from the
+        // pre-automatic-fallback picker. Users can turn High fallback off explicitly.
+        downloadAllowLowerQuality.value = prefs.getBoolean(KEY_DOWNLOAD_FALLBACK_HIGH_V3, false)
+        useDownloadsWhileOnline.value = prefs.getBoolean(KEY_USE_DOWNLOADS_WHILE_ONLINE, false)
         losslessAudio.value = prefs.getBoolean(KEY_LOSSLESS, false)
         crossfadeSeconds.value = prefs.getInt(KEY_CROSSFADE, 0)
         automixEnabled.value = prefs.getBoolean(KEY_AUTOMIX, false)
@@ -428,8 +510,7 @@ object AppSettings {
         homeAuraEnabled.value = prefs.getBoolean(KEY_HOME_AURA_ENABLED, true)
         // The font picker was removed. Normalize older installs back to Orb's default
         // so nobody gets stranded on the former experimental font after upgrading.
-        appFont.value = AppFont.ORB_DEFAULT
-        prefs.edit().putString(KEY_APP_FONT, AppFont.ORB_DEFAULT.name).apply()
+        prefs.edit().remove("app_font").apply()
         prioritizeAlbumVersions.value = prefs.getBoolean(KEY_PRIORITIZE_ALBUM_VERSIONS, false)
         // AutoPlay is opt-in for both Beta and Stable. Older installs may have
         // inherited the legacy implicit-true default, so only a value written
@@ -441,12 +522,31 @@ object AppSettings {
         }
         useYouTubeMusicLibrary.value = prefs.getBoolean(KEY_USE_YOUTUBE_MUSIC_LIBRARY, true)
         showNerdStats.value = prefs.getBoolean(KEY_NERD_STATS, false)
-        hapticFeedback.value = prefs.getBoolean(KEY_HAPTIC_FEEDBACK, false)
+        updateReminderUntil.value = prefs.getLong(KEY_UPDATE_REMINDER_UNTIL, 0L)
+        hapticFeedback.value = prefs.getBoolean(KEY_HAPTIC_FEEDBACK, true)
+        touchTransferEnabled.value = prefs.getBoolean(KEY_TOUCH_TRANSFER_ENABLED, true)
         reduceAnimation.value = prefs.getBoolean(KEY_REDUCE_ANIMATION, false)
         hideStatusBarNowPlaying.value = prefs.getBoolean(KEY_HIDE_STATUS_BAR_NOW_PLAYING, false)
+        orbLockscreenEnabled.value = prefs.getBoolean(KEY_ORB_LOCKSCREEN_ENABLED, false)
+        orbLockscreenMode.value = runCatching {
+            OrbLockDisplayMode.valueOf(
+                when (val saved = prefs.getString(KEY_ORB_LOCKSCREEN_MODE, null)) {
+                    "NOTIFICATIONS" -> OrbLockDisplayMode.ON_WAKE.name
+                    else -> saved ?: ""
+                }
+            )
+        }.getOrElse {
+            if (prefs.getBoolean(KEY_ORB_LOCKSCREEN_ALWAYS_ON, false)) OrbLockDisplayMode.ALWAYS
+            else OrbLockDisplayMode.OFF
+        }
+        orbLockscreenAlwaysOn.value = orbLockscreenMode.value == OrbLockDisplayMode.ALWAYS
+        orbLockscreenAutoBrightness.value = prefs.getBoolean(KEY_ORB_LOCKSCREEN_AUTO_BRIGHTNESS, true)
+        orbLockscreenBrightness.value = prefs.getFloat(KEY_ORB_LOCKSCREEN_BRIGHTNESS, 0.25f).coerceIn(0.05f, 1f)
+        orbLockscreenPowerSaving.value = prefs.getBoolean(KEY_ORB_LOCKSCREEN_POWER_SAVING, false)
+        orbLockscreenHideStatusBar.value = prefs.getBoolean(KEY_ORB_LOCKSCREEN_HIDE_STATUS_BAR, false)
         keepScreenOnNowPlaying.value = prefs.getBoolean(KEY_KEEP_SCREEN_ON_NOW_PLAYING, false)
         allowScreenRotation.value = prefs.getBoolean(KEY_ALLOW_SCREEN_ROTATION, false)
-        stopOnTaskRemoved.value = prefs.getBoolean(KEY_STOP_ON_TASK_REMOVED, false)
+        loadContinuePlaybackAfterRecentRemoval()
         swipeToPlayNext.value = prefs.getBoolean(KEY_SWIPE_TO_PLAY_NEXT, false)
         betaUpdatesEnabled.value = prefs.getBoolean(KEY_BETA_UPDATES_ENABLED, false)
         stableAutoUpdatesEnabled.value = if (betaUpdatesEnabled.value) {
@@ -462,7 +562,8 @@ object AppSettings {
         syncedLyrics.value = prefs.getBoolean(KEY_SYNCED_LYRICS, true)
         lyricsSources.value = readLyricsSources()
         prioritizeSyllableSync.value = prefs.getBoolean(KEY_PRIORITIZE_SYLLABLE_SYNC, false)
-        paxSenixApiKey.value = prefs.getString(KEY_PAXSENIX_API_KEY, "").orEmpty()
+        // No longer keep credentials for discontinued PaxSenix providers.
+        prefs.edit().remove(KEY_PAXSENIX_API_KEY).apply()
         outputPcmMode.value = prefs.getString(KEY_OUTPUT_PCM_MODE, null)
             ?.let { saved -> OutputPcmMode.entries.firstOrNull { it.name == saved } }
             ?: OutputPcmMode.PCM_16
@@ -502,6 +603,100 @@ object AppSettings {
         watchConnection(context)
     }
 
+    /** Re-publishes account-synced preferences after a remote settings snapshot is applied. */
+    internal fun reloadFromPreferences() {
+        if (!::prefs.isInitialized) return
+        audioQualityWifi.value = readQuality(KEY_QUALITY_WIFI)
+        audioQualityCellular.value = readQuality(KEY_QUALITY_CELLULAR)
+        audioQualityWifiMaximum.value = prefs.getBoolean(KEY_QUALITY_WIFI_MAXIMUM, false)
+        losslessAudio.value = prefs.getBoolean(KEY_LOSSLESS, false)
+        crossfadeSeconds.value = prefs.getInt(KEY_CROSSFADE, 0)
+        automixEnabled.value = prefs.getBoolean(KEY_AUTOMIX, false)
+        requestedAutomixVersion = runCatching {
+            AutomixVersion.valueOf(prefs.getString(KEY_AUTOMIX_VERSION, AutomixVersion.V2_0.name) ?: AutomixVersion.V2_0.name)
+        }.getOrDefault(AutomixVersion.V2_0)
+        refreshAutomix25Entitlement()
+        if (automixEnabled.value && crossfadeSeconds.value != 0) {
+            crossfadeSeconds.value = 0
+            prefs.edit().putInt(KEY_CROSSFADE, 0).apply()
+        }
+        skipSilence.value = prefs.getBoolean(KEY_SKIP_SILENCE, false)
+        spatialAudio.value = prefs.getBoolean(KEY_SPATIAL_AUDIO, false)
+        playbackSpeed.value = prefs.getFloat(KEY_SPEED, 1.0f)
+        themeMode.value = runCatching { ThemeMode.valueOf(prefs.getString(KEY_THEME, null) ?: ThemeMode.SYSTEM.name) }.getOrDefault(ThemeMode.SYSTEM)
+        homeAuraEnabled.value = prefs.getBoolean(KEY_HOME_AURA_ENABLED, true)
+        prioritizeAlbumVersions.value = prefs.getBoolean(KEY_PRIORITIZE_ALBUM_VERSIONS, false)
+        autoplay.value = if (prefs.getBoolean(KEY_AUTOPLAY_EXPLICIT, false)) prefs.getBoolean(KEY_AUTOPLAY, false) else false
+        useYouTubeMusicLibrary.value = prefs.getBoolean(KEY_USE_YOUTUBE_MUSIC_LIBRARY, true)
+        showNerdStats.value = prefs.getBoolean(KEY_NERD_STATS, false)
+        updateReminderUntil.value = prefs.getLong(KEY_UPDATE_REMINDER_UNTIL, 0L)
+        hapticFeedback.value = prefs.getBoolean(KEY_HAPTIC_FEEDBACK, true)
+        touchTransferEnabled.value = prefs.getBoolean(KEY_TOUCH_TRANSFER_ENABLED, true)
+        reduceAnimation.value = prefs.getBoolean(KEY_REDUCE_ANIMATION, false)
+        hideStatusBarNowPlaying.value = prefs.getBoolean(KEY_HIDE_STATUS_BAR_NOW_PLAYING, false)
+        keepScreenOnNowPlaying.value = prefs.getBoolean(KEY_KEEP_SCREEN_ON_NOW_PLAYING, false)
+        allowScreenRotation.value = prefs.getBoolean(KEY_ALLOW_SCREEN_ROTATION, false)
+        loadContinuePlaybackAfterRecentRemoval()
+        swipeToPlayNext.value = prefs.getBoolean(KEY_SWIPE_TO_PLAY_NEXT, false)
+        betaUpdatesEnabled.value = prefs.getBoolean(KEY_BETA_UPDATES_ENABLED, false)
+        stableAutoUpdatesEnabled.value = prefs.getBoolean(KEY_STABLE_AUTO_UPDATES_ENABLED, true)
+        reduceDynamicBlur.value = prefs.getBoolean(KEY_REDUCE_BLUR, false)
+        animatedCanvas.value = prefs.getBoolean(KEY_ANIMATED_CANVAS, true)
+        syncedLyrics.value = prefs.getBoolean(KEY_SYNCED_LYRICS, true)
+        lyricsSources.value = readLyricsSources()
+        prioritizeSyllableSync.value = prefs.getBoolean(KEY_PRIORITIZE_SYLLABLE_SYNC, false)
+        outputPcmMode.value = prefs.getString(KEY_OUTPUT_PCM_MODE, null)
+            ?.let { saved -> OutputPcmMode.entries.firstOrNull { it.name == saved } }
+            ?: OutputPcmMode.PCM_16
+        preferUsbDac.value = prefs.getBoolean(KEY_PREFER_USB_DAC, false)
+        audioQualityCellularMaximum.value = prefs.getBoolean(KEY_QUALITY_CELLULAR_MAXIMUM, false)
+        downloadQuality.value = prefs.getString(KEY_DOWNLOAD_QUALITY, "HIGH")
+            ?.takeIf { it in setOf("MEDIUM", "HIGH", "MAXIMUM") } ?: "HIGH"
+        downloadAllowLowerQuality.value = prefs.getBoolean(KEY_DOWNLOAD_FALLBACK_HIGH_V3, false)
+        useDownloadsWhileOnline.value = prefs.getBoolean(KEY_USE_DOWNLOADS_WHILE_ONLINE, false)
+        orbLockscreenEnabled.value = prefs.getBoolean(KEY_ORB_LOCKSCREEN_ENABLED, false)
+        orbLockscreenMode.value = runCatching {
+            OrbLockDisplayMode.valueOf(
+                when (val saved = prefs.getString(KEY_ORB_LOCKSCREEN_MODE, null)) {
+                    "NOTIFICATIONS" -> OrbLockDisplayMode.ON_WAKE.name
+                    else -> saved ?: ""
+                }
+            )
+        }.getOrElse {
+            if (prefs.getBoolean(KEY_ORB_LOCKSCREEN_ALWAYS_ON, false)) OrbLockDisplayMode.ALWAYS
+            else OrbLockDisplayMode.OFF
+        }
+        orbLockscreenAlwaysOn.value = orbLockscreenMode.value == OrbLockDisplayMode.ALWAYS
+        orbLockscreenAutoBrightness.value = prefs.getBoolean(KEY_ORB_LOCKSCREEN_AUTO_BRIGHTNESS, true)
+        orbLockscreenBrightness.value = prefs.getFloat(KEY_ORB_LOCKSCREEN_BRIGHTNESS, 0.25f).coerceIn(0.05f, 1f)
+        orbLockscreenPowerSaving.value = prefs.getBoolean(KEY_ORB_LOCKSCREEN_POWER_SAVING, false)
+        orbLockscreenHideStatusBar.value = prefs.getBoolean(KEY_ORB_LOCKSCREEN_HIDE_STATUS_BAR, false)
+        audioCacheLimitBytes.value = prefs.getLong(KEY_CACHE_LIMIT, DEFAULT_CACHE_LIMIT_BYTES)
+            .coerceIn(DEFAULT_CACHE_LIMIT_BYTES, MAX_CACHE_LIMIT_BYTES)
+        lastfmEnabled.value = prefs.getBoolean(KEY_LASTFM_ENABLED, false)
+        lastfmUsername.value = prefs.getString(KEY_LASTFM_USERNAME, "").orEmpty()
+        lastfmEndpoint.value = prefs.getString(KEY_LASTFM_ENDPOINT, "").orEmpty()
+        lastfmScrobbleEnabled.value = prefs.getBoolean(KEY_LASTFM_SCROBBLE_ENABLED, false)
+        lastfmNowPlaying.value = prefs.getBoolean(KEY_LASTFM_NOW_PLAYING, false)
+        scrobbleMinDuration.value = prefs.getInt(KEY_SCROBBLE_MIN_DURATION, 30)
+        scrobbleDelayPercent.value = prefs.getFloat(KEY_SCROBBLE_DELAY_PERCENT, 0.5f)
+        scrobbleDelaySeconds.value = prefs.getInt(KEY_SCROBBLE_DELAY_SECONDS, 180)
+        listenBrainzEnabled.value = prefs.getBoolean(KEY_LISTENBRAINZ_ENABLED, false)
+        discordUsername.value = prefs.getString(KEY_DISCORD_USERNAME, "").orEmpty()
+        discordName.value = prefs.getString(KEY_DISCORD_NAME, "").orEmpty()
+        discordAvatar.value = prefs.getString(KEY_DISCORD_AVATAR, "").orEmpty()
+        discordRpcEnabled.value = prefs.getBoolean(KEY_DISCORD_RPC_ENABLED, true)
+        discordUseDetails.value = prefs.getBoolean(KEY_DISCORD_USE_DETAILS, false)
+        discordAdvancedMode.value = prefs.getBoolean(KEY_DISCORD_ADVANCED_MODE, false)
+        discordStatus.value = prefs.getString(KEY_DISCORD_STATUS, "online").orEmpty()
+        discordActivityType.value = prefs.getString(KEY_DISCORD_ACTIVITY_TYPE, "listening").orEmpty()
+        discordActivityName.value = prefs.getString(KEY_DISCORD_ACTIVITY_NAME, "").orEmpty()
+        discordButton1Text.value = prefs.getString(KEY_DISCORD_BUTTON_1_TEXT, "").orEmpty()
+        discordButton1Visible.value = prefs.getBoolean(KEY_DISCORD_BUTTON_1_VISIBLE, true)
+        discordButton2Text.value = prefs.getString(KEY_DISCORD_BUTTON_2_TEXT, "").orEmpty()
+        discordButton2Visible.value = prefs.getBoolean(KEY_DISCORD_BUTTON_2_VISIBLE, true)
+    }
+
     /**
      * True the first time this is called after [currentVersionCode] rises above
      * whatever was last recorded — i.e. once per update, on the first launch
@@ -509,7 +704,7 @@ object AppSettings {
      * the very first call seeds the stored value from [currentVersionCode]
      * rather than reporting an update.
      *
-     * BitChord ships sideloaded (see [com.music.orb.data.AppUpdateChecker]),
+     * Orb ships sideloaded (see [com.music.orb.data.AppUpdateChecker]),
      * so installing a new APK over the old one is the only "update" there is —
      * app data, this pref included, survives it exactly like a Play Store
      * update. Call once per process start, before anything reads a cache that
@@ -581,10 +776,14 @@ object AppSettings {
             meteredConnection.value = runCatching {
                 if (active == null) null else manager.isActiveNetworkMetered
             }.getOrNull()
-            wifiConnection.value = runCatching {
-                if (active == null) null else manager.getNetworkCapabilities(active)
-                    ?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+            val capabilities = runCatching {
+                active?.let { manager.getNetworkCapabilities(it) }
             }.getOrNull()
+            wifiConnection.value = if (active == null) null else
+                capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+            internetAvailable.value = capabilities?.hasCapability(
+                NetworkCapabilities.NET_CAPABILITY_VALIDATED,
+            ) == true
         }
         refresh()
         runCatching {
@@ -649,14 +848,30 @@ object AppSettings {
     }
 
     fun setAudioQualityCellularMaximum(value: Boolean) {
-        // Maximum Lossless is intentionally unavailable on mobile data. Keep
-        // this compatibility setter so old callers/build variants still compile.
-        audioQualityCellularMaximum.value = false
+        if (value && (!premiumEntitled.value || !serverLosslessMobileEnabled.value)) return
+        audioQualityCellularMaximum.value = value
         if (value) audioQualityCellular.value = AudioQuality.AAC
         prefs.edit()
-            .putBoolean(KEY_QUALITY_CELLULAR_MAXIMUM, false)
+            .putBoolean(KEY_QUALITY_CELLULAR_MAXIMUM, value)
             .putString(KEY_QUALITY_CELLULAR, audioQualityCellular.value.name)
             .apply()
+    }
+
+    fun setDownloadQuality(value: String) {
+        if (value !in setOf("MEDIUM", "HIGH", "MAXIMUM")) return
+        if (value == "MAXIMUM" && !premiumEntitled.value) return
+        downloadQuality.value = value
+        prefs.edit().putString(KEY_DOWNLOAD_QUALITY, value).apply()
+    }
+
+    fun setUseDownloadsWhileOnline(value: Boolean) {
+        useDownloadsWhileOnline.value = value
+        prefs.edit().putBoolean(KEY_USE_DOWNLOADS_WHILE_ONLINE, value).apply()
+    }
+
+    fun setDownloadAllowLowerQuality(value: Boolean) {
+        downloadAllowLowerQuality.value = value
+        prefs.edit().putBoolean(KEY_DOWNLOAD_FALLBACK_HIGH_V3, value).apply()
     }
 
     fun setLosslessAudio(value: Boolean) {
@@ -697,30 +912,89 @@ object AppSettings {
      * raw e-mail is never persisted by this setting or sent to the Automix API.
      */
     fun setCurrentAccountEmail(email: String?) {
-        automix25AccountHash.value = email
+        val newAccountHash = email
             ?.trim()
             ?.lowercase()
             ?.takeIf { it.isNotEmpty() }
             ?.let(::sha256Hex)
             .orEmpty()
+        if (automix25AccountHash.value != newAccountHash) {
+            // Do not treat the previous account's verified bootstrap as the
+            // new account's snapshot. Its Premium flag is reloaded below.
+            serverControlReady.value = false
+            premiumPlan.value = null
+            premiumSource.value = null
+            premiumExpiresAt.value = null
+        }
+        automix25AccountHash.value = newAccountHash
 
-        // Private owner account: expose the complete Premium UI/features for
-        // development and QA even when no billing entitlement exists yet.
+        // Early access is the initial state only. Verified billing changes are
+        // cached per account so canceling is preserved across login/restart.
         val ownerAccount = automix25AccountHash.value == AUTOMIX_25_BETA_OWNER_HASH
         isOwnerAccount.value = ownerAccount
-        premiumEntitled.value = ownerAccount || premiumEntitled.value
+        // Visibility only. This account must still complete a real purchase and
+        // receive an authenticated billing entitlement to use Premium features.
+        premiumEarlyOfferAccess.value = PremiumLaunch.isEarlyOfferAccount(email)
+        ownerPremiumTestSubscribed.value = ownerAccount &&
+            prefs.getBoolean("owner_premium_test_subscribed_${automix25AccountHash.value}", true)
+        premiumEntitled.value = automix25AccountHash.value.isNotEmpty() &&
+            prefs.getBoolean("premium_entitled_${automix25AccountHash.value}", ownerAccount)
+        // A previously signed-in Premium account must not leak its choice to
+        // the next user on the same phone, including a signed-out user.
+        loadContinuePlaybackAfterRecentRemoval()
         refreshAutomix25Entitlement()
     }
 
-    /** Future Premium billing can call this with its verified entitlement. */
+    /** Only affects the owner's local billing preview, never Premium entitlement. */
+    fun setOwnerPremiumTestSubscribed(subscribed: Boolean) {
+        if (!isOwnerAccount.value || automix25AccountHash.value.isBlank() || !::prefs.isInitialized) return
+        ownerPremiumTestSubscribed.value = subscribed
+        prefs.edit().putBoolean(
+            "owner_premium_test_subscribed_${automix25AccountHash.value}", subscribed,
+        ).apply()
+    }
+
+    /** Applies a snapshot signed by the authenticated Orb backend. */
+    internal fun applyServerControl(snapshot: ServerControlSnapshot) {
+        serverControlReady.value = true
+        premiumPlan.value = snapshot.plan
+        premiumSource.value = snapshot.source
+        premiumExpiresAt.value = snapshot.expiresAt
+        serverAutomix25Enabled.value = snapshot.automix25Enabled
+        serverOrbSwitchEnabled.value = snapshot.orbSwitchEnabled
+        serverPremiumCardEnabled.value = snapshot.premiumCardEnabled
+        serverRoomsEnabled.value = snapshot.roomsEnabled
+        serverLosslessMobileEnabled.value = snapshot.losslessMobileEnabled
+        serverControlRefreshIntervalSeconds.value = snapshot.refreshIntervalSeconds.coerceIn(30L, 900L)
+
+        if (::prefs.isInitialized) {
+            prefs.edit()
+                .putString(KEY_SERVER_PREMIUM_PLAN, snapshot.plan)
+                .putString(KEY_SERVER_PREMIUM_SOURCE, snapshot.source)
+                .putString(KEY_SERVER_PREMIUM_EXPIRES_AT, snapshot.expiresAt)
+                .putBoolean(KEY_SERVER_AUTOMIX25_ENABLED, snapshot.automix25Enabled)
+                .putBoolean(KEY_SERVER_ORB_SWITCH_ENABLED, snapshot.orbSwitchEnabled)
+                .putBoolean(KEY_SERVER_PREMIUM_CARD_ENABLED, snapshot.premiumCardEnabled)
+                .putBoolean(KEY_SERVER_ROOMS_ENABLED, snapshot.roomsEnabled)
+                .putBoolean(KEY_SERVER_LOSSLESS_MOBILE_ENABLED, snapshot.losslessMobileEnabled)
+                .putLong(KEY_SERVER_REFRESH_INTERVAL_SECONDS, snapshot.refreshIntervalSeconds.coerceIn(30L, 900L))
+                .apply()
+        }
+        setPremiumEntitled(snapshot.premium)
+    }
+
+    /** Called only with an authenticated server/billing response. */
     fun setPremiumEntitled(value: Boolean) {
-        premiumEntitled.value = value
+        val effective = value || isOwnerAccount.value
+        premiumEntitled.value = effective
+        if (automix25AccountHash.value.isNotEmpty()) {
+            prefs.edit().putBoolean("premium_entitled_${automix25AccountHash.value}", effective).apply()
+        }
         refreshAutomix25Entitlement()
     }
 
     private fun refreshAutomix25Entitlement() {
-        val allowed = premiumEntitled.value ||
-            automix25AccountHash.value == AUTOMIX_25_BETA_OWNER_HASH
+        val allowed = premiumEntitled.value && serverAutomix25Enabled.value
         automix25Available.value = allowed
         automixVersion.value =
             if (allowed) requestedAutomixVersion else AutomixVersion.V2_0
@@ -751,9 +1025,21 @@ object AppSettings {
         prefs.edit().putBoolean(KEY_NERD_STATS, value).apply()
     }
 
+    fun remindUpdateLater() {
+        val deadline = System.currentTimeMillis() + 3L * 60L * 60L * 1_000L
+        prefs.edit().putLong(KEY_UPDATE_REMINDER_UNTIL, deadline).apply()
+        updateReminderUntil.value = deadline
+    }
+
     fun setHapticFeedback(value: Boolean) {
         hapticFeedback.value = value
         prefs.edit().putBoolean(KEY_HAPTIC_FEEDBACK, value).apply()
+    }
+
+    fun setTouchTransferEnabled(value: Boolean) {
+        if (value && (!premiumEntitled.value || !serverOrbSwitchEnabled.value)) return
+        touchTransferEnabled.value = value
+        prefs.edit().putBoolean(KEY_TOUCH_TRANSFER_ENABLED, value).apply()
     }
 
     fun setPrioritizeAlbumVersions(value: Boolean) {
@@ -771,10 +1057,6 @@ object AppSettings {
         prefs.edit().putBoolean(KEY_HOME_AURA_ENABLED, value).apply()
     }
 
-    fun setAppFont(value: AppFont) {
-        appFont.value = value
-        prefs.edit().putString(KEY_APP_FONT, value.name).apply()
-    }
 
     fun setReduceAnimation(value: Boolean) {
         reduceAnimation.value = value
@@ -784,6 +1066,60 @@ object AppSettings {
     fun setHideStatusBarNowPlaying(value: Boolean) {
         hideStatusBarNowPlaying.value = value
         prefs.edit().putBoolean(KEY_HIDE_STATUS_BAR_NOW_PLAYING, value).apply()
+    }
+
+    fun setOrbLockscreenEnabled(value: Boolean) {
+        // Visibility is a Premium benefit, not just a disabled switch in Settings.
+        val allowed = value && (premiumEntitled.value || isOwnerAccount.value)
+        orbLockscreenEnabled.value = allowed
+        // A fresh opt-in must immediately have a usable mode, not OFF.
+        if (allowed && orbLockscreenMode.value == OrbLockDisplayMode.OFF) {
+            setOrbLockscreenMode(OrbLockDisplayMode.ON_WAKE)
+        }
+        prefs.edit().putBoolean(KEY_ORB_LOCKSCREEN_ENABLED, allowed).apply()
+    }
+
+    fun setOrbLockscreenAlwaysOn(value: Boolean) = setOrbLockscreenMode(
+        if (value) OrbLockDisplayMode.ALWAYS else OrbLockDisplayMode.OFF
+    )
+
+    fun setOrbLockscreenMode(mode: OrbLockDisplayMode) {
+        if (!premiumEntitled.value && !isOwnerAccount.value) return
+        orbLockscreenMode.value = mode
+        orbLockscreenAlwaysOn.value = mode == OrbLockDisplayMode.ALWAYS
+        // OFF is an actual off-state, while choosing either display mode enables Orb Lock.
+        val enabled = mode != OrbLockDisplayMode.OFF
+        orbLockscreenEnabled.value = enabled
+        prefs.edit()
+            .putString(KEY_ORB_LOCKSCREEN_MODE, mode.name)
+            .putBoolean(KEY_ORB_LOCKSCREEN_ALWAYS_ON, mode == OrbLockDisplayMode.ALWAYS)
+            .putBoolean(KEY_ORB_LOCKSCREEN_ENABLED, enabled)
+            .apply()
+    }
+
+    fun setOrbLockscreenAutoBrightness(value: Boolean) {
+        if (!premiumEntitled.value && !isOwnerAccount.value) return
+        orbLockscreenAutoBrightness.value = value
+        prefs.edit().putBoolean(KEY_ORB_LOCKSCREEN_AUTO_BRIGHTNESS, value).apply()
+    }
+
+    fun setOrbLockscreenBrightness(value: Float) {
+        if (!premiumEntitled.value && !isOwnerAccount.value) return
+        val safe = value.coerceIn(0.05f, 1f)
+        orbLockscreenBrightness.value = safe
+        prefs.edit().putFloat(KEY_ORB_LOCKSCREEN_BRIGHTNESS, safe).apply()
+    }
+
+    fun setOrbLockscreenPowerSaving(value: Boolean) {
+        if (!premiumEntitled.value && !isOwnerAccount.value) return
+        orbLockscreenPowerSaving.value = value
+        prefs.edit().putBoolean(KEY_ORB_LOCKSCREEN_POWER_SAVING, value).apply()
+    }
+
+    fun setOrbLockscreenHideStatusBar(value: Boolean) {
+        if (!premiumEntitled.value && !isOwnerAccount.value) return
+        orbLockscreenHideStatusBar.value = value
+        prefs.edit().putBoolean(KEY_ORB_LOCKSCREEN_HIDE_STATUS_BAR, value).apply()
     }
 
     fun setKeepScreenOnNowPlaying(value: Boolean) {
@@ -796,10 +1132,28 @@ object AppSettings {
         prefs.edit().putBoolean(KEY_ALLOW_SCREEN_ROTATION, value).apply()
     }
 
-    fun setStopOnTaskRemoved(value: Boolean) {
-        stopOnTaskRemoved.value = value
-        prefs.edit().putBoolean(KEY_STOP_ON_TASK_REMOVED, value).apply()
+    private fun loadContinuePlaybackAfterRecentRemoval() {
+        val accountHash = automix25AccountHash.value
+        continuePlaybackAfterRecentRemoval.value = accountHash.isNotEmpty() &&
+            prefs.getBoolean("${KEY_CONTINUE_PLAYBACK_AFTER_RECENTS}_$accountHash",
+                prefs.getBoolean(KEY_CONTINUE_PLAYBACK_AFTER_RECENTS, false))
     }
+
+    fun setContinuePlaybackAfterRecentRemoval(enabled: Boolean) {
+        val accountHash = automix25AccountHash.value
+        // Premium is enforced here as well as in the switch and playback service.
+        if (!premiumEntitled.value || accountHash.isEmpty()) return
+        continuePlaybackAfterRecentRemoval.value = enabled
+        prefs.edit()
+            .putBoolean("${KEY_CONTINUE_PLAYBACK_AFTER_RECENTS}_$accountHash", enabled)
+            .putBoolean(KEY_CONTINUE_PLAYBACK_AFTER_RECENTS, enabled)
+            .apply()
+    }
+
+    /** This is used by the service, not just for displaying the Premium switch. */
+    fun canContinuePlaybackAfterRecentRemoval(): Boolean =
+        premiumEntitled.value && automix25AccountHash.value.isNotEmpty() &&
+            continuePlaybackAfterRecentRemoval.value
 
     fun setSwipeToPlayNext(value: Boolean) {
         swipeToPlayNext.value = value
@@ -837,11 +1191,6 @@ object AppSettings {
         prefs.edit().putBoolean(KEY_PRIORITIZE_SYLLABLE_SYNC, value).apply()
     }
 
-    fun setPaxSenixApiKey(value: String) {
-        paxSenixApiKey.value = value.trim().removePrefix("Bearer ").trim()
-        prefs.edit().putString(KEY_PAXSENIX_API_KEY, paxSenixApiKey.value).apply()
-    }
-
     fun setOutputPcmMode(value: OutputPcmMode) {
         outputPcmMode.value = value
         prefs.edit().putString(KEY_OUTPUT_PCM_MODE, value.name).apply()
@@ -869,7 +1218,16 @@ object AppSettings {
             .mapNotNull { name -> LyricsSource.entries.firstOrNull { it.name == name } }
             
             .toSet()
-        if (prefs.getBoolean(KEY_LYRICS_PROVIDER_EXPANSION_MIGRATED, false)) return parsed
+        if (parsed.isEmpty() && stored.isNotBlank()) {
+            val restored = availableLyricsSources()
+            prefs.edit().putString(KEY_LYRICS_SOURCES, restored.joinToString(",") { it.name }).apply()
+            return restored
+        }
+        if (prefs.getBoolean(KEY_LYRICS_PROVIDER_EXPANSION_MIGRATED, false)) {
+            val normalized = parsed.joinToString(",") { it.name }
+            if (stored != normalized) prefs.edit().putString(KEY_LYRICS_SOURCES, normalized).apply()
+            return parsed
+        }
 
         // Preserve the user's choices for the four providers Orb already had,
         // but enable every newly introduced provider once on upgrade.
@@ -970,6 +1328,7 @@ object AppSettings {
     fun setDiscordToken(value: String) {
         discordToken.value = value
         authStore.discordToken = value.ifEmpty { null }
+        AccountSettingsSync.notifyIntegrationCredentialChanged("discord")
     }
 
     fun setDiscordAccount(username: String, name: String, avatar: String?) {
@@ -1073,27 +1432,47 @@ object AppSettings {
     private const val KEY_QUALITY_CELLULAR_MAXIMUM = "audio_quality_cellular_maximum"
     private const val KEY_AAC_DEFAULT_MIGRATED = "audio_quality_aac_default_migrated_v2"
     private const val KEY_LOSSLESS = "lossless_audio"
+    private const val KEY_DOWNLOAD_QUALITY = "offline_download_quality"
+    private const val KEY_DOWNLOAD_FALLBACK_HIGH_V3 = "offline_download_fallback_high_v3"
+    private const val KEY_USE_DOWNLOADS_WHILE_ONLINE = "use_downloads_while_online"
     private const val KEY_CROSSFADE = "crossfade_seconds"
     private const val KEY_AUTOMIX = "automix_enabled_v2"
     private const val KEY_AUTOMIX_VERSION = "automix_version"
+    private const val KEY_SERVER_PREMIUM_PLAN = "server_premium_plan"
+    private const val KEY_SERVER_PREMIUM_SOURCE = "server_premium_source"
+    private const val KEY_SERVER_PREMIUM_EXPIRES_AT = "server_premium_expires_at"
+    private const val KEY_SERVER_AUTOMIX25_ENABLED = "server_automix25_enabled"
+    private const val KEY_SERVER_ORB_SWITCH_ENABLED = "server_orb_switch_enabled"
+    private const val KEY_SERVER_PREMIUM_CARD_ENABLED = "server_premium_card_enabled"
+    private const val KEY_SERVER_ROOMS_ENABLED = "server_rooms_enabled"
+    private const val KEY_SERVER_LOSSLESS_MOBILE_ENABLED = "server_lossless_mobile_enabled"
+    private const val KEY_SERVER_REFRESH_INTERVAL_SECONDS = "server_control_refresh_interval_seconds"
     private const val KEY_SKIP_SILENCE = "skip_silence"
     private const val KEY_SPATIAL_AUDIO = "spatial_audio"
     private const val KEY_SPEED = "playback_speed"
     private const val KEY_THEME = "theme_mode"
     private const val KEY_HOME_AURA_ENABLED = "home_aura_enabled"
-    private const val KEY_APP_FONT = "app_font"
     private const val KEY_PRIORITIZE_ALBUM_VERSIONS = "prioritize_album_versions"
     private const val KEY_AUTOPLAY = "autoplay"
     private const val KEY_AUTOPLAY_EXPLICIT = "autoplay_explicit"
     private const val KEY_USE_YOUTUBE_MUSIC_LIBRARY = "use_youtube_music_library"
     private const val KEY_NERD_STATS = "show_nerd_stats"
+    private const val KEY_UPDATE_REMINDER_UNTIL = "orb_update_reminder_until"
     private const val KEY_HAPTIC_FEEDBACK = "haptic_feedback"
+    private const val KEY_TOUCH_TRANSFER_ENABLED = "touch_transfer_enabled"
     private const val KEY_CACHE_LIMIT = "audio_cache_limit_bytes"
     private const val KEY_REDUCE_ANIMATION = "reduce_animation"
     private const val KEY_HIDE_STATUS_BAR_NOW_PLAYING = "hide_status_bar_now_playing"
+    private const val KEY_ORB_LOCKSCREEN_ENABLED = "orb_lockscreen_enabled"
+    private const val KEY_ORB_LOCKSCREEN_ALWAYS_ON = "orb_lockscreen_always_on"
+    private const val KEY_ORB_LOCKSCREEN_MODE = "orb_lockscreen_display_mode"
+    private const val KEY_ORB_LOCKSCREEN_AUTO_BRIGHTNESS = "orb_lockscreen_auto_brightness"
+    private const val KEY_ORB_LOCKSCREEN_BRIGHTNESS = "orb_lockscreen_brightness"
+    private const val KEY_ORB_LOCKSCREEN_POWER_SAVING = "orb_lockscreen_power_saving"
+    private const val KEY_ORB_LOCKSCREEN_HIDE_STATUS_BAR = "orb_lockscreen_hide_status_bar"
     private const val KEY_KEEP_SCREEN_ON_NOW_PLAYING = "keep_screen_on_now_playing"
     private const val KEY_ALLOW_SCREEN_ROTATION = "allow_screen_rotation"
-    private const val KEY_STOP_ON_TASK_REMOVED = "stop_on_task_removed"
+    private const val KEY_CONTINUE_PLAYBACK_AFTER_RECENTS = "continue_playback_after_recents"
     private const val KEY_SWIPE_TO_PLAY_NEXT = "swipe_to_play_next"
     private const val KEY_BETA_UPDATES_ENABLED = "beta_updates_enabled"
     private const val KEY_STABLE_AUTO_UPDATES_ENABLED = "stable_auto_updates_enabled"

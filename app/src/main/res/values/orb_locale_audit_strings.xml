@@ -1,0 +1,21 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<resources>
+  <string name="orb_l10n_listenbrainz_title">ListenBrainz token</string>
+  <string name="orb_l10n_listenbrainz_hint">Paste your ListenBrainz user token to enable scrobbling.</string>
+  <string name="orb_l10n_api_token">API token</string>
+  <string name="orb_l10n_discord_title">Discord token</string>
+  <string name="orb_l10n_discord_hint">Paste your Discord account token. It stays encrypted on this device and is sent only to Discord.</string>
+  <string name="orb_l10n_token">Token</string>
+  <string name="orb_l10n_save">Save</string>
+  <string name="orb_l10n_cancel">Cancel</string>
+  <string name="orb_l10n_checking">Checking…</string>
+  <string name="orb_l10n_selected">Selected</string>
+  <string name="orb_l10n_playlist_generic">Playlist</string>
+  <string name="orb_l10n_playlist_open">Open playlist</string>
+  <string name="orb_l10n_playlist_rename_action">Rename</string>
+  <string name="orb_l10n_playlist_delete">Delete playlist</string>
+  <string name="orb_l10n_playlist_delete_confirm" formatted="true">Delete \"%1$s\" — tap to confirm</string>
+  <string name="orb_l10n_playlist_rename_title">Rename playlist</string>
+  <string name="orb_l10n_playlist_save_name">Save name</string>
+  <string name="orb_l10n_got_it">Got it</string>
+</resources>

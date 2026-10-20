@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="download_prefer_offline_online_summary">Se desativado, o Orb usa streaming fora de Transferências. Sem internet, utiliza sempre os ficheiros guardados.</string>
+    <string name="download_prefer_offline_online_title">Utilizar ficheiros transferidos mesmo com internet</string>
+    <string name="nerd_offline_automix_status">Sem ligação · análise em pausa</string>
+    <string name="nerd_offline_automix_unavailable">Automix indisponível sem internet</string>
+</resources>
