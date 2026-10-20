@@ -1716,6 +1716,46 @@ internal fun NowPlayingScreen(args: NowPlayingArguments) {
             }
         }
 
+        // Portrait uses a real blurred artwork echo, not only the palette Haze:
+        // a flat background alone cannot soften the visible bottom edge.
+        if (heroVisualEnabled && !isTabletLandscape && heroArtworkHeight > 0.dp &&
+            heroT > 0.01f && !reduceDynamicBlur
+        ) {
+            val portraitWidth = if (isTabletPortrait) tabletPortraitArtworkSize else visualConfiguration.screenWidthDp.dp
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .width(portraitWidth)
+                    .height(HERO_MERGE_BAND)
+                    .offset(y = heroArtworkHeight - HERO_MERGE_BAND * 0.46f)
+                    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+                    .drawWithContent {
+                        drawContent()
+                        drawRect(
+                            brush = Brush.verticalGradient(
+                                0.00f to Color.Transparent,
+                                0.12f to Color.Black.copy(alpha = 0.68f),
+                                0.32f to Color.Black.copy(alpha = 0.86f),
+                                0.60f to Color.Black.copy(alpha = 0.42f),
+                                1.00f to Color.Transparent,
+                            ),
+                            blendMode = BlendMode.DstIn,
+                        )
+                    },
+            ) {
+                FastNowPlayingCover(
+                    song = song,
+                    contentScale = ContentScale.FillBounds,
+                    onReady = {},
+                    onFailure = {},
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .blur(HERO_MERGE_BLUR, BlurredEdgeTreatment.Unbounded)
+                        .graphicsLayer { alpha = heroT * launchArtworkLandingAlpha * collapseSharedSourceAlpha },
+                )
+            }
+        }
+
         // Blur only the physical artwork/surface boundary. Portrait keeps the
         // lower-edge band; a landscape tablet rotates the exact same treatment
         // onto the right edge of the square cover.
