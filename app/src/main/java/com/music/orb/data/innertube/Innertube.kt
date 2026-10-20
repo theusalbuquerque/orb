@@ -905,7 +905,10 @@ object Innertube {
                             }
                             putJsonObject("user") {
                                 put("lockedSafetyMode", false)
-                                if (!forceAnonymous) {
+                                // A YouTube Data API channel ID is not a valid Music
+                                // delegated page ID. Never attach private channel routing
+                                // to OAuth bearer requests (it makes the context invalid).
+                                if (!forceAnonymous && token == null && legacyCookie != null) {
                                     delegatedPageId?.takeIf { it.isNotBlank() }?.let {
                                         put("onBehalfOfUser", it)
                                     }
@@ -925,9 +928,14 @@ object Innertube {
             send(oauthToken, if (oauthToken == null) cookie else null)
         }
 
-        if (!forceAnonymous && oauthToken != null && YouTubeAuthorizationPolicy.isPrivateOAuthRejection(response.status.value)) {
-            Log.w(TAG, "OAuth rejected by $endpoint (${response.status.value}); trying compatibility auth")
-            oauthRejectedHandler?.invoke(oauthToken)
+        if (!forceAnonymous && oauthToken != null &&
+            (YouTubeAuthorizationPolicy.isPrivateOAuthRejection(response.status.value) ||
+                (response.status.value == 400 &&
+                    (cookie != null || MusicBrowseAccessPolicy.mayFallbackAnonymously(authenticatedOnly, allowAnonymousFallback))))) {
+            Log.w(TAG, "Music $endpoint returned HTTP ${response.status.value}; checking session compatibility")
+            if (YouTubeAuthorizationPolicy.isPrivateOAuthRejection(response.status.value)) {
+                oauthRejectedHandler?.invoke(oauthToken)
+            }
             response = when {
                 cookie != null -> send(null, cookie)
                 MusicBrowseAccessPolicy.mayFallbackAnonymously(authenticatedOnly, allowAnonymousFallback) -> send(null, null)

@@ -636,9 +636,11 @@ private object HomeRecommendationSession {
                         HomeSuggestionStore.replaceCurrent(clean)
                     }
                     items.size < HOME_SUGGESTION_LIMIT -> {
-                        items = clean
-                        if (clean.size >= HOME_SUGGESTION_LIMIT) {
-                            HomeSuggestionStore.replaceCurrent(clean)
+                        // Do not discard cached suggestions when a partially failing
+                        // YouTube Music request returns only a handful of cards.
+                        items = cleanProgressive(items + clean)
+                        if (items.isNotEmpty()) {
+                            HomeSuggestionStore.replaceCurrent(items)
                         }
                     }
                     clean.size >= HOME_SUGGESTION_LIMIT -> {
@@ -1143,6 +1145,9 @@ class MainActivity : androidx.fragment.app.FragmentActivity() {
                     checkNotNull(OrbGoogleAuth.refreshYoutubeAccount()) {
                         "YouTube Music account could not be resolved."
                     }
+                    check(OrbGoogleAuth.musicLibraryVerified.value) {
+                        "Google authorized YouTube, but YouTube Music denied library access. Connect the Music session using the compatibility option."
+                    }
                 }
                 if (connection.isFailure) {
                     OrbGoogleAuth.requestYoutubeCompatibility()
@@ -1195,6 +1200,9 @@ class MainActivity : androidx.fragment.app.FragmentActivity() {
                     OrbGoogleAuth.acceptYoutubeAuthorization(authorization)
                     checkNotNull(OrbGoogleAuth.refreshYoutubeAccount()) {
                         "YouTube Music account could not be resolved."
+                    }
+                    check(OrbGoogleAuth.musicLibraryVerified.value) {
+                        "Google authorized YouTube, but YouTube Music denied library access. Connect the Music session using the compatibility option."
                     }
                 }
                 if (connection.isFailure) {
@@ -3701,10 +3709,8 @@ private fun OrbApp(
                                         activity.connectYoutubeMusic { result ->
                                             result.onSuccess {
                                                 viewModel.onYoutubeIdentityChanged()
-                                                scope.launch {
-                                                    val channels = OrbGoogleAuth.availableYoutubeIdentities()
-                                                    if (channels.isNotEmpty()) youtubeIdentityPicker = channels
-                                                }
+                                                // Reconnection is complete; keep the picker closed.
+                                                // Channel selection is always user-initiated.
                                             }.onFailure { error ->
                                                 Toast.makeText(
                                                     context,
@@ -6050,10 +6056,8 @@ private fun OrbApp(
                     (context as? MainActivity)?.connectYoutubeMusic { result ->
                         result.onSuccess {
                             viewModel.onYoutubeIdentityChanged()
-                            scope.launch {
-                                val channels = OrbGoogleAuth.availableYoutubeIdentities()
-                                if (channels.isNotEmpty()) youtubeIdentityPicker = channels
-                            }
+                            // Reconnection completed: never reopen the picker automatically.
+                            // Users may open it again explicitly to change channels.
                         }.onFailure { error ->
                             Toast.makeText(
                                 context,
