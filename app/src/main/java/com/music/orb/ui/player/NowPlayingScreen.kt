@@ -1528,6 +1528,7 @@ internal fun NowPlayingScreen(args: NowPlayingArguments) {
                             contentScale = ContentScale.Fit,
                             alignment = Alignment.TopCenter,
                             modifier = heroArtworkModifier
+                                .hazeSource(heroHaze)
                                 .then(
                                     if (isAutomixArtworkTransition) {
                                         Modifier.automixOutgoingArtworkDissolve(automixArtworkProgress)
@@ -1545,6 +1546,7 @@ internal fun NowPlayingScreen(args: NowPlayingArguments) {
                         onReady = { artLoaded = true },
                         onFailure = { onArtworkReadyChanged(true) },
                         modifier = heroArtworkModifier
+                            .hazeSource(heroHaze)
                             .then(
                                 when {
                                     visualFromSong == null -> Modifier
@@ -1582,6 +1584,7 @@ internal fun NowPlayingScreen(args: NowPlayingArguments) {
                             onRenderedChanged = { canvasRendered = it },
                             onCoverChanged = { canvasCover.floatValue = it },
                             modifier = heroArtworkModifier
+                                .hazeSource(heroHaze)
                                 .graphicsLayer { alpha = heroT * launchArtworkLandingAlpha * collapseSharedSourceAlpha }
                                 .onGloballyPositioned { coordinates ->
                                     val bounds = coordinates.boundsInRoot()
