@@ -601,6 +601,12 @@ dependencies {
         "com.google.android.gms:play-services-auth:21.6.0"
     )
 
+    // Orb Cast output routing uses Google Cast SDK and AndroidX MediaRouter.
+    // Both must be direct dependencies so clean GitHub Actions builds resolve
+    // OrbCastBridge.kt and OrbOutputSheet.kt, not just incremental local builds.
+    implementation("com.google.android.gms:play-services-cast-framework:22.2.0")
+    implementation("androidx.mediarouter:mediarouter:1.8.1")
+
     implementation(
         platform("io.github.jan-tennert.supabase:bom:3.5.0")
     )
