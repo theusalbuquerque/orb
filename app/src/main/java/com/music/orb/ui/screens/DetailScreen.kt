@@ -110,6 +110,7 @@ import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextLayoutResult
@@ -317,14 +318,18 @@ fun DetailScreen(
     val sourcePalette = rememberArtworkPalette(paletteArtworkUrl)
     val detailArtworkUrl = page.thumbnailUrl.artworkAt(HEADER_ART_PX)
     val configuration = LocalConfiguration.current
+    val windowSize = LocalWindowInfo.current.containerSize
+    val windowDensity = LocalDensity.current
+    val screenWidth = if (windowSize.width > 0) with(windowDensity) { windowSize.width.toDp() }
+        else configuration.screenWidthDp.dp
+    val screenHeight = if (windowSize.height > 0) with(windowDensity) { windowSize.height.toDp() }
+        else configuration.screenHeightDp.dp
     val isTablet = configuration.smallestScreenWidthDp >= 600
-    val isTabletLandscape =
-        isTablet &&
-            configuration.orientation == Configuration.ORIENTATION_LANDSCAPE &&
-            configuration.screenWidthDp >= DETAIL_TABLET_TWO_PANE_MIN_WIDTH_DP
+    // The detail screen can be shown inside a dialog/window whose Configuration
+    // orientation is stale after a tablet rotates. Use actual Compose window bounds.
+    val isTabletLandscape = isTablet && screenWidth > screenHeight &&
+        screenWidth >= DETAIL_TABLET_TWO_PANE_MIN_WIDTH_DP.dp
     val isTabletPortrait = isTablet && !isTabletLandscape
-    val screenWidth = configuration.screenWidthDp.dp
-    val screenHeight = configuration.screenHeightDp.dp
     val tabletArtworkSize = if (isTabletLandscape) {
         val maxArtworkLeavingContent = (
             screenWidth - DETAIL_TABLET_GAP - DETAIL_TABLET_END_GUTTER -
