@@ -356,7 +356,9 @@ fun fullBleedArtworkAvailable(): Boolean {
     val wide = hasWideNowPlayingViewport(
         configuration.screenWidthDp.toFloat(), configuration.screenHeightDp.toFloat())
     val isTabletLandscape = configuration.smallestScreenWidthDp >= 600 && wide
-    return isTabletLandscape ||
+    // Tablets in portrait also have full-bleed artwork. Do not use the phone
+    // width cap here: it disabled the portrait Haze boundary on large screens.
+    return configuration.smallestScreenWidthDp >= 600 || isTabletLandscape ||
         configuration.screenWidthDp.dp <= PLAYER_MAX_WIDTH + PLAYER_GUTTER * 2
 }
 
