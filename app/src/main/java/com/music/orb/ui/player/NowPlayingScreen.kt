@@ -972,17 +972,14 @@ internal fun NowPlayingScreen(args: NowPlayingArguments) {
     // Orientation switches must not animate the artwork from a portrait-width
     // square into a narrow landscape pane: that briefly pushes the controls
     // off-screen. Restart the spring for each geometry mode instead.
-    val tabletArtworkAnimated = key(isTabletLandscape) {
-        val animated by animateDpAsState(
-            targetValue = tabletArtworkTarget,
-            animationSpec = spring(
-                dampingRatio = 0.86f,
-                stiffness = Spring.StiffnessLow,
-            ),
-            label = "tablet-now-playing-artwork-geometry",
-        )
-        animated
-    }
+val tabletArtworkAnimated by animateDpAsState(
+        targetValue = tabletArtworkTarget,
+        animationSpec = spring(
+            dampingRatio = 0.86f,
+            stiffness = Spring.StiffnessLow,
+        ),
+        label = "tablet-now-playing-artwork-geometry",
+    )
     val tabletArtworkSize = if (isTabletLandscape) tabletArtworkAnimated else 0.dp
     val tabletPortraitArtworkSize = if (isTabletPortrait) tabletArtworkAnimated else 0.dp
     // Focus Pane must not move the cover either: keep the exact same top-left
@@ -1713,46 +1710,6 @@ internal fun NowPlayingScreen(args: NowPlayingArguments) {
                         }
                     }
                 }
-            }
-        }
-
-        // Portrait uses a real blurred artwork echo, not only the palette Haze:
-        // a flat background alone cannot soften the visible bottom edge.
-        if (heroVisualEnabled && !isTabletLandscape && heroArtworkHeight > 0.dp &&
-            heroT > 0.01f && !reduceDynamicBlur
-        ) {
-            val portraitWidth = if (isTabletPortrait) tabletPortraitArtworkSize else visualConfiguration.screenWidthDp.dp
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .width(portraitWidth)
-                    .height(HERO_MERGE_BAND)
-                    .offset(y = heroArtworkHeight - HERO_MERGE_BAND * 0.46f)
-                    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
-                    .drawWithContent {
-                        drawContent()
-                        drawRect(
-                            brush = Brush.verticalGradient(
-                                0.00f to Color.Transparent,
-                                0.12f to Color.Black.copy(alpha = 0.68f),
-                                0.32f to Color.Black.copy(alpha = 0.86f),
-                                0.60f to Color.Black.copy(alpha = 0.42f),
-                                1.00f to Color.Transparent,
-                            ),
-                            blendMode = BlendMode.DstIn,
-                        )
-                    },
-            ) {
-                FastNowPlayingCover(
-                    song = song,
-                    contentScale = ContentScale.FillBounds,
-                    onReady = {},
-                    onFailure = {},
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .blur(HERO_MERGE_BLUR, BlurredEdgeTreatment.Unbounded)
-                        .graphicsLayer { alpha = heroT * launchArtworkLandingAlpha * collapseSharedSourceAlpha },
-                )
             }
         }
 
