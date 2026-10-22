@@ -6,6 +6,8 @@ import io.github.jan.supabase.auth.Auth
 import io.github.jan.supabase.createSupabaseClient
 import io.github.jan.supabase.postgrest.Postgrest
 import io.github.jan.supabase.realtime.Realtime
+import io.github.jan.supabase.serializer.KotlinXSerializer
+import kotlinx.serialization.json.Json
 
 /** Single Supabase client backing Orb's social identity and database. */
 object OrbSupabase {
@@ -27,6 +29,11 @@ object OrbSupabase {
             supabaseUrl = BuildConfig.SUPABASE_URL,
             supabaseKey = BuildConfig.SUPABASE_PUBLISHABLE_KEY,
         ) {
+            // New database columns must not invalidate older Android read models.
+            defaultSerializer = KotlinXSerializer(Json {
+                ignoreUnknownKeys = true
+                coerceInputValues = true
+            })
             install(Auth) {
                 // PlaybackService shares this process and may stay alive with no
                 // foreground Activity. Keep the authenticated RLS session usable

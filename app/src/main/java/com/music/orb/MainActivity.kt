@@ -261,6 +261,7 @@ import androidx.media3.session.MediaController
 import com.music.orb.BuildConfig
 import com.music.orb.data.YtMusicRepository
 import com.music.orb.data.social.SocialRepository
+import com.music.orb.data.social.SocialSessionManager
 import com.music.orb.ui.player.NowPlayingArguments
 import com.music.orb.ui.player.NowPlayingScreen
 import com.music.orb.ui.player.NowPlayingLaunchOriginRegistry
@@ -1839,8 +1840,12 @@ private fun OrbApp(
     val songMenu by viewModel.songMenu.collectAsStateWithLifecycle()
     val account by viewModel.account.collectAsStateWithLifecycle()
     val orbProfile by SocialRepository.myProfileState.collectAsStateWithLifecycle()
-    LaunchedEffect(signedIn, orbProfile?.id) {
-        if (signedIn) friendsViewModel.ensureHomeStatsLoaded()
+    val supabaseUserId by SocialSessionManager.authenticatedUserId.collectAsStateWithLifecycle()
+    LaunchedEffect(signedIn, supabaseUserId, orbProfile?.id) {
+        if (signedIn && supabaseUserId != null) {
+            friendsViewModel.ensureLoaded()
+            friendsViewModel.ensureHomeStatsLoaded()
+        }
     }
     val displayAccount = remember(account, orbProfile) {
         val currentAccount = account
@@ -1853,8 +1858,8 @@ private fun OrbApp(
         )
     }
     val googleIdentity = OrbGoogleAuth.storedIdentity()
-    LaunchedEffect(signedIn, googleIdentity?.uniqueId) {
-        if (signedIn && googleIdentity != null) {
+    LaunchedEffect(signedIn, supabaseUserId, googleIdentity?.uniqueId) {
+        if (signedIn && supabaseUserId != null && googleIdentity != null) {
             runCatching {
                 val existing = SocialRepository.myProfile()
                 SocialRepository.updateProfileMetadata(

@@ -641,17 +641,22 @@ class FriendsViewModel : ViewModel() {
             // Cached cards stay visible while Supabase refreshes in the background.
             // Only show the blocking Stats loader on a true first visit.
             _statsLoading.value = !hadCachedSnapshot
-            runCatching { loadStatsSnapshot() }
-                .onSuccess {
-                    statsLoadedForAccount = true
-                    _statsLoadFailed.value = false
+            var retryMs = 1_000L
+            while (!statsLoadedForAccount && SocialRepository.currentUserId() == activeUserId) {
+                runCatching { loadStatsSnapshot() }
+                    .onSuccess {
+                        statsLoadedForAccount = true
+                        _statsLoadFailed.value = false
+                    }
+                    .onFailure { _statsLoadFailed.value = !hadCachedSnapshot }
+                _statsLoading.value = false
+                // Do not block Home while retrying a transient cloud failure.
+                _homeStatsReady.value = true
+                if (!statsLoadedForAccount) {
+                    delay(retryMs)
+                    retryMs = (retryMs * 2).coerceAtMost(30_000L)
                 }
-                .onFailure { _statsLoadFailed.value = !hadCachedSnapshot }
-            _statsLoading.value = false
-            // Ready means the one Home-specific attempt completed, even if it
-            // produced no favorites. That prevents Albums from waiting forever
-            // on an empty/new account or a transient stats failure.
-            _homeStatsReady.value = true
+            }
         }
     }
 
@@ -1421,30 +1426,40 @@ class FriendsViewModel : ViewModel() {
     }
 
     private suspend fun loadInitial() {
-        _loading.value = true
-        val profileResult = runCatching { SocialRepository.myProfile() }
-        profileResult.onSuccess { profile ->
-            _myProfile.value = profile
-            _profileChecked.value = true
-            loadedForAccount = true
-            if (profile?.username.isNullOrBlank()) {
-                _following.value = emptyList()
-                _followingIds.value = emptySet()
-                _nowPlaying.value = emptyMap()
-                _socialFeed.value = emptyList()
-                _newSocialFeedSessions.value = emptySet()
-                _nowPlayingReactions.value = emptyMap()
-                _newNowPlayingSessions.value = emptySet()
-                _reactionBusySessions.value = emptySet()
-                _loadFailed.value = profile == null
-                restartRealtime()
-            } else {
-                runCatching { loadFollowingSnapshot() }
-                    .onFailure { _loadFailed.value = true }
+        var retryMs = 1_000L
+        while (activeUserId != null && SocialRepository.currentUserId() == activeUserId) {
+            _loading.value = true
+            val profileResult = runCatching { SocialRepository.myProfile() }
+            profileResult.onSuccess { profile ->
+                _myProfile.value = profile
+                _profileChecked.value = true
+                loadedForAccount = profile != null
+                if (profile?.username.isNullOrBlank()) {
+                    _following.value = emptyList()
+                    _followingIds.value = emptySet()
+                    _nowPlaying.value = emptyMap()
+                    _socialFeed.value = emptyList()
+                    _newSocialFeedSessions.value = emptySet()
+                    _nowPlayingReactions.value = emptyMap()
+                    _newNowPlayingSessions.value = emptySet()
+                    _reactionBusySessions.value = emptySet()
+                    _loadFailed.value = profile == null
+                    restartRealtime()
+                } else {
+                    runCatching { loadFollowingSnapshot() }
+                        .onFailure {
+                            loadedForAccount = false
+                            _loadFailed.value = true
+                        }
+                }
+            }.onFailure {
+                _profileChecked.value = true
+                _loadFailed.value = true
             }
-        }.onFailure {
-            _profileChecked.value = true
-            _loadFailed.value = true
+            _loading.value = false
+            if (loadedForAccount) return
+            delay(retryMs)
+            retryMs = (retryMs * 2).coerceAtMost(30_000L)
         }
         _loading.value = false
     }

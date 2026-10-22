@@ -53,6 +53,7 @@ import com.music.orb.data.model.UserPlaylist
 import com.music.orb.data.settings.SearchHistory
 import com.music.orb.data.settings.SearchHistoryEntry
 import com.music.orb.data.social.SocialRepository
+import com.music.orb.data.social.SocialSessionManager
 import com.music.orb.data.social.CommunityRatingRepository
 import com.music.orb.data.social.CommunityTrendingShelf
 import com.music.orb.data.stats.TrackLanguageResolver
@@ -1567,6 +1568,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         restorePersistedLikes()
         restoreArtistPreferences()
+        // Restore Orb ratings immediately when the actual Supabase session is
+        // available. The existing 20-second poll handles transient failures.
+        viewModelScope.launch {
+            SocialSessionManager.authenticatedUserId.collectLatest { userId ->
+                if (userId != null && _signedIn.value) reconcileOrbRatingsFromCloud()
+            }
+        }
         if (_signedIn.value) {
             reconcileOrbRatingsFromCloud()
             flushPendingYoutubeRatings()
