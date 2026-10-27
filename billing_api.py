@@ -444,6 +444,28 @@ def beta_preview_allowed(account_hash: str) -> bool:
     return not any(hmac.compare_digest(hashlib.sha256(str(row["email"]).strip().lower().encode()).hexdigest(), DEVELOPER_EMAIL_HASH) for row in rows)
 
 
+@router.get("/owner/active-premium-count")
+async def owner_active_premium_count(
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Count unique active Premium accounts; never expose billing details."""
+    identity = await _verified_identity(authorization)
+    if not identity["developer"]:
+        raise HTTPException(status_code=403, detail="Owner access required")
+    with _db() as conn:
+        active_count = conn.execute(
+            """
+            SELECT COUNT(DISTINCT LOWER(TRIM(email)))
+            FROM billing_subscriptions
+            WHERE status = 'active' AND TRIM(email) <> ''
+            """
+        ).fetchone()[0]
+    return {
+        "userId": identity["id"],
+        "activePremiumUsers": int(active_count),
+    }
+
+
 @router.get("/subscription")
 async def subscription(authorization: str | None = Header(default=None)):
     return _subscription_state(await _verified_identity(authorization))
