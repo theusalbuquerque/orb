@@ -466,14 +466,66 @@ async def owner_active_premium_count(
     }
 
 
+async def _reconcile_mp_account(identity: dict[str, Any]) -> None:
+    """Reconcile account-owned pending Mercado Pago preapprovals.
+
+    Client-supplied payment status is never trusted; only the provider API
+    can authorize a subscription, bound to an existing account checkout.
+    """
+    if not MP_ACCESS_TOKEN:
+        return
+    rows = [
+        row for row in _account_rows(identity)
+        if row["provider"] == "mercadopago"
+        and row["status"] in ("pending", "paused", "past_due")
+        and row["provider_subscription_id"]
+    ][:5]
+    if not rows:
+        return
+    import logging
+    logger = logging.getLogger("orb.billing")
+    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+        for row in rows:
+            try:
+                response = await client.get(
+                    f"{MP_API}/preapproval/{row['provider_subscription_id']}",
+                    headers={"Authorization": f"Bearer {MP_ACCESS_TOKEN}"},
+                )
+                if response.status_code != 200:
+                    logger.warning("Premium reconciliation provider_status=%s", response.status_code)
+                    continue
+                provider = response.json()
+                if not isinstance(provider, dict):
+                    continue
+                if (str(provider.get("id") or "") != row["provider_subscription_id"]
+                        or str(provider.get("external_reference") or "") != row["checkout_ref"]):
+                    logger.warning("Premium reconciliation reference mismatch")
+                    continue
+                payer = str(provider.get("payer_email") or "").strip().lower()
+                if payer and payer != identity["email"]:
+                    logger.warning("Premium reconciliation payer mismatch")
+                    continue
+                status = _normalize_mp_status(provider.get("status"))
+                if status == "active":
+                    _update_by_checkout_ref(row["checkout_ref"], status="active")
+                elif status in ("paused", "canceled"):
+                    _update_by_checkout_ref(row["checkout_ref"], status=status)
+            except (httpx.HTTPError, ValueError, TypeError):
+                logger.warning("Premium reconciliation temporary failure")
+                continue
+
+
 @router.get("/subscription")
 async def subscription(authorization: str | None = Header(default=None)):
-    return _subscription_state(await _verified_identity(authorization))
+    identity = await _verified_identity(authorization)
+    await _reconcile_mp_account(identity)
+    return _subscription_state(identity)
 
 
 @router.post("/subscription/checkout")
 async def subscription_checkout(body: SubscriptionCheckoutRequest, authorization: str | None = Header(default=None)):
     identity = await _verified_identity(authorization)
+    await _reconcile_mp_account(identity)
     if _subscription_state(identity)["premium"]:
         raise HTTPException(status_code=409, detail="Cancel the active subscription before subscribing again")
     # Reuse pending checkouts to avoid duplicate subscriptions on retry.
