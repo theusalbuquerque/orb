@@ -705,8 +705,10 @@ async def subscription_checkout(body: SubscriptionCheckoutRequest, authorization
     courtesy = await _verified_courtesy_entitlement(authorization)
     if courtesy["premium"]:
         raise HTTPException(status_code=409, detail="Orb Premium is already active for this account")
-    await _reconcile_mp_account(identity)
-    await _recover_mp_subscription_by_email(identity)
+    # Keep checkout responsive: account recovery via Mercado Pago search can
+    # involve multiple provider requests (up to 25s each) and belongs on GET
+    # /subscription, not the interactive button that opens the payment page.
+    # The authenticated account already has its own checkout rows below.
     if _subscription_state(identity, courtesy)["premium"]:
         raise HTTPException(status_code=409, detail="Cancel the active subscription before subscribing again")
     # Reuse pending checkouts to avoid duplicate subscriptions on retry.
