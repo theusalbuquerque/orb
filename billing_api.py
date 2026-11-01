@@ -501,10 +501,8 @@ async def _reconcile_mp_account(identity: dict[str, Any]) -> None:
                         or str(provider.get("external_reference") or "") != row["checkout_ref"]):
                     logger.warning("Premium reconciliation reference mismatch")
                     continue
-                payer = str(provider.get("payer_email") or "").strip().lower()
-                if payer and payer != identity["email"]:
-                    logger.warning("Premium reconciliation payer mismatch")
-                    continue
+                # The Orb account that created the checkout owns the subscription.
+                # Payment-provider email can legitimately differ from Orb email.
                 status = _normalize_mp_status(provider.get("status"))
                 if status == "active":
                     _update_by_checkout_ref(row["checkout_ref"], status="active")
