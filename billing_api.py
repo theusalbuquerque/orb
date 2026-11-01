@@ -452,17 +452,47 @@ async def owner_active_premium_count(
     identity = await _verified_identity(authorization)
     if not identity["developer"]:
         raise HTTPException(status_code=403, detail="Owner access required")
+    # Paid subscriptions and complimentary entitlements are counted by Orb
+    # account identity, not payer email. A user in both groups counts once.
     with _db() as conn:
-        active_count = conn.execute(
-            """
-            SELECT COUNT(DISTINCT LOWER(TRIM(email)))
-            FROM billing_subscriptions
-            WHERE status = 'active' AND TRIM(email) <> ''
-            """
-        ).fetchone()[0]
+        paid_user_ids = {
+            str(row[0])
+            for row in conn.execute(
+                """
+                SELECT DISTINCT customer_ref
+                FROM billing_subscriptions
+                WHERE status = 'active' AND TRIM(customer_ref) <> ''
+                """
+            ).fetchall()
+        }
+
+    if not SUPABASE_KEY:
+        raise HTTPException(status_code=503, detail="Premium count is temporarily unavailable")
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            response = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/orb_owner_active_courtesy_user_ids",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": authorization,
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                json={},
+            )
+        if response.status_code != 200:
+            raise HTTPException(status_code=503, detail="Premium count is temporarily unavailable")
+        courtesy_user_ids = response.json()
+        if not isinstance(courtesy_user_ids, list) or not all(
+            isinstance(item, str) for item in courtesy_user_ids
+        ):
+            raise HTTPException(status_code=503, detail="Premium count is temporarily unavailable")
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=503, detail="Premium count is temporarily unavailable") from exc
+
     return {
         "userId": identity["id"],
-        "activePremiumUsers": int(active_count),
+        "activePremiumUsers": len(paid_user_ids | set(courtesy_user_ids)),
     }
 
 
