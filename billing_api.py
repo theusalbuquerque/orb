@@ -423,16 +423,61 @@ def _account_rows(identity: dict[str, Any]) -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def _subscription_state(identity: dict[str, Any]) -> dict[str, Any]:
+async def _verified_courtesy_entitlement(authorization: str | None) -> dict[str, Any]:
+    """Fetch only the authenticated Orb user's unexpired complimentary Premium grant.
+
+    Supabase derives user_id from the signed user JWT, never from a client
+    argument or a payer's email. A lookup failure must not produce a payable
+    checkout when the user might already have Premium.
+    """
+    if not SUPABASE_KEY or not authorization:
+        raise HTTPException(status_code=503, detail="Premium entitlement verification unavailable")
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            response = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/orb_current_courtesy_entitlement",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": authorization,
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                json={},
+            )
+        if response.status_code != 200:
+            raise HTTPException(status_code=503, detail="Premium entitlement verification unavailable")
+        value = response.json()
+        if not isinstance(value, dict) or not isinstance(value.get("premium"), bool):
+            raise HTTPException(status_code=503, detail="Premium entitlement verification unavailable")
+        return value
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=503, detail="Premium entitlement verification unavailable") from exc
+
+
+def _subscription_state(
+    identity: dict[str, Any], courtesy: dict[str, Any] | None = None
+) -> dict[str, Any]:
     rows = _account_rows(identity)
     active = next((row for row in rows if row["status"] == "active"), None)
     # Keep the early-access starting state only until the first explicit action.
     preview = identity["developer"] and not rows
+    complimentary = bool(courtesy and courtesy.get("premium") is True)
     current = active or (rows[0] if rows else None)
-    return {"userId": identity["id"], "premium": active is not None or preview,
-            "status": "active" if preview else (current["status"] if current else "inactive"),
-            "developer": identity["developer"], "amount": 0.0 if identity["developer"] else _configured_price("monthly"),
-            "currency": "BRL", "checkoutRef": current["checkout_ref"] if current else None}
+    is_premium = active is not None or preview or complimentary
+    state = {
+        "userId": identity["id"],
+        "premium": is_premium,
+        "status": "active" if is_premium else (current["status"] if current else "inactive"),
+        "developer": identity["developer"],
+        "amount": 0.0 if identity["developer"] or complimentary else _configured_price("monthly"),
+        "currency": "BRL",
+        "checkoutRef": current["checkout_ref"] if current else None,
+    }
+    if complimentary and active is None:
+        state["premiumSource"] = "courtesy"
+        state["premiumPlan"] = courtesy.get("plan")
+        state["premiumExpiresAt"] = courtesy.get("expiresAt")
+    return state
 
 
 def beta_preview_allowed(account_hash: str) -> bool:
@@ -647,17 +692,22 @@ async def _recover_mp_subscription_by_email(identity: dict[str, Any]) -> None:
 @router.get("/subscription")
 async def subscription(authorization: str | None = Header(default=None)):
     identity = await _verified_identity(authorization)
+    courtesy = await _verified_courtesy_entitlement(authorization)
     await _reconcile_mp_account(identity)
-    await _recover_mp_subscription_by_email(identity)
-    return _subscription_state(identity)
+    if not courtesy["premium"]:
+        await _recover_mp_subscription_by_email(identity)
+    return _subscription_state(identity, courtesy)
 
 
 @router.post("/subscription/checkout")
 async def subscription_checkout(body: SubscriptionCheckoutRequest, authorization: str | None = Header(default=None)):
     identity = await _verified_identity(authorization)
+    courtesy = await _verified_courtesy_entitlement(authorization)
+    if courtesy["premium"]:
+        raise HTTPException(status_code=409, detail="Orb Premium is already active for this account")
     await _reconcile_mp_account(identity)
     await _recover_mp_subscription_by_email(identity)
-    if _subscription_state(identity)["premium"]:
+    if _subscription_state(identity, courtesy)["premium"]:
         raise HTTPException(status_code=409, detail="Cancel the active subscription before subscribing again")
     # Reuse pending checkouts to avoid duplicate subscriptions on retry.
     pending = next((r for r in _account_rows(identity) if r["status"] == "pending" and r["plan"] == body.plan), None)
