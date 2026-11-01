@@ -489,55 +489,263 @@ def beta_preview_allowed(account_hash: str) -> bool:
     return not any(hmac.compare_digest(hashlib.sha256(str(row["email"]).strip().lower().encode()).hexdigest(), DEVELOPER_EMAIL_HASH) for row in rows)
 
 
+
+def _orb_signed_checkout_ref(user_id: str) -> str:
+    """Provider reference is bound to the initiating Orb identity, not payer email."""
+    if not MP_ACCESS_TOKEN:
+        raise HTTPException(status_code=503, detail="Mercado Pago is not configured")
+    user_hex = uuid.UUID(user_id).hex
+    nonce = uuid.uuid4().hex
+    body = f"orb2_{user_hex}_{nonce}"
+    signature = hmac.new(
+        MP_ACCESS_TOKEN.encode("utf-8"),
+        ("orb-checkout-v2:" + body).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()[:32]
+    return f"{body}_{signature}"
+
+
+def _orb_signed_ref_owner(reference: str) -> str | None:
+    import re
+    if not MP_ACCESS_TOKEN or not re.fullmatch(r"orb2_[0-9a-f]{32}_[0-9a-f]{32}_[0-9a-f]{32}", reference):
+        return None
+    unsigned, actual = reference.rsplit("_", 1)
+    expected = hmac.new(
+        MP_ACCESS_TOKEN.encode("utf-8"),
+        ("orb-checkout-v2:" + unsigned).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()[:32]
+    if not hmac.compare_digest(expected, actual):
+        return None
+    try:
+        return str(uuid.UUID(hex=reference.split("_")[1]))
+    except (ValueError, IndexError):
+        return None
+
+
+async def _persist_checkout_for_account(
+    authorization: str | None, checkout_ref: str, provider_id: str, plan: str
+) -> None:
+    """Store provider linkage in persistent Supabase before exposing the pay URL."""
+    if not authorization or not SUPABASE_KEY:
+        raise HTTPException(status_code=503, detail="Checkout persistence unavailable")
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            response = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/orb_billing_store_checkout_link",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": authorization,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "p_checkout_ref": checkout_ref,
+                    "p_provider_subscription_id": provider_id,
+                    "p_plan": plan,
+                },
+            )
+        if response.status_code != 200 or response.json() is not True:
+            raise HTTPException(status_code=503, detail="Checkout persistence unavailable")
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail="Checkout persistence unavailable") from exc
+
+
+async def _recover_persisted_mp_link(
+    identity: dict[str, Any], authorization: str | None
+) -> None:
+    """Restore an Orb user's paid Premium from immutable Supabase linkage.
+
+    Each persisted entry is independently checked against Mercado Pago's
+    authoritative subscription status and its signed external reference.
+    """
+    if not MP_ACCESS_TOKEN or not SUPABASE_KEY or not authorization:
+        return
+    if _subscription_state(identity)["premium"]:
+        return
+    import logging
+    logger = logging.getLogger("orb.billing")
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            links_response = await client.get(
+                f"{SUPABASE_URL}/rest/v1/orb_billing_checkout_links",
+                headers={"apikey": SUPABASE_KEY, "Authorization": authorization},
+                params={
+                    "select": "checkout_ref,provider_subscription_id,plan",
+                    "user_id": f"eq.{identity['id']}",
+                    "order": "created_at.desc",
+                    "limit": "10",
+                },
+            )
+            if links_response.status_code != 200:
+                logger.warning("Premium persistent-link lookup failed: %s", links_response.status_code)
+                return
+            links = links_response.json()
+            if not isinstance(links, list):
+                return
+            for link in links:
+                if not isinstance(link, dict):
+                    continue
+                checkout_ref = str(link.get("checkout_ref") or "")
+                provider_id = str(link.get("provider_subscription_id") or "")
+                if _orb_signed_ref_owner(checkout_ref) != identity["id"] or not provider_id:
+                    continue
+                response = await client.get(
+                    f"{MP_API}/preapproval/{provider_id}",
+                    headers={"Authorization": f"Bearer {MP_ACCESS_TOKEN}"},
+                )
+                if response.status_code != 200:
+                    continue
+                payment = response.json()
+                if not isinstance(payment, dict):
+                    continue
+                if (str(payment.get("id") or "") != provider_id
+                    or str(payment.get("external_reference") or "") != checkout_ref
+                    or str(payment.get("reason") or "").strip() != "Orb Premium"
+                    or payment.get("status") != "authorized"):
+                    continue
+                terms = payment.get("auto_recurring") or {}
+                if not isinstance(terms, dict) or terms.get("currency_id") != "BRL":
+                    continue
+                plan = link.get("plan")
+                if plan not in ("monthly", "yearly"):
+                    continue
+                if terms.get("frequency_type") != "months" or terms.get("frequency") != (1 if plan == "monthly" else 12):
+                    continue
+                try:
+                    amount = float(terms.get("transaction_amount"))
+                except (TypeError, ValueError):
+                    continue
+                if not math.isfinite(amount) or amount <= 0:
+                    continue
+                _save_checkout(
+                    checkout_ref=checkout_ref, customer_ref=identity["id"],
+                    provider="mercadopago", provider_subscription_id=provider_id,
+                    checkout_id=None, email=identity["email"], plan=plan,
+                    amount=amount, status="active", checkout_url=None,
+                )
+                return
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        logger.warning("Premium persistent-link recovery unavailable: %s", type(exc).__name__)
+
+
+async def _provider_active_orb_subscriptions() -> list[dict[str, str]]:
+    """Read active subscriptions from Mercado Pago, not Render's ephemeral DB."""
+    if not MP_ACCESS_TOKEN:
+        raise HTTPException(status_code=503, detail="Mercado Pago is not configured")
+    accepted: dict[str, dict[str, str]] = {}
+    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+        for offset in range(0, 1000, 100):
+            try:
+                response = await client.get(
+                    f"{MP_API}/preapproval/search",
+                    headers={"Authorization": f"Bearer {MP_ACCESS_TOKEN}"},
+                    params={"limit": 100, "offset": offset},
+                )
+                if response.status_code != 200:
+                    raise HTTPException(status_code=503, detail="Premium count unavailable from provider")
+                data = response.json()
+                entries = data.get("results") if isinstance(data, dict) else None
+                if not isinstance(entries, list):
+                    raise HTTPException(status_code=503, detail="Premium count unavailable from provider")
+                for sub in entries:
+                    if not isinstance(sub, dict):
+                        continue
+                    if sub.get("status") != "authorized" or str(sub.get("reason") or "").strip() != "Orb Premium":
+                        continue
+                    terms = sub.get("auto_recurring") or {}
+                    if not isinstance(terms, dict) or terms.get("currency_id") != "BRL":
+                        continue
+                    if terms.get("frequency_type") != "months" or terms.get("frequency") not in (1, 12):
+                        continue
+                    provider_id = str(sub.get("id") or "").strip()
+                    if not provider_id:
+                        continue
+                    try:
+                        amount = float(terms.get("transaction_amount"))
+                    except (TypeError, ValueError):
+                        continue
+                    if math.isfinite(amount) and amount > 0:
+                        accepted[provider_id] = {
+                            "id": provider_id,
+                            "external_reference": str(sub.get("external_reference") or ""),
+                        }
+                paging = data.get("paging") or {}
+                total = paging.get("total") if isinstance(paging, dict) else None
+                if len(entries) < 100 or (isinstance(total, int) and offset + len(entries) >= total):
+                    return list(accepted.values())
+            except (httpx.HTTPError, ValueError, TypeError) as exc:
+                raise HTTPException(status_code=503, detail="Premium count unavailable from provider") from exc
+    raise HTTPException(status_code=503, detail="Premium count temporarily exceeds scan capacity")
+
+
 @router.get("/owner/active-premium-count")
 async def owner_active_premium_count(
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """Count unique active Premium accounts; never expose billing details."""
+    """Count provider-confirmed paying users plus active complimentary grants."""
     identity = await _verified_identity(authorization)
     if not identity["developer"]:
         raise HTTPException(status_code=403, detail="Owner access required")
-    # Paid subscriptions and complimentary entitlements are counted by Orb
-    # account identity, not payer email. A user in both groups counts once.
-    with _db() as conn:
-        paid_user_ids = {
-            str(row[0])
-            for row in conn.execute(
-                """
-                SELECT DISTINCT customer_ref
-                FROM billing_subscriptions
-                WHERE status = 'active' AND TRIM(customer_ref) <> ''
-                """
-            ).fetchall()
-        }
-
-    if not SUPABASE_KEY:
-        raise HTTPException(status_code=503, detail="Premium count is temporarily unavailable")
+    if not SUPABASE_KEY or not authorization:
+        raise HTTPException(status_code=503, detail="Premium count temporarily unavailable")
     try:
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            response = await client.post(
-                f"{SUPABASE_URL}/rest/v1/rpc/orb_owner_active_courtesy_user_ids",
-                headers={
-                    "apikey": SUPABASE_KEY,
-                    "Authorization": authorization,
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                },
-                json={},
+            responses = await __import__("asyncio").gather(
+                client.post(
+                    f"{SUPABASE_URL}/rest/v1/rpc/orb_owner_active_courtesy_user_ids",
+                    headers={"apikey": SUPABASE_KEY, "Authorization": authorization},
+                    json={},
+                ),
+                client.post(
+                    f"{SUPABASE_URL}/rest/v1/rpc/orb_owner_billing_link_map",
+                    headers={"apikey": SUPABASE_KEY, "Authorization": authorization},
+                    json={},
+                ),
             )
-        if response.status_code != 200:
-            raise HTTPException(status_code=503, detail="Premium count is temporarily unavailable")
-        courtesy_user_ids = response.json()
-        if not isinstance(courtesy_user_ids, list) or not all(
-            isinstance(item, str) for item in courtesy_user_ids
-        ):
-            raise HTTPException(status_code=503, detail="Premium count is temporarily unavailable")
+        if any(resp.status_code != 200 for resp in responses):
+            raise HTTPException(status_code=503, detail="Premium count temporarily unavailable")
+        courtesy_ids, persisted_links = [resp.json() for resp in responses]
+        if not isinstance(courtesy_ids, list) or not isinstance(persisted_links, list):
+            raise HTTPException(status_code=503, detail="Premium count temporarily unavailable")
+        if not all(isinstance(uid, str) for uid in courtesy_ids):
+            raise HTTPException(status_code=503, detail="Premium count temporarily unavailable")
     except (httpx.HTTPError, ValueError, TypeError) as exc:
-        raise HTTPException(status_code=503, detail="Premium count is temporarily unavailable") from exc
+        raise HTTPException(status_code=503, detail="Premium count temporarily unavailable") from exc
 
+    link_owners = {
+        str(item["provider_subscription_id"]): str(item["user_id"])
+        for item in persisted_links
+        if isinstance(item, dict) and item.get("provider_subscription_id") and item.get("user_id")
+    }
+    with _db() as conn:
+        local_owners = {
+            str(row["provider_subscription_id"]): str(row["customer_ref"])
+            for row in conn.execute(
+                "SELECT provider_subscription_id, customer_ref FROM billing_subscriptions "
+                "WHERE provider='mercadopago' AND provider_subscription_id IS NOT NULL"
+            ).fetchall()
+        }
+    provider_subscriptions = await _provider_active_orb_subscriptions()
+    paid_owners: set[str] = set()
+    unlinked_count = 0
+    for subscription in provider_subscriptions:
+        provider_id = subscription["id"]
+        owner = link_owners.get(provider_id) or local_owners.get(provider_id)
+        if not owner:
+            owner = _orb_signed_ref_owner(subscription["external_reference"])
+        if not owner:
+            # A legacy UUID-only reference is not sufficient to identify an
+            # Orb account. Count the verified distinct provider subscription
+            # without silently inventing a user ID or granting access.
+            owner = f"legacy-mp:{provider_id}"
+            unlinked_count += 1
+        paid_owners.add(owner)
     return {
         "userId": identity["id"],
-        "activePremiumUsers": len(paid_user_ids | set(courtesy_user_ids)),
+        "activePremiumUsers": len(set(courtesy_ids) | paid_owners),
+        "paidPremiumUsers": len(paid_owners),
+        "courtesyPremiumUsers": len(set(courtesy_ids)),
+        "unlinkedPaidSubscriptions": unlinked_count,
     }
 
 
