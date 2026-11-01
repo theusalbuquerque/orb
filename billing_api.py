@@ -730,9 +730,10 @@ async def owner_active_premium_count(
     unlinked_count = 0
     for subscription in provider_subscriptions:
         provider_id = subscription["id"]
-        owner = link_owners.get(provider_id) or local_owners.get(provider_id)
-        if not owner:
-            owner = _orb_signed_ref_owner(subscription["external_reference"])
+        signed_owner = _orb_signed_ref_owner(subscription["external_reference"])
+        # A stored link cannot override the owner cryptographically bound to
+        # the provider reference. Legacy payments remain unlinked if unknown.
+        owner = signed_owner or local_owners.get(provider_id)
         if not owner:
             # A legacy UUID-only reference is not sufficient to identify an
             # Orb account. Count the verified distinct provider subscription
