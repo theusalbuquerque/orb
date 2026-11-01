@@ -515,10 +515,112 @@ async def _reconcile_mp_account(identity: dict[str, Any]) -> None:
                 continue
 
 
+async def _recover_mp_subscription_by_email(identity: dict[str, Any]) -> None:
+    """Recover an authorized Orb subscription whose local checkout row was lost.
+
+    Query Mercado Pago with the authenticated account email; verify the specific
+    subscription with the provider and cross-check product, recurring terms,
+    external reference and ownership before creating an idempotent local record.
+    Never create a new charge or trust a browser-return status.
+    """
+    if not MP_ACCESS_TOKEN or _subscription_state(identity)["premium"]:
+        return
+    import logging
+    logger = logging.getLogger("orb.billing")
+    headers = {"Authorization": f"Bearer {MP_ACCESS_TOKEN}"}
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            response = await client.get(
+                f"{MP_API}/preapproval/search",
+                headers=headers,
+                params={"payer_email": identity["email"], "limit": 20, "offset": 0},
+            )
+            if response.status_code != 200:
+                logger.warning("Premium recovery search provider_status=%s", response.status_code)
+                return
+            result = response.json()
+            items = result.get("results") if isinstance(result, dict) else None
+            if not isinstance(items, list):
+                return
+            for item in items[:20]:
+                if not isinstance(item, dict) or item.get("status") != "authorized":
+                    continue
+                provider_id = str(item.get("id") or "").strip()
+                if not provider_id:
+                    continue
+                detail_response = await client.get(
+                    f"{MP_API}/preapproval/{provider_id}", headers=headers
+                )
+                if detail_response.status_code != 200:
+                    continue
+                sub = detail_response.json()
+                if not isinstance(sub, dict):
+                    continue
+                if str(sub.get("id") or "") != provider_id or sub.get("status") != "authorized":
+                    continue
+                if str(sub.get("reason") or "").strip() != "Orb Premium":
+                    continue
+                payer = str(sub.get("payer_email") or item.get("payer_email") or "").strip().lower()
+                if payer and payer != identity["email"]:
+                    continue
+                checkout_ref = str(sub.get("external_reference") or "").strip()
+                try:
+                    if str(uuid.UUID(checkout_ref)) != checkout_ref.lower():
+                        continue
+                except (ValueError, AttributeError):
+                    continue
+                recurring = sub.get("auto_recurring") or {}
+                if not isinstance(recurring, dict) or recurring.get("currency_id") != "BRL":
+                    continue
+                if recurring.get("frequency_type") != "months":
+                    continue
+                frequency = recurring.get("frequency")
+                if frequency not in (1, 12):
+                    continue
+                plan = "monthly" if frequency == 1 else "yearly"
+                try:
+                    amount = round(float(recurring.get("transaction_amount")), 2)
+                except (ValueError, TypeError):
+                    continue
+                expected = _configured_price(plan)
+                if expected is None or amount != round(float(expected), 2):
+                    continue
+                # Never overwrite a subscription linked to another Orb account.
+                with _db() as conn:
+                    owner = conn.execute(
+                        "SELECT customer_ref FROM billing_subscriptions "
+                        "WHERE checkout_ref=? OR (provider='mercadopago' AND provider_subscription_id=?) "
+                        "LIMIT 1", (checkout_ref, provider_id)
+                    ).fetchone()
+                if owner and owner["customer_ref"] != identity["id"]:
+                    logger.warning("Premium recovery account ownership conflict")
+                    continue
+                if not owner:
+                    _save_checkout(
+                        checkout_ref=checkout_ref,
+                        customer_ref=identity["id"],
+                        provider="mercadopago",
+                        provider_subscription_id=provider_id,
+                        checkout_id=None,
+                        email=identity["email"],
+                        plan=plan,
+                        amount=amount,
+                        status="active",
+                        checkout_url=None,
+                    )
+                else:
+                    _update_by_checkout_ref(checkout_ref, status="active", provider_subscription_id=provider_id)
+                logger.info("Premium subscription recovered from provider for verified account")
+                return
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        logger.warning("Premium recovery temporarily unavailable: %s", type(exc).__name__)
+
+
 @router.get("/subscription")
 async def subscription(authorization: str | None = Header(default=None)):
     identity = await _verified_identity(authorization)
     await _reconcile_mp_account(identity)
+    await _recover_mp_subscription_by_email(identity)
     return _subscription_state(identity)
 
 
@@ -526,6 +628,7 @@ async def subscription(authorization: str | None = Header(default=None)):
 async def subscription_checkout(body: SubscriptionCheckoutRequest, authorization: str | None = Header(default=None)):
     identity = await _verified_identity(authorization)
     await _reconcile_mp_account(identity)
+    await _recover_mp_subscription_by_email(identity)
     if _subscription_state(identity)["premium"]:
         raise HTTPException(status_code=409, detail="Cancel the active subscription before subscribing again")
     # Reuse pending checkouts to avoid duplicate subscriptions on retry.
