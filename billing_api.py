@@ -903,7 +903,9 @@ async def subscription(authorization: str | None = Header(default=None)):
     courtesy = await _verified_courtesy_entitlement(authorization)
     await _reconcile_mp_account(identity)
     if not courtesy["premium"]:
-        await _recover_mp_subscription_by_email(identity)
+        await _recover_persisted_mp_link(identity, authorization)
+        if not _subscription_state(identity)["premium"]:
+            await _recover_mp_subscription_by_email(identity)
     return _subscription_state(identity, courtesy)
 
 
@@ -933,9 +935,15 @@ async def subscription_checkout(body: SubscriptionCheckoutRequest, authorization
         return {"userId": identity["id"], "checkoutRef": checkout_ref, "amount": 0.0,
                 "currency": "BRL", "status": "pending", "requiresConfirmation": True, "checkoutUrl": None}
     # All other users keep the environment price and real provider checkout.
-    result = await create_mercado_pago_checkout(CheckoutRequest(
-        customer_ref=identity["id"], email=identity["email"], plan=body.plan))
+    checkout_ref = _orb_signed_checkout_ref(identity["id"])
+    result = await create_mercado_pago_checkout(
+        CheckoutRequest(customer_ref=identity["id"], email=identity["email"], plan=body.plan),
+        checkout_ref=checkout_ref,
+    )
     saved = next(row for row in _account_rows(identity) if row["checkout_ref"] == result["checkoutRef"])
+    await _persist_checkout_for_account(
+        authorization, result["checkoutRef"], saved["provider_subscription_id"], body.plan
+    )
     return {**result, "userId": identity["id"], "amount": saved["amount"],
             "currency": "BRL", "requiresConfirmation": False}
 
@@ -1109,12 +1117,12 @@ def _orb_mp_failure(response: httpx.Response) -> HTTPException:
 
 
 @router.post("/checkout/mercadopago")
-async def create_mercado_pago_checkout(body: CheckoutRequest):
+async def create_mercado_pago_checkout(body: CheckoutRequest, checkout_ref: str | None = None):
     if not MP_ACCESS_TOKEN:
         raise HTTPException(status_code=503, detail="Mercado Pago is not configured")
 
     amount = _price(body.plan)
-    checkout_ref = str(uuid.uuid4())
+    checkout_ref = checkout_ref or str(uuid.uuid4())
     recurring = {
         "frequency": 1 if body.plan == "monthly" else 12,
         "frequency_type": "months",
