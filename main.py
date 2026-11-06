@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from orb_automix_api import router as automix_router
 from billing_api import router as billing_router
+from server_control import router as control_router
 from lastfm_api import router as lastfm_router
 from orb_owner_zero_auth_api import router as owner_zda_router
 
@@ -32,6 +33,7 @@ app.add_middleware(
 )
 app.include_router(automix_router)
 app.include_router(billing_router)
+app.include_router(control_router)
 app.include_router(lastfm_router)
 app.include_router(owner_zda_router)
 

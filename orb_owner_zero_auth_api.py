@@ -9,6 +9,7 @@ Deployment remains disabled without explicit ORB_OWNER_ZDA_ENABLED=true.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -24,11 +25,14 @@ from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
+import billing_api
+
 router = APIRouter(prefix="/api/billing/owner-zda", tags=["billing"])
 OWNER_EMAIL_SHA256 = "2c8c3e1d1bcef1415230705c38bafb7403905850a7f37c5206bd5cfc055c6aeb"
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://orb-4mrh.onrender.com").rstrip("/")
 MP_API = "https://api.mercadopago.com"
 TABLE = "orb_owner_zda_authorizations"
+OWNER_MANAGEMENT_BUDGET = 14.0
 
 
 def _config():
@@ -52,23 +56,39 @@ def _owner_digest(email: str) -> bool:
 
 
 async def _owner(authorization: str | None):
-    cfg = _config()
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(401, "Sign in to Orb")
-    token = authorization[7:].strip()
-    if not token:
-        raise HTTPException(401, "Invalid Orb session")
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(cfg["supabase"] + "/auth/v1/user", headers={
-                "apikey": cfg["anon"], "Authorization": "Bearer " + token})
-            resp.raise_for_status()
-            user = resp.json()
-    except (httpx.HTTPError, ValueError):
-        raise HTTPException(401, "Orb session could not be validated") from None
-    if not user.get("id") or not _owner_digest(str(user.get("email") or "")):
+    # Managing an existing authorization must work even when new card validation
+    # is disabled or card-creation credentials are unavailable.
+    user = await billing_api._verified_identity(authorization)
+    if not _owner_digest(user["email"]):
         raise HTTPException(403, "Account is not authorized")
-    return {"id": str(user["id"]), "email": str(user["email"])}
+    return user
+
+
+async def _management_state(authorization: str | None, *, cancel: bool = False):
+    try:
+        async with asyncio.timeout(OWNER_MANAGEMENT_BUDGET):
+            user = await _owner(authorization)
+            rpc = "orb_owner_zda_cancel" if cancel else "orb_owner_zda_status"
+            async with httpx.AsyncClient(timeout=httpx.Timeout(8, connect=4)) as client:
+                response = await client.post(
+                    billing_api.SUPABASE_URL + "/rest/v1/rpc/" + rpc,
+                    headers={"apikey": billing_api.SUPABASE_KEY,
+                             "Authorization": authorization, "Content-Type": "application/json"},
+                    json={},
+                )
+            if response.status_code in (401, 403):
+                raise HTTPException(response.status_code, "Orb account is not authorized")
+            if response.status_code != 200:
+                raise HTTPException(503, detail={"code": "OWNER_ZDA_STATE_UNAVAILABLE"})
+            state = response.json()
+            if (not isinstance(state, dict) or state.get("userId") != user["id"]
+                    or not isinstance(state.get("subscribed"), bool)):
+                raise HTTPException(503, detail={"code": "OWNER_ZDA_STATE_INVALID"})
+            if cancel and state["subscribed"]:
+                raise HTTPException(409, "Authorization changed during cancellation")
+            return state
+    except (TimeoutError, httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(503, detail={"code": "OWNER_ZDA_STATE_UNAVAILABLE"}) from exc
 
 
 async def _db(method: str, params=None, payload=None):
@@ -103,15 +123,12 @@ async def _latest(user_id: str):
 
 @router.get("/status")
 async def status(authorization: str | None = Header(default=None)):
-    user = await _owner(authorization)
-    row = await _latest(user["id"])
-    return {"userId": user["id"], "subscribed": bool(row and row["status"] == "approved"),
-            "status": row["status"] if row else "not_subscribed", "amount": 0,
-            "validationProvider": "mercadopago_zda" if row else None}
+    return await _management_state(authorization)
 
 
 @router.post("/start")
 async def start(authorization: str | None = Header(default=None)):
+    _config()  # Starting a new card validation retains its explicit opt-in gate.
     user = await _owner(authorization)
     checkout_id = str(uuid.uuid4())
     secret = secrets.token_urlsafe(32)
@@ -128,16 +145,7 @@ async def start(authorization: str | None = Header(default=None)):
 
 @router.post("/cancel")
 async def cancel(authorization: str | None = Header(default=None)):
-    user = await _owner(authorization)
-    row = await _latest(user["id"])
-    if row is None or row["status"] != "approved":
-        return {"userId": user["id"], "subscribed": False, "status": "not_subscribed"}
-    updated = await _db("PATCH", {"id": "eq." + row["id"], "user_id": "eq." + user["id"],
-                                  "status": "eq.approved"},
-                        {"status": "canceled", "updated_at": _at(int(time.time()))})
-    if not updated:
-        raise HTTPException(409, "Subscription state changed during cancellation")
-    return {"userId": user["id"], "subscribed": False, "status": "canceled"}
+    return await _management_state(authorization, cancel=True)
 
 
 async def _checkout(id: str, code: str):

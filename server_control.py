@@ -1,28 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
-import os
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException
 
-from billing_api import billing_entitlement_for_email
+import billing_api
+from billing_api import _verified_identity, subscription_for_identity
 
 router = APIRouter(prefix="/api/control", tags=["server-control"])
 
-SUPABASE_URL = os.getenv(
-    "SUPABASE_URL",
-    os.getenv("ORB_SUPABASE_URL", "https://twhmhdqmbvogezofvfqg.supabase.co"),
-).rstrip("/")
-SUPABASE_KEY = os.getenv(
-    "SUPABASE_PUBLISHABLE_KEY",
-    os.getenv(
-        "ORB_SUPABASE_PUBLISHABLE_KEY",
-        os.getenv("SUPABASE_ANON_KEY", ""),
-    ),
-).strip()
+SUPABASE_URL = billing_api.SUPABASE_URL
+SUPABASE_KEY = billing_api.SUPABASE_KEY
 
 TIMEOUT = httpx.Timeout(15.0, connect=8.0)
 
@@ -74,35 +66,11 @@ async def _rpc(
     if response.status_code >= 400:
         raise HTTPException(
             status_code=503,
-            detail=f"Server control storage unavailable: {response.text[:500]}",
+            detail="Server control storage unavailable",
         )
     if not response.content:
         return None
     return response.json()
-
-
-async def _authenticated_user(authorization: str | None) -> dict[str, Any]:
-    _require_supabase()
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Missing bearer token")
-
-    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-        response = await client.get(
-            f"{SUPABASE_URL}/auth/v1/user",
-            headers={
-                "apikey": SUPABASE_KEY,
-                "Authorization": authorization,
-                "Accept": "application/json",
-            },
-        )
-
-    if response.status_code != 200:
-        raise HTTPException(status_code=401, detail="Invalid Supabase session")
-
-    user = response.json()
-    if not user.get("id"):
-        raise HTTPException(status_code=401, detail="Invalid Supabase user")
-    return user
 
 
 def _parse_expiry(value: Any) -> datetime | None:
@@ -121,19 +89,21 @@ def _resolve_entitlement(
     billing: dict[str, Any],
     override: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    base = {
+        "premium": bool(billing.get("premium", False)),
+        "plan": billing.get("plan"),
+        "source": "billing",
+        "expiresAt": None,
+        "updatedAt": billing.get("updatedAt"),
+    }
     if override is None or override.get("premium_override") is None:
-        return {
-            "premium": bool(billing.get("premium", False)),
-            "plan": billing.get("plan"),
-            "source": "billing",
-            "expiresAt": None,
-            "updatedAt": billing.get("updatedAt"),
-        }
+        return base
 
     premium = bool(override.get("premium_override"))
     expiry = _parse_expiry(override.get("premium_expires_at"))
     if premium and expiry is not None and expiry <= datetime.now(timezone.utc):
-        premium = False
+        # Expired complimentary access must not revoke an independently paid plan.
+        return base
 
     return {
         "premium": premium,
@@ -181,33 +151,42 @@ async def server_control_health():
     }
 
 
+BOOTSTRAP_BUDGET_SECONDS = 18.0
+
+
 @router.get("/bootstrap")
 async def bootstrap(authorization: str | None = Header(default=None)):
-    user = await _authenticated_user(authorization)
-    email = str(user.get("email") or "").strip().lower()
-
-    if email:
-        account_hash = hashlib.sha256(email.encode("utf-8")).hexdigest()
-        await _rpc(
-            "orb_sync_account_hash",
-            {"p_account_hash": account_hash},
-            authorization=authorization,
-        )
-
-    override = await _rpc(
-        "orb_my_entitlement",
-        authorization=authorization,
-    )
-    if override is not None and not isinstance(override, dict):
-        override = None
-
-    billing = billing_entitlement_for_email(email)
-    config = await _remote_config()
-
-    return {
-        "schemaVersion": 1,
-        "userId": str(user["id"]),
-        "entitlement": _resolve_entitlement(billing, override),
-        "config": config,
-        "serverTime": _now(),
-    }
+    try:
+        async with asyncio.timeout(BOOTSTRAP_BUDGET_SECONDS):
+            identity = await _verified_identity(authorization)
+            # Each RPC derives its account from this same verified JWT. Parallel
+            # reads avoid stacking several 15-second timeouts before showing the sheet.
+            results = await asyncio.gather(
+                _rpc("orb_sync_account_hash", {
+                    "p_account_hash": hashlib.sha256(identity["email"].encode("utf-8")).hexdigest(),
+                }, authorization=authorization),
+                _rpc("orb_my_entitlement", authorization=authorization),
+                _remote_config(),
+                subscription_for_identity(identity, authorization),
+                return_exceptions=True,
+            )
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
+            _, override, config, subscription = results
+            if override is not None and not isinstance(override, dict):
+                raise HTTPException(503, detail="Invalid entitlement response")
+            billing = {
+                "premium": subscription["premium"],
+                "plan": subscription.get("premiumPlan"),
+                "updatedAt": subscription.get("updatedAt"),
+            }
+            return {
+                "schemaVersion": 1,
+                "userId": identity["id"],
+                "entitlement": _resolve_entitlement(billing, override),
+                "config": config,
+                "serverTime": _now(),
+            }
+    except (TimeoutError, httpx.HTTPError, ValueError, TypeError) as exc:
+        raise HTTPException(503, detail={"code": "CONTROL_BOOTSTRAP_UNAVAILABLE"}) from exc

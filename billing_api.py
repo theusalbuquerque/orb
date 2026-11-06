@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import math
 import os
 import sqlite3
 import uuid
+from weakref import WeakValueDictionary
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -34,11 +36,27 @@ SUPABASE_KEY = os.getenv("ORB_SUPABASE_PUBLISHABLE_KEY", os.getenv("SUPABASE_PUB
 DB_PATH = os.getenv("ORB_BILLING_DB_PATH", "orb_billing.sqlite3").strip()
 
 
+def _payment_email(value: str | None) -> str | None:
+    if value is None:
+        return None
+    import re
+    value = value.strip().lower()
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value) or len(value) > 254:
+        raise ValueError("invalid payment email")
+    return value
+
+
 class CheckoutRequest(BaseModel):
     customer_ref: str = Field(min_length=8, max_length=200)
     email: str = Field(min_length=5, max_length=254)
     name: str | None = Field(default=None, max_length=200)
     plan: Literal["monthly", "yearly"]
+    payer_email: str | None = Field(default=None, min_length=5, max_length=254)
+
+    @field_validator("payer_email")
+    @classmethod
+    def validate_payer_email(cls, value: str | None) -> str | None:
+        return _payment_email(value)
 
     @field_validator("email")
     @classmethod
@@ -382,6 +400,12 @@ def _configured_price(plan: Literal["monthly", "yearly"]) -> float | None:
 class SubscriptionCheckoutRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     plan: Literal["monthly", "yearly"] = "monthly"
+    payer_email: str | None = Field(default=None, min_length=5, max_length=254)
+
+    @field_validator("payer_email")
+    @classmethod
+    def validate_payer_email(cls, value: str | None) -> str | None:
+        return _payment_email(value)
 
 
 class SubscriptionConfirmRequest(BaseModel):
@@ -472,6 +496,7 @@ def _subscription_state(
         "amount": 0.0 if identity["developer"] or complimentary else _configured_price("monthly"),
         "currency": "BRL",
         "checkoutRef": current["checkout_ref"] if current else None,
+        "premiumPlan": current["plan"] if current and is_premium else None,
     }
     if complimentary and active is None:
         state["premiumSource"] = "courtesy"
@@ -578,7 +603,7 @@ async def _recover_persisted_mp_link(
             )
             if links_response.status_code != 200:
                 logger.warning("Premium persistent-link lookup failed: %s", links_response.status_code)
-                return
+                raise HTTPException(503, detail={"code": "BILLING_RECOVERY_UNAVAILABLE"})
             links = links_response.json()
             if not isinstance(links, list):
                 return
@@ -594,7 +619,7 @@ async def _recover_persisted_mp_link(
                     headers={"Authorization": f"Bearer {MP_ACCESS_TOKEN}"},
                 )
                 if response.status_code != 200:
-                    continue
+                    raise HTTPException(503, detail={"code": "BILLING_RECOVERY_UNAVAILABLE"})
                 payment = response.json()
                 if not isinstance(payment, dict):
                     continue
@@ -626,6 +651,7 @@ async def _recover_persisted_mp_link(
                 return
     except (httpx.HTTPError, ValueError, TypeError) as exc:
         logger.warning("Premium persistent-link recovery unavailable: %s", type(exc).__name__)
+        raise HTTPException(503, detail={"code": "BILLING_RECOVERY_UNAVAILABLE"}) from exc
 
 
 async def _provider_active_orb_subscriptions() -> list[dict[str, str]]:
@@ -819,7 +845,7 @@ async def _recover_mp_subscription_by_email(identity: dict[str, Any]) -> None:
             )
             if response.status_code != 200:
                 logger.warning("Premium recovery search provider_status=%s", response.status_code)
-                return
+                raise HTTPException(503, detail={"code": "BILLING_RECOVERY_UNAVAILABLE"})
             result = response.json()
             items = result.get("results") if isinstance(result, dict) else None
             if not isinstance(items, list):
@@ -834,7 +860,7 @@ async def _recover_mp_subscription_by_email(identity: dict[str, Any]) -> None:
                     f"{MP_API}/preapproval/{provider_id}", headers=headers
                 )
                 if detail_response.status_code != 200:
-                    continue
+                    raise HTTPException(503, detail={"code": "BILLING_RECOVERY_UNAVAILABLE"})
                 sub = detail_response.json()
                 if not isinstance(sub, dict):
                     continue
@@ -896,11 +922,11 @@ async def _recover_mp_subscription_by_email(identity: dict[str, Any]) -> None:
                 return
     except (httpx.HTTPError, ValueError, TypeError) as exc:
         logger.warning("Premium recovery temporarily unavailable: %s", type(exc).__name__)
+        raise HTTPException(503, detail={"code": "BILLING_RECOVERY_UNAVAILABLE"}) from exc
 
 
-@router.get("/subscription")
-async def subscription(authorization: str | None = Header(default=None)):
-    identity = await _verified_identity(authorization)
+async def subscription_for_identity(identity: dict[str, Any], authorization: str | None) -> dict[str, Any]:
+    """Resolve paid/courtesy access for a server-verified Orb user, not the payer email."""
     courtesy = await _verified_courtesy_entitlement(authorization)
     await _reconcile_mp_account(identity)
     if not courtesy["premium"]:
@@ -910,9 +936,36 @@ async def subscription(authorization: str | None = Header(default=None)):
     return _subscription_state(identity, courtesy)
 
 
+STATUS_BUDGET_SECONDS = 16.0
+CHECKOUT_BUDGET_SECONDS = 35.0
+_checkout_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+
+
+@router.get("/subscription")
+async def subscription(authorization: str | None = Header(default=None)):
+    try:
+        async with asyncio.timeout(STATUS_BUDGET_SECONDS):
+            identity = await _verified_identity(authorization)
+            return await subscription_for_identity(identity, authorization)
+    except TimeoutError as exc:
+        raise HTTPException(503, detail={"code": "BILLING_STATUS_TIMEOUT"}) from exc
+
+
 @router.post("/subscription/checkout")
 async def subscription_checkout(body: SubscriptionCheckoutRequest, authorization: str | None = Header(default=None)):
-    identity = await _verified_identity(authorization)
+    try:
+        async with asyncio.timeout(CHECKOUT_BUDGET_SECONDS):
+            identity = await _verified_identity(authorization)
+            # Serialize pending-checkout creation within this single-worker service.
+            # Values are weak references so idle account locks do not accumulate.
+            lock = _checkout_locks.setdefault(identity["id"], asyncio.Lock())
+            async with lock:
+                return await _checkout_for_identity(body, identity, authorization)
+    except TimeoutError as exc:
+        raise HTTPException(503, detail={"code": "BILLING_CHECKOUT_TIMEOUT"}) from exc
+
+
+async def _checkout_for_identity(body: SubscriptionCheckoutRequest, identity: dict[str, Any], authorization: str | None):
     courtesy = await _verified_courtesy_entitlement(authorization)
     if courtesy["premium"]:
         raise HTTPException(status_code=409, detail="Orb Premium is already active for this account")
@@ -925,6 +978,12 @@ async def subscription_checkout(body: SubscriptionCheckoutRequest, authorization
     # Reuse pending checkouts to avoid duplicate subscriptions on retry.
     pending = next((r for r in _account_rows(identity) if r["status"] == "pending" and r["plan"] == body.plan), None)
     if pending:
+        # A previous request may have timed out after the provider was created
+        # but before durable linkage completed. Persist it again before exposing a URL.
+        if pending["provider"] == "mercadopago":
+            await _persist_checkout_for_account(
+                authorization, pending["checkout_ref"], pending["provider_subscription_id"], body.plan
+            )
         return {"userId": identity["id"], "checkoutRef": pending["checkout_ref"],
                 "amount": pending["amount"], "currency": "BRL", "status": "pending",
                 "requiresConfirmation": pending["provider"] == "developer", "checkoutUrl": pending["checkout_url"]}
@@ -938,7 +997,8 @@ async def subscription_checkout(body: SubscriptionCheckoutRequest, authorization
     # All other users keep the environment price and real provider checkout.
     checkout_ref = _orb_signed_checkout_ref(identity["id"])
     result = await create_mercado_pago_checkout(
-        CheckoutRequest(customer_ref=identity["id"], email=identity["email"], plan=body.plan),
+        CheckoutRequest(customer_ref=identity["id"], email=identity["email"], plan=body.plan,
+                        payer_email=body.payer_email),
         checkout_ref=checkout_ref,
     )
     saved = next(row for row in _account_rows(identity) if row["checkout_ref"] == result["checkoutRef"])
@@ -1000,6 +1060,7 @@ async def providers():
     return {
         "mercadoPago": {
             "configured": bool(MP_ACCESS_TOKEN),
+            "webhookConfigured": bool(MP_WEBHOOK_SECRET),
         },
         "asaas": {
             "configured": bool(ASAAS_API_KEY),
@@ -1061,6 +1122,8 @@ def _orb_mp_failure(response: httpx.Response) -> HTTPException:
         code = "MP_REQUEST_REJECTED"
     else:
         code = "MP_UNAVAILABLE"
+    if provider_code == "guest_site_mismatch":
+        code = "MP_PAYER_SITE_MISMATCH"
     def _safe_error_text(value: Any) -> str:
         """Keep provider field names readable; redact private data and identifiers."""
         if not isinstance(value, str):
@@ -1133,7 +1196,7 @@ async def create_mercado_pago_checkout(body: CheckoutRequest, checkout_ref: str 
     payload = {
         "reason": "Orb Premium",
         "external_reference": checkout_ref,
-        "payer_email": str(body.email),
+        "payer_email": body.payer_email or str(body.email),
         "auto_recurring": recurring,
         "back_url": f"{PUBLIC_BASE_URL}/api/billing/return/mercadopago",
         "status": "pending",
@@ -1349,47 +1412,61 @@ async def mercado_pago_webhook(request: Request):
     _verify_mp_webhook(request, data_id)
 
     event_id = str(body.get("id") or f"{body.get('type')}:{data_id}:{body.get('action')}")
-    if not _event_once("mercadopago", event_id):
+    with _db() as conn:
+        processed = conn.execute(
+            "SELECT 1 FROM billing_events WHERE provider=? AND event_id=?",
+            ("mercadopago", event_id),
+        ).fetchone()
+    if processed:
         return {"ok": True, "duplicate": True}
 
     event_type = str(body.get("type") or "")
-    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-        if event_type == "subscription_preapproval":
-            response = await client.get(
-                f"{MP_API}/preapproval/{data_id}",
-                headers={"Authorization": f"Bearer {MP_ACCESS_TOKEN}"},
-            )
-            if response.status_code < 400:
-                sub = response.json()
-                checkout_ref = str(sub.get("external_reference") or "")
-                if checkout_ref:
-                    _update_by_checkout_ref(
-                        checkout_ref,
-                        status=_normalize_mp_status(sub.get("status")),
-                        provider_subscription_id=str(sub.get("id") or data_id),
-                    )
-        elif event_type == "payment":
-            response = await client.get(
-                f"{MP_API}/v1/payments/{data_id}",
-                headers={"Authorization": f"Bearer {MP_ACCESS_TOKEN}"},
-            )
-            if response.status_code < 400:
-                payment = response.json()
-                checkout_ref = str(payment.get("external_reference") or "")
-                payment_status = str(payment.get("status") or "").lower()
-                mapped = {
-                    "approved": "active",
-                    "in_process": "pending",
-                    "pending": "pending",
-                    "rejected": "past_due",
-                    "cancelled": "canceled",
-                    "canceled": "canceled",
-                    "refunded": "inactive",
-                    "charged_back": "inactive",
-                }.get(payment_status)
-                if checkout_ref and mapped:
-                    _update_by_checkout_ref(checkout_ref, status=mapped)
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            if event_type == "subscription_preapproval":
+                response = await client.get(
+                    f"{MP_API}/preapproval/{data_id}",
+                    headers={"Authorization": f"Bearer {MP_ACCESS_TOKEN}"},
+                )
+                if response.status_code != 200:
+                    raise HTTPException(503, detail={"code": "MP_WEBHOOK_VERIFY_UNAVAILABLE"})
+                if response.status_code == 200:
+                    sub = response.json()
+                    checkout_ref = str(sub.get("external_reference") or "")
+                    if checkout_ref:
+                        _update_by_checkout_ref(
+                            checkout_ref,
+                            status=_normalize_mp_status(sub.get("status")),
+                            provider_subscription_id=str(sub.get("id") or data_id),
+                        )
+            elif event_type == "payment":
+                response = await client.get(
+                    f"{MP_API}/v1/payments/{data_id}",
+                    headers={"Authorization": f"Bearer {MP_ACCESS_TOKEN}"},
+                )
+                if response.status_code != 200:
+                    raise HTTPException(503, detail={"code": "MP_WEBHOOK_VERIFY_UNAVAILABLE"})
+                if response.status_code == 200:
+                    payment = response.json()
+                    checkout_ref = str(payment.get("external_reference") or "")
+                    payment_status = str(payment.get("status") or "").lower()
+                    mapped = {
+                        "approved": "active",
+                        "in_process": "pending",
+                        "pending": "pending",
+                        "rejected": "past_due",
+                        "cancelled": "canceled",
+                        "canceled": "canceled",
+                        "refunded": "inactive",
+                        "charged_back": "inactive",
+                    }.get(payment_status)
+                    if checkout_ref and mapped:
+                        _update_by_checkout_ref(checkout_ref, status=mapped)
 
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        raise HTTPException(503, detail={"code": "MP_WEBHOOK_VERIFY_UNAVAILABLE"}) from exc
+
+    _event_once("mercadopago", event_id)
     return {"ok": True}
 
 
