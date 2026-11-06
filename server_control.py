@@ -94,6 +94,7 @@ def _resolve_entitlement(
         "plan": billing.get("plan"),
         "source": "billing",
         "expiresAt": None,
+        "renewsAt": billing.get("renewsAt"),
         "updatedAt": billing.get("updatedAt"),
     }
     if override is None or override.get("premium_override") is None:
@@ -110,6 +111,7 @@ def _resolve_entitlement(
         "plan": override.get("premium_plan") or billing.get("plan"),
         "source": override.get("premium_source") or "manual",
         "expiresAt": override.get("premium_expires_at"),
+        "renewsAt": None,
         "updatedAt": override.get("updated_at"),
     }
 
@@ -180,6 +182,7 @@ async def bootstrap(authorization: str | None = Header(default=None)):
                 "premium": subscription["premium"],
                 "plan": subscription.get("premiumPlan"),
                 "updatedAt": subscription.get("updatedAt"),
+                "renewsAt": subscription.get("nextRenewalAt"),
             }
             return {
                 "schemaVersion": 1,

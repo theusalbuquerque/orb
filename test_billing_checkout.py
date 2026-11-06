@@ -82,7 +82,7 @@ def service(monkeypatch, tmp_path):
                 return httpx.Response(200, text='invalid json')
             return httpx.Response(200, json={'id': 'mp-test-1',
                 'external_reference': state['provider_ref'], 'status': state['provider_status'],
-                'reason': 'Orb Premium', 'auto_recurring': {'currency_id': 'BRL',
+                'next_payment_date': state.get('renewal'), 'reason': 'Orb Premium', 'auto_recurring': {'currency_id': 'BRL',
                 'frequency_type': 'months', 'frequency': 1, 'transaction_amount': 6.97}})
         raise AssertionError(f'Unexpected external request: {request.method} {path}')
 
@@ -288,3 +288,40 @@ def test_provider_health_exposes_only_webhook_configuration_presence(service):
     assert result['mercadoPago']['webhookConfigured'] is True
     assert billing.MP_WEBHOOK_SECRET not in json.dumps(result)
     assert billing.MP_ACCESS_TOKEN not in json.dumps(result)
+
+
+def test_provider_renewal_date_is_returned_to_app_and_bootstrap(service):
+    client, state = service
+    save_pending(status='active')
+    state['provider_status'] = 'authorized'
+    state['renewal'] = '2026-12-06T08:00:00-03:00'
+    status = client.get('/api/billing/subscription', headers=AUTH)
+    assert status.status_code == 200, status.text
+    assert status.json()['billingActive'] is True
+    assert status.json()['nextRenewalAt'] == '2026-12-06T11:00:00+00:00'
+    result = client.get('/api/control/bootstrap', headers=AUTH)
+    assert result.status_code == 200, result.text
+    assert result.json()['entitlement']['renewsAt'] == '2026-12-06T11:00:00+00:00'
+
+
+def test_missing_renewal_metadata_never_fabricates_date_or_revokes_paid_access(service):
+    client, state = service
+    save_pending(status='active')
+    state['provider_fail'] = True
+    result = client.get('/api/billing/subscription', headers=AUTH)
+    assert result.status_code == 200
+    assert result.json()['premium'] is True
+    assert result.json()['nextRenewalAt'] is None
+
+
+def test_developer_checkout_uses_same_real_monthly_provider_flow(service, monkeypatch):
+    client, state = service
+    async def developer_identity(_authorization):
+        return {'id': UID, 'email': EMAIL, 'developer': True}
+    monkeypatch.setattr(billing, '_verified_identity', developer_identity)
+    state['courtesy'] = True
+    result = client.post('/api/billing/subscription/checkout', headers=AUTH, json={'plan': 'monthly'})
+    assert result.status_code == 200, result.text
+    assert result.json()['amount'] == 6.97
+    assert result.json()['requiresConfirmation'] is False
+    assert len(state['created']) == 1

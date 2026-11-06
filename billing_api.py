@@ -469,7 +469,9 @@ async def _verified_courtesy_entitlement(authorization: str | None) -> dict[str,
                 json={},
             )
         if response.status_code != 200:
-            raise HTTPException(status_code=503, detail="Premium entitlement verification unavailable")
+            import logging
+            logging.getLogger("orb.billing").warning("Courtesy RPC unavailable: http_status=%s", response.status_code)
+            raise HTTPException(status_code=503, detail={"code": "COURTESY_LOOKUP_UNAVAILABLE"})
         value = response.json()
         if not isinstance(value, dict) or not isinstance(value.get("premium"), bool):
             raise HTTPException(status_code=503, detail="Premium entitlement verification unavailable")
@@ -497,6 +499,9 @@ def _subscription_state(
         "currency": "BRL",
         "checkoutRef": current["checkout_ref"] if current else None,
         "premiumPlan": current["plan"] if current and is_premium else None,
+        "billingActive": active is not None and active["provider"] == "mercadopago",
+        "premiumSource": "billing" if active else ("developer" if identity["developer"] else None),
+        "nextRenewalAt": None,
     }
     if complimentary and active is None:
         state["premiumSource"] = "courtesy"
@@ -925,6 +930,36 @@ async def _recover_mp_subscription_by_email(identity: dict[str, Any]) -> None:
         raise HTTPException(503, detail={"code": "BILLING_RECOVERY_UNAVAILABLE"}) from exc
 
 
+async def _next_renewal_for_account(identity: dict[str, Any]) -> str | None:
+    """Display-only provider metadata. A missing date cannot block checkout/status."""
+    row = next((r for r in _account_rows(identity)
+                if r["status"] == "active" and r["provider"] == "mercadopago"
+                and r["provider_subscription_id"]), None)
+    if row is None or not MP_ACCESS_TOKEN:
+        return None
+    try:
+        async with asyncio.timeout(3.0):
+            async with httpx.AsyncClient(timeout=httpx.Timeout(2.5, connect=1.5)) as client:
+                response = await client.get(f"{MP_API}/preapproval/{row['provider_subscription_id']}",
+                    headers={"Authorization": f"Bearer {MP_ACCESS_TOKEN}"})
+            if response.status_code != 200:
+                return None
+            data = response.json()
+            if (not isinstance(data, dict) or data.get("id") != row["provider_subscription_id"]
+                    or data.get("external_reference") != row["checkout_ref"]
+                    or data.get("status") != "authorized"):
+                return None
+            value = data.get("next_payment_date")
+            if not isinstance(value, str):
+                return None
+            date = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if date.tzinfo is None:
+                return None
+            return date.astimezone(timezone.utc).isoformat()
+    except (TimeoutError, httpx.HTTPError, ValueError, TypeError):
+        return None
+
+
 async def subscription_for_identity(identity: dict[str, Any], authorization: str | None) -> dict[str, Any]:
     """Resolve paid/courtesy access for a server-verified Orb user, not the payer email."""
     courtesy = await _verified_courtesy_entitlement(authorization)
@@ -933,7 +968,9 @@ async def subscription_for_identity(identity: dict[str, Any], authorization: str
         await _recover_persisted_mp_link(identity, authorization)
         if not _subscription_state(identity)["premium"]:
             await _recover_mp_subscription_by_email(identity)
-    return _subscription_state(identity, courtesy)
+    state = _subscription_state(identity, courtesy)
+    state["nextRenewalAt"] = await _next_renewal_for_account(identity)
+    return state
 
 
 STATUS_BUDGET_SECONDS = 16.0
@@ -967,16 +1004,16 @@ async def subscription_checkout(body: SubscriptionCheckoutRequest, authorization
 
 async def _checkout_for_identity(body: SubscriptionCheckoutRequest, identity: dict[str, Any], authorization: str | None):
     courtesy = await _verified_courtesy_entitlement(authorization)
-    if courtesy["premium"]:
+    if courtesy["premium"] and not identity["developer"]:
         raise HTTPException(status_code=409, detail="Orb Premium is already active for this account")
     # Keep checkout responsive: account recovery via Mercado Pago search can
     # involve multiple provider requests (up to 25s each) and belongs on GET
     # /subscription, not the interactive button that opens the payment page.
     # The authenticated account already has its own checkout rows below.
-    if _subscription_state(identity, courtesy)["premium"]:
+    if any(r["status"] == "active" and r["provider"] == "mercadopago" for r in _account_rows(identity)):
         raise HTTPException(status_code=409, detail="Cancel the active subscription before subscribing again")
     # Reuse pending checkouts to avoid duplicate subscriptions on retry.
-    pending = next((r for r in _account_rows(identity) if r["status"] == "pending" and r["plan"] == body.plan), None)
+    pending = next((r for r in _account_rows(identity) if r["status"] == "pending" and r["plan"] == body.plan and r["provider"] == "mercadopago"), None)
     if pending:
         # A previous request may have timed out after the provider was created
         # but before durable linkage completed. Persist it again before exposing a URL.
@@ -987,13 +1024,6 @@ async def _checkout_for_identity(body: SubscriptionCheckoutRequest, identity: di
         return {"userId": identity["id"], "checkoutRef": pending["checkout_ref"],
                 "amount": pending["amount"], "currency": "BRL", "status": "pending",
                 "requiresConfirmation": pending["provider"] == "developer", "checkoutUrl": pending["checkout_url"]}
-    if identity["developer"]:
-        checkout_ref = str(uuid.uuid4())
-        _save_checkout(checkout_ref=checkout_ref, customer_ref=identity["id"], provider="developer",
-                       provider_subscription_id=None, checkout_id=None, email=identity["email"],
-                       plan=body.plan, amount=0.0, status="pending", checkout_url=None)
-        return {"userId": identity["id"], "checkoutRef": checkout_ref, "amount": 0.0,
-                "currency": "BRL", "status": "pending", "requiresConfirmation": True, "checkoutUrl": None}
     # All other users keep the environment price and real provider checkout.
     checkout_ref = _orb_signed_checkout_ref(identity["id"])
     result = await create_mercado_pago_checkout(
