@@ -161,37 +161,70 @@ async def bootstrap(authorization: str | None = Header(default=None)):
     try:
         async with asyncio.timeout(BOOTSTRAP_BUDGET_SECONDS):
             identity = await _verified_identity(authorization)
-            # Each RPC derives its account from this same verified JWT. Parallel
-            # reads avoid stacking several 15-second timeouts before showing the sheet.
-            results = await asyncio.gather(
-                _rpc("orb_sync_account_hash", {
+            # All calls use this verified identity/JWT. In particular, a known
+            # active courtesy must not wait for provider reconciliation or a
+            # nonessential configuration/account-hash RPC to finish.
+            tasks = [
+                asyncio.create_task(_rpc("orb_sync_account_hash", {
                     "p_account_hash": hashlib.sha256(identity["email"].encode("utf-8")).hexdigest(),
-                }, authorization=authorization),
-                _rpc("orb_my_entitlement", authorization=authorization),
-                _remote_config(),
-                # Known account links still receive provider verification. A broad
-                # legacy payer-email search cannot block every app bootstrap.
-                subscription_for_identity(identity, authorization, allow_legacy_recovery=False),
-                return_exceptions=True,
-            )
-            for result in results:
-                if isinstance(result, BaseException):
-                    raise result
-            _, override, config, subscription = results
-            if override is not None and not isinstance(override, dict):
-                raise HTTPException(503, detail="Invalid entitlement response")
-            billing = {
-                "premium": subscription["premium"],
-                "plan": subscription.get("premiumPlan"),
-                "updatedAt": subscription.get("updatedAt"),
-                "renewsAt": subscription.get("nextRenewalAt"),
-            }
-            return {
-                "schemaVersion": 1,
-                "userId": identity["id"],
-                "entitlement": _resolve_entitlement(billing, override),
-                "config": config,
-                "serverTime": _now(),
-            }
+                }, authorization=authorization)),
+                asyncio.create_task(_rpc("orb_my_entitlement", authorization=authorization)),
+                asyncio.create_task(_remote_config()),
+                # Paid accounts still require provider verification. Only a
+                # verified, unexpired courtesy may bypass that dependency.
+                asyncio.create_task(subscription_for_identity(
+                    identity, authorization, allow_legacy_recovery=False,
+                )),
+            ]
+            try:
+                override = await tasks[1]
+                if override is not None and not isinstance(override, dict):
+                    raise HTTPException(503, detail="Invalid entitlement response")
+
+                # An entitlement granted by the account-scoped Supabase RPC is
+                # already sufficient proof. Do not turn it into a 503 because
+                # Mercado Pago or an optional remote-config request timed out.
+                expiry = _parse_expiry(override.get("premium_expires_at")) if isinstance(override, dict) else None
+                verified_courtesy = bool(
+                    isinstance(override, dict)
+                    and override.get("premium_override") is True
+                    and (expiry is None or expiry > datetime.now(timezone.utc))
+                )
+                if verified_courtesy:
+                    try:
+                        config = await asyncio.wait_for(asyncio.shield(tasks[2]), timeout=1.0)
+                    except (TimeoutError, httpx.HTTPError, HTTPException, ValueError, TypeError):
+                        config = dict(DEFAULT_CONFIG)
+                    # Keep the account hash synchronized when quickly possible,
+                    # but never block an already verified courtesy on it.
+                    try:
+                        await asyncio.wait_for(asyncio.shield(tasks[0]), timeout=0.5)
+                    except (TimeoutError, httpx.HTTPError, HTTPException, ValueError, TypeError):
+                        pass
+                    billing: dict[str, Any] = {"premium": False}
+                else:
+                    subscription = await tasks[3]
+                    billing = {
+                        "premium": subscription["premium"],
+                        "plan": subscription.get("premiumPlan"),
+                        "updatedAt": subscription.get("updatedAt"),
+                        "renewsAt": subscription.get("nextRenewalAt"),
+                    }
+                    try:
+                        config = await tasks[2]
+                    except (httpx.HTTPError, HTTPException, ValueError, TypeError):
+                        config = dict(DEFAULT_CONFIG)
+                return {
+                    "schemaVersion": 1,
+                    "userId": identity["id"],
+                    "entitlement": _resolve_entitlement(billing, override),
+                    "config": config,
+                    "serverTime": _now(),
+                }
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
     except (TimeoutError, httpx.HTTPError, ValueError, TypeError) as exc:
         raise HTTPException(503, detail={"code": "CONTROL_BOOTSTRAP_UNAVAILABLE"}) from exc
