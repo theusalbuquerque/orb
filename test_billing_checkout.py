@@ -42,6 +42,8 @@ def service(monkeypatch, tmp_path):
         if path.endswith('/orb_current_courtesy_entitlement'):
             if state['slow']:
                 await asyncio.sleep(.1)
+            if state.get('courtesy_fail'):
+                return httpx.Response(503, json={})
             return httpx.Response(200, json={'premium': state['courtesy']})
         if path.endswith('/orb_billing_store_checkout_link'):
             state['persisted'] += 1
@@ -50,9 +52,13 @@ def service(monkeypatch, tmp_path):
         if path.endswith('/orb_my_entitlement'):
             return httpx.Response(200, json=state['override'])
         if path.endswith('/orb_sync_account_hash'):
+            if state.get('sync_fail'):
+                return httpx.Response(503, json={})
             state['synced_hash'] = json.loads(request.content)['p_account_hash']
             return httpx.Response(200, json=None)
         if path.endswith('/orb_remote_config'):
+            if state.get('config_fail'):
+                return httpx.Response(503, json={})
             return httpx.Response(200, json={'orbSwitchEnabled': False, 'refreshIntervalSeconds': 90})
         if path.endswith('/orb_billing_checkout_links'):
             if state.get('links_fail'):
@@ -176,6 +182,35 @@ def test_courtesy_is_available_without_mercado_pago(service):
     assert response.status_code == 200, response.text
     assert response.json()['premium'] is True
     assert state['provider_reads'] == 0
+
+
+def test_verified_manual_courtesy_survives_optional_service_failures(service):
+    client, state = service
+    state['override'] = {
+        'premium_override': True, 'premium_plan': 'yearly',
+        'premium_source': 'manual', 'premium_expires_at': None,
+    }
+    state['courtesy_fail'] = True
+    state['sync_fail'] = True
+    state['config_fail'] = True
+    response = client.get('/api/control/bootstrap', headers=AUTH)
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result['entitlement']['premium'] is True
+    assert result['entitlement']['plan'] == 'yearly'
+    assert result['entitlement']['source'] == 'manual'
+    assert result['config'] == control.DEFAULT_CONFIG
+
+
+def test_expired_manual_courtesy_never_activates_premium(service):
+    client, state = service
+    state['override'] = {
+        'premium_override': True, 'premium_plan': 'yearly',
+        'premium_source': 'manual', 'premium_expires_at': '2020-01-01T00:00:00Z',
+    }
+    response = client.get('/api/control/bootstrap', headers=AUTH)
+    assert response.status_code == 200, response.text
+    assert response.json()['entitlement']['premium'] is False
 
 
 def test_expired_courtesy_does_not_revoke_paid_subscription():
