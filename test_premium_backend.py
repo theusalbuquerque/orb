@@ -43,7 +43,9 @@ def load_functions(*names: str) -> dict[str, Any]:
         "SUPABASE_KEY": "public-key",
         "SUPABASE_URL": "https://example.supabase.co",
         "_owner_count_snapshot": None,
-        "_billing_logger": type("Logger", (), {"warning": lambda *_: None})(),
+        "_billing_logger": type(
+            "Logger", (), {"warning": lambda *_: None, "info": lambda *_: None}
+        )(),
     }
     exec(compile(module, str(Path(__file__).with_name("billing_api.py")), "exec"), env)
     return env

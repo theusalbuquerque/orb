@@ -673,6 +673,22 @@ async def _provider_active_orb_subscriptions() -> list[dict[str, str]]:
     if not MP_ACCESS_TOKEN:
         raise HTTPException(status_code=503, detail="Mercado Pago is not configured")
     accepted: dict[str, dict[str, str]] = {}
+    # Aggregate diagnostics only. Never log payer information or provider IDs.
+    scan_stats = {
+        "returned": 0, "authorized": 0, "orb_product": 0,
+        "recurring_valid": 0, "accepted": 0,
+    }
+
+    def finish() -> list[dict[str, str]]:
+        scan_stats["accepted"] = len(accepted)
+        _billing_logger.info(
+            "Premium owner provider scan returned=%s authorized=%s orb_product=%s "
+            "recurring_valid=%s accepted=%s",
+            scan_stats["returned"], scan_stats["authorized"],
+            scan_stats["orb_product"], scan_stats["recurring_valid"],
+            scan_stats["accepted"],
+        )
+        return list(accepted.values())
     # Mercado Pago's documented search response uses 20 items per page. Do not
     # assume the requested page size was honored: that used to silently stop
     # the scan after the first 20 results while reporting an incomplete count.
@@ -699,13 +715,19 @@ async def _provider_active_orb_subscriptions() -> list[dict[str, str]]:
                 for sub in entries:
                     if not isinstance(sub, dict):
                         continue
-                    if sub.get("status") != "authorized" or str(sub.get("reason") or "").strip() != "Orb Premium":
+                    scan_stats["returned"] += 1
+                    if sub.get("status") != "authorized":
                         continue
+                    scan_stats["authorized"] += 1
+                    if str(sub.get("reason") or "").strip() != "Orb Premium":
+                        continue
+                    scan_stats["orb_product"] += 1
                     terms = sub.get("auto_recurring") or {}
                     if not isinstance(terms, dict) or terms.get("currency_id") != "BRL":
                         continue
                     if terms.get("frequency_type") != "months" or terms.get("frequency") not in (1, 12):
                         continue
+                    scan_stats["recurring_valid"] += 1
                     provider_id = str(sub.get("id") or "").strip()
                     if not provider_id:
                         continue
@@ -728,12 +750,12 @@ async def _provider_active_orb_subscriptions() -> list[dict[str, str]]:
                 if not entries:
                     if type(total) is int and offset < total:
                         raise HTTPException(status_code=503, detail="Premium count pagination incomplete")
-                    return list(accepted.values())
+                    return finish()
                 offset += len(entries)
                 if (type(total) is int and offset >= total) or (
                     total is None and len(entries) < page_size
                 ):
-                    return list(accepted.values())
+                    return finish()
             except (httpx.HTTPError, ValueError, TypeError) as exc:
                 _billing_logger.warning(
                     "Premium count Mercado Pago scan error=%s offset=%s",
