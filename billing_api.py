@@ -673,13 +673,18 @@ async def _provider_active_orb_subscriptions() -> list[dict[str, str]]:
     if not MP_ACCESS_TOKEN:
         raise HTTPException(status_code=503, detail="Mercado Pago is not configured")
     accepted: dict[str, dict[str, str]] = {}
+    # Mercado Pago's documented search response uses 20 items per page. Do not
+    # assume the requested page size was honored: that used to silently stop
+    # the scan after the first 20 results while reporting an incomplete count.
+    page_size = 20
+    offset = 0
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-        for offset in range(0, 1000, 100):
+        for _ in range(50):
             try:
                 response = await client.get(
                     f"{MP_API}/preapproval/search",
                     headers={"Authorization": f"Bearer {MP_ACCESS_TOKEN}"},
-                    params={"limit": 100, "offset": offset},
+                    params={"limit": page_size, "offset": offset},
                 )
                 if response.status_code != 200:
                     _billing_logger.warning(
@@ -714,8 +719,20 @@ async def _provider_active_orb_subscriptions() -> list[dict[str, str]]:
                             "external_reference": str(sub.get("external_reference") or ""),
                         }
                 paging = data.get("paging") or {}
-                total = paging.get("total") if isinstance(paging, dict) else None
-                if len(entries) < 100 or (isinstance(total, int) and offset + len(entries) >= total):
+                if not isinstance(paging, dict):
+                    raise HTTPException(status_code=503, detail="Premium count pagination unavailable")
+                total = paging.get("total")
+                returned_limit = paging.get("limit")
+                if type(returned_limit) is int and returned_limit > 0:
+                    page_size = min(returned_limit, 100)
+                if not entries:
+                    if type(total) is int and offset < total:
+                        raise HTTPException(status_code=503, detail="Premium count pagination incomplete")
+                    return list(accepted.values())
+                offset += len(entries)
+                if (type(total) is int and offset >= total) or (
+                    total is None and len(entries) < page_size
+                ):
                     return list(accepted.values())
             except (httpx.HTTPError, ValueError, TypeError) as exc:
                 _billing_logger.warning(
@@ -897,10 +914,19 @@ async def owner_active_premium_count(
             snapshot = stored
             _owner_count_snapshot = stored
 
-    if snapshot and _owner_count_snapshot_age(snapshot) <= OWNER_COUNT_MAX_STALE_SECONDS:
+    if snapshot:
+        # A previously verified count must survive a provider outage or a
+        # Render restart. Age changes freshness, never the validity of the
+        # last confirmed snapshot; the refresh runs without delaying the UI.
         stale = _owner_count_snapshot_age(snapshot) >= OWNER_COUNT_REFRESH_SECONDS
         if stale:
-            await _begin_owner_count_refresh(authorization)
+            try:
+                await _begin_owner_count_refresh(authorization)
+            except Exception as exc:
+                _billing_logger.warning(
+                    "Premium owner count refresh scheduling failed: %s",
+                    type(exc).__name__,
+                )
         return {"userId": identity["id"], **snapshot, "stale": stale}
 
     # No previously verified snapshot: give a first-time scan a short head start,
@@ -1727,4 +1753,3 @@ async def billing_return(provider: str, result: str | None = None):
         "result": result or "returned",
         "message": "Pagamento processado. Você já pode voltar ao Orb.",
     }
-

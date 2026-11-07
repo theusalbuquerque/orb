@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -78,6 +79,19 @@ class PremiumBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["activePremiumUsers"], 3)
         self.assertTrue(result["stale"])
         e["_begin_owner_count_refresh"].assert_awaited_once()
+
+    async def test_old_verified_count_survives_provider_outage(self):
+        e = load_functions("owner_active_premium_count", "_owner_count_snapshot_age")
+        e["_verified_identity"] = AsyncMock(return_value={"id": "owner", "developer": True})
+        e["_load_persisted_owner_count"] = AsyncMock(return_value=snapshot(60 * 48))
+        e["_begin_owner_count_refresh"] = AsyncMock(
+            side_effect=RuntimeError("provider temporarily unavailable")
+        )
+        # A previously verified count is still safe to display as stale.
+        # Refresh scheduling errors must not discard it.
+        result = await e["owner_active_premium_count"]("Bearer test")
+        self.assertEqual(result["activePremiumUsers"], 3)
+        self.assertTrue(result["stale"])
 
     async def test_owner_only_count(self):
         e = load_functions("owner_active_premium_count")
@@ -169,6 +183,49 @@ class PremiumBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(count["courtesyPremiumUsers"], 1)
         self.assertEqual(count["unlinkedPaidSubscriptions"], 0)
         e["_save_persisted_owner_count"].assert_awaited_once()
+
+    async def test_provider_scan_reads_all_pages_and_filters_invalid_subscriptions(self):
+        e = load_functions("_provider_active_orb_subscriptions")
+        e["math"] = math
+        e["MP_ACCESS_TOKEN"] = "test-provider-token"
+        e["MP_API"] = "https://api.example.test"
+        e["REQUEST_TIMEOUT"] = None
+
+        def subscription(i: int):
+            return {
+                "id": f"mp-{i}",
+                "status": "canceled" if i == 2 else "authorized",
+                "reason": "Not Orb" if i == 3 else "Orb Premium",
+                "external_reference": f"owner-{i}",
+                "auto_recurring": {
+                    "frequency": 1, "frequency_type": "months",
+                    "currency_id": "BRL", "transaction_amount": 6.97,
+                },
+            }
+
+        calls = []
+        class Response:
+            status_code = 200
+            def __init__(self, offset):
+                self.offset = offset
+            def json(self):
+                return {
+                    "results": [subscription(i) for i in range(self.offset, min(self.offset+20, 24))],
+                    "paging": {"limit": 20, "offset": self.offset, "total": 24},
+                }
+        class Client:
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *_):
+                return None
+            async def get(self, _, *, headers, params):
+                calls.append(params.copy())
+                return Response(params["offset"])
+        e["httpx"] = SimpleNamespace(AsyncClient=lambda **_: Client(), HTTPError=OSError)
+        subs = await e["_provider_active_orb_subscriptions"]()
+        self.assertEqual(calls, [{"limit": 20, "offset": 0}, {"limit": 20, "offset": 20}])
+        self.assertEqual(len(subs), 22)
+        self.assertIn("mp-23", {s["id"] for s in subs})
 
 
 if __name__ == "__main__":
