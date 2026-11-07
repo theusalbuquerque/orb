@@ -151,6 +151,33 @@ def test_bootstrap_recovers_signed_persisted_paid_subscription(service):
     assert result.json()['entitlement']['plan'] == 'monthly'
 
 
+def test_bootstrap_does_not_require_legacy_provider_search_for_free_accounts(service):
+    client, state = service
+    state['search_fail'] = True
+    result = client.get('/api/control/bootstrap', headers=AUTH)
+    assert result.status_code == 200, result.text
+    assert result.json()['entitlement']['premium'] is False
+    # Full status verification keeps the slow legacy recovery path and reports
+    # its provider outage instead of declaring the payment invalid.
+    assert client.get('/api/billing/subscription', headers=AUTH).status_code == 503
+
+
+def test_courtesy_is_available_without_mercado_pago(service):
+    client, state = service
+    state['courtesy'] = True
+    state['provider_network_fail'] = True
+    state['search_fail'] = True
+    save_pending()
+    response = client.get('/api/control/bootstrap', headers=AUTH)
+    assert response.status_code == 200, response.text
+    assert response.json()['entitlement']['premium'] is True
+    assert state['provider_reads'] == 0
+    response = client.get('/api/billing/subscription', headers=AUTH)
+    assert response.status_code == 200, response.text
+    assert response.json()['premium'] is True
+    assert state['provider_reads'] == 0
+
+
 def test_expired_courtesy_does_not_revoke_paid_subscription():
     result = control._resolve_entitlement({'premium': True, 'plan': 'monthly'},
         {'premium_override': True, 'premium_expires_at': '2020-01-01T00:00:00Z'})

@@ -169,7 +169,9 @@ async def bootstrap(authorization: str | None = Header(default=None)):
                 }, authorization=authorization),
                 _rpc("orb_my_entitlement", authorization=authorization),
                 _remote_config(),
-                subscription_for_identity(identity, authorization),
+                # Known account links still receive provider verification. A broad
+                # legacy payer-email search cannot block every app bootstrap.
+                subscription_for_identity(identity, authorization, allow_legacy_recovery=False),
                 return_exceptions=True,
             )
             for result in results:

@@ -960,14 +960,26 @@ async def _next_renewal_for_account(identity: dict[str, Any]) -> str | None:
         return None
 
 
-async def subscription_for_identity(identity: dict[str, Any], authorization: str | None) -> dict[str, Any]:
-    """Resolve paid/courtesy access for a server-verified Orb user, not the payer email."""
+async def subscription_for_identity(
+    identity: dict[str, Any],
+    authorization: str | None,
+    *,
+    allow_legacy_recovery: bool = True,
+) -> dict[str, Any]:
+    """Resolve verified account access; keep slower legacy recovery off app startup."""
     courtesy = await _verified_courtesy_entitlement(authorization)
+
+    # A valid, unexpired courtesy grant is already verified by Supabase.
+    # Never make its recognition depend on Mercado Pago availability.
+    if courtesy["premium"]:
+        return _subscription_state(identity, courtesy)
+
     await _reconcile_mp_account(identity)
-    if not courtesy["premium"]:
+    if not _subscription_state(identity)["premium"]:
         await _recover_persisted_mp_link(identity, authorization)
-        if not _subscription_state(identity)["premium"]:
-            await _recover_mp_subscription_by_email(identity)
+    if allow_legacy_recovery and not _subscription_state(identity)["premium"]:
+        await _recover_mp_subscription_by_email(identity)
+
     state = _subscription_state(identity, courtesy)
     state["nextRenewalAt"] = await _next_renewal_for_account(identity)
     return state
