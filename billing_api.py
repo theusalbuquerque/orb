@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import logging
 import math
 import os
 import sqlite3
@@ -22,6 +23,14 @@ MP_API = "https://api.mercadopago.com"
 ASAAS_API = os.getenv("ASAAS_API_BASE_URL", "https://api.asaas.com/v3").rstrip("/")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://orb-4mrh.onrender.com").rstrip("/")
 REQUEST_TIMEOUT = httpx.Timeout(25.0, connect=10.0)
+OWNER_COUNT_REFRESH_SECONDS = 300
+OWNER_COUNT_MAX_STALE_SECONDS = 86400
+OWNER_COUNT_INITIAL_WAIT_SECONDS = 7.0
+OWNER_COUNT_RPC_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
+_owner_count_snapshot: dict[str, Any] | None = None
+_owner_count_refresh_task: asyncio.Task[dict[str, Any]] | None = None
+_owner_count_refresh_lock = asyncio.Lock()
+_billing_logger = logging.getLogger("orb.billing")
 
 MP_ACCESS_TOKEN = os.getenv("MERCADO_PAGO_ACCESS_TOKEN", "").strip()
 MP_WEBHOOK_SECRET = os.getenv("MERCADO_PAGO_WEBHOOK_SECRET", "").strip()
@@ -673,6 +682,10 @@ async def _provider_active_orb_subscriptions() -> list[dict[str, str]]:
                     params={"limit": 100, "offset": offset},
                 )
                 if response.status_code != 200:
+                    _billing_logger.warning(
+                        "Premium count Mercado Pago scan status=%s offset=%s",
+                        response.status_code, offset,
+                    )
                     raise HTTPException(status_code=503, detail="Premium count unavailable from provider")
                 data = response.json()
                 entries = data.get("results") if isinstance(data, dict) else None
@@ -705,81 +718,202 @@ async def _provider_active_orb_subscriptions() -> list[dict[str, str]]:
                 if len(entries) < 100 or (isinstance(total, int) and offset + len(entries) >= total):
                     return list(accepted.values())
             except (httpx.HTTPError, ValueError, TypeError) as exc:
+                _billing_logger.warning(
+                    "Premium count Mercado Pago scan error=%s offset=%s",
+                    type(exc).__name__, offset,
+                )
                 raise HTTPException(status_code=503, detail="Premium count unavailable from provider") from exc
     raise HTTPException(status_code=503, detail="Premium count temporarily exceeds scan capacity")
+
+
+def _normalize_owner_count_snapshot(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    fields = (
+        "activePremiumUsers", "paidPremiumUsers", "courtesyPremiumUsers",
+        "unlinkedPaidSubscriptions",
+    )
+    if any(type(value.get(field)) is not int or value[field] < 0 for field in fields):
+        return None
+    if not max(value["paidPremiumUsers"], value["courtesyPremiumUsers"]) <= value["activePremiumUsers"] <= (
+        value["paidPremiumUsers"] + value["courtesyPremiumUsers"]
+    ):
+        return None
+    if value["unlinkedPaidSubscriptions"] > value["paidPremiumUsers"]:
+        return None
+    try:
+        updated = datetime.fromisoformat(str(value["updatedAt"]).replace("Z", "+00:00"))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if updated.tzinfo is None:
+        return None
+    return {**{field: value[field] for field in fields},
+            "updatedAt": updated.astimezone(timezone.utc).isoformat()}
+
+
+def _owner_count_snapshot_age(value: dict[str, Any]) -> float:
+    updated = datetime.fromisoformat(value["updatedAt"])
+    return max(0.0, (datetime.now(timezone.utc) - updated).total_seconds())
+
+
+def _owner_count_headers(authorization: str) -> dict[str, str]:
+    return {
+        "apikey": SUPABASE_KEY, "Authorization": authorization,
+        "Content-Type": "application/json",
+    }
+
+
+async def _load_persisted_owner_count(authorization: str) -> dict[str, Any] | None:
+    try:
+        async with httpx.AsyncClient(timeout=OWNER_COUNT_RPC_TIMEOUT) as client:
+            response = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/orb_owner_premium_count_snapshot_get",
+                headers=_owner_count_headers(authorization), json={},
+            )
+        if response.status_code != 200:
+            _billing_logger.warning("Premium owner count cache read status=%s", response.status_code)
+            return None
+        return _normalize_owner_count_snapshot(response.json())
+    except (httpx.HTTPError, ValueError, TypeError):
+        _billing_logger.warning("Premium owner count cache read unavailable")
+        return None
+
+
+async def _save_persisted_owner_count(authorization: str, snapshot: dict[str, Any]) -> None:
+    try:
+        async with httpx.AsyncClient(timeout=OWNER_COUNT_RPC_TIMEOUT) as client:
+            response = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/orb_owner_premium_count_snapshot_save",
+                headers=_owner_count_headers(authorization),
+                json={
+                    "p_active": snapshot["activePremiumUsers"],
+                    "p_paid": snapshot["paidPremiumUsers"],
+                    "p_courtesy": snapshot["courtesyPremiumUsers"],
+                    "p_unlinked": snapshot["unlinkedPaidSubscriptions"],
+                },
+            )
+        if response.status_code != 200:
+            _billing_logger.warning("Premium owner count cache write status=%s", response.status_code)
+    except (httpx.HTTPError, ValueError, TypeError):
+        _billing_logger.warning("Premium owner count cache write unavailable")
+
+
+async def _refresh_verified_owner_count(authorization: str) -> dict[str, Any]:
+    """Only a fully verified provider scan may replace the last good snapshot."""
+    global _owner_count_snapshot
+    async with asyncio.timeout(55.0):
+        async def load_owners() -> tuple[list[Any], list[Any]]:
+            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+                courtesy_response, links_response = await asyncio.gather(
+                    client.post(
+                        f"{SUPABASE_URL}/rest/v1/rpc/orb_owner_active_courtesy_user_ids",
+                        headers=_owner_count_headers(authorization), json={},
+                    ),
+                    client.post(
+                        f"{SUPABASE_URL}/rest/v1/rpc/orb_owner_billing_link_map",
+                        headers=_owner_count_headers(authorization), json={},
+                    ),
+                )
+            if courtesy_response.status_code != 200 or links_response.status_code != 200:
+                raise HTTPException(503, detail="Premium owner count entitlement lookup unavailable")
+            courtesy_ids, links = courtesy_response.json(), links_response.json()
+            if not isinstance(courtesy_ids, list) or not isinstance(links, list):
+                raise HTTPException(503, detail="Premium owner count entitlement lookup unavailable")
+            if not all(isinstance(uid, str) for uid in courtesy_ids):
+                raise HTTPException(503, detail="Premium owner count entitlement lookup unavailable")
+            return courtesy_ids, links
+
+        (courtesy_ids, persisted_links), provider_subscriptions = await asyncio.gather(
+            load_owners(), _provider_active_orb_subscriptions()
+        )
+        link_owners = {
+            str(item["provider_subscription_id"]): str(item["user_id"])
+            for item in persisted_links
+            if isinstance(item, dict) and item.get("provider_subscription_id") and item.get("user_id")
+        }
+        with _db() as conn:
+            local_owners = {
+                str(row["provider_subscription_id"]): str(row["customer_ref"])
+                for row in conn.execute(
+                    "SELECT provider_subscription_id, customer_ref FROM billing_subscriptions "
+                    "WHERE provider='mercadopago' AND provider_subscription_id IS NOT NULL"
+                ).fetchall()
+            }
+        paid_owners: set[str] = set()
+        unlinked_count = 0
+        for subscription in provider_subscriptions:
+            provider_id = subscription["id"]
+            # Signed checkout refs take priority over persisted account mappings.
+            owner = (_orb_signed_ref_owner(subscription["external_reference"])
+                     or link_owners.get(provider_id) or local_owners.get(provider_id))
+            if not owner:
+                # Count legacy provider subscriptions without granting account access.
+                owner = f"legacy-mp:{provider_id}"
+                unlinked_count += 1
+            paid_owners.add(owner)
+        snapshot = {
+            "activePremiumUsers": len(set(courtesy_ids) | paid_owners),
+            "paidPremiumUsers": len(paid_owners),
+            "courtesyPremiumUsers": len(set(courtesy_ids)),
+            "unlinkedPaidSubscriptions": unlinked_count,
+            "updatedAt": _now(),
+        }
+    _owner_count_snapshot = snapshot
+    # Durability is best-effort; the latest verified in-memory result remains valid.
+    await _save_persisted_owner_count(authorization, snapshot)
+    return snapshot
+
+
+async def _begin_owner_count_refresh(authorization: str) -> asyncio.Task[dict[str, Any]]:
+    global _owner_count_refresh_task
+    async with _owner_count_refresh_lock:
+        if _owner_count_refresh_task is None or _owner_count_refresh_task.done():
+            _owner_count_refresh_task = asyncio.create_task(
+                _refresh_verified_owner_count(authorization)
+            )
+            # Background refreshes can finish after the owner closes the sheet.
+            _owner_count_refresh_task.add_done_callback(
+                lambda task: task.exception() if not task.cancelled() else None
+            )
+        return _owner_count_refresh_task
 
 
 @router.get("/owner/active-premium-count")
 async def owner_active_premium_count(
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """Count provider-confirmed paying users plus active complimentary grants."""
+    """Fast, owner-only snapshot; refresh Mercado Pago without blocking the sheet."""
+    global _owner_count_snapshot
     identity = await _verified_identity(authorization)
     if not identity["developer"]:
         raise HTTPException(status_code=403, detail="Owner access required")
     if not SUPABASE_KEY or not authorization:
         raise HTTPException(status_code=503, detail="Premium count temporarily unavailable")
+
+    snapshot = _owner_count_snapshot
+    if snapshot is None:
+        stored = await _load_persisted_owner_count(authorization)
+        if stored:
+            snapshot = stored
+            _owner_count_snapshot = stored
+
+    if snapshot and _owner_count_snapshot_age(snapshot) <= OWNER_COUNT_MAX_STALE_SECONDS:
+        stale = _owner_count_snapshot_age(snapshot) >= OWNER_COUNT_REFRESH_SECONDS
+        if stale:
+            await _begin_owner_count_refresh(authorization)
+        return {"userId": identity["id"], **snapshot, "stale": stale}
+
+    # No previously verified snapshot: give a first-time scan a short head start,
+    # but leave it running after the Android request times out.
+    task = await _begin_owner_count_refresh(authorization)
     try:
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            responses = await __import__("asyncio").gather(
-                client.post(
-                    f"{SUPABASE_URL}/rest/v1/rpc/orb_owner_active_courtesy_user_ids",
-                    headers={"apikey": SUPABASE_KEY, "Authorization": authorization},
-                    json={},
-                ),
-                client.post(
-                    f"{SUPABASE_URL}/rest/v1/rpc/orb_owner_billing_link_map",
-                    headers={"apikey": SUPABASE_KEY, "Authorization": authorization},
-                    json={},
-                ),
-            )
-        if any(resp.status_code != 200 for resp in responses):
-            raise HTTPException(status_code=503, detail="Premium count temporarily unavailable")
-        courtesy_ids, persisted_links = [resp.json() for resp in responses]
-        if not isinstance(courtesy_ids, list) or not isinstance(persisted_links, list):
-            raise HTTPException(status_code=503, detail="Premium count temporarily unavailable")
-        if not all(isinstance(uid, str) for uid in courtesy_ids):
-            raise HTTPException(status_code=503, detail="Premium count temporarily unavailable")
-    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        snapshot = await asyncio.wait_for(
+            asyncio.shield(task), timeout=OWNER_COUNT_INITIAL_WAIT_SECONDS
+        )
+        return {"userId": identity["id"], **snapshot, "stale": False}
+    except (TimeoutError, HTTPException, httpx.HTTPError, ValueError, TypeError) as exc:
+        _billing_logger.warning("Premium owner count has no verified snapshot: %s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="Premium count temporarily unavailable") from exc
-
-    link_owners = {
-        str(item["provider_subscription_id"]): str(item["user_id"])
-        for item in persisted_links
-        if isinstance(item, dict) and item.get("provider_subscription_id") and item.get("user_id")
-    }
-    with _db() as conn:
-        local_owners = {
-            str(row["provider_subscription_id"]): str(row["customer_ref"])
-            for row in conn.execute(
-                "SELECT provider_subscription_id, customer_ref FROM billing_subscriptions "
-                "WHERE provider='mercadopago' AND provider_subscription_id IS NOT NULL"
-            ).fetchall()
-        }
-    provider_subscriptions = await _provider_active_orb_subscriptions()
-    paid_owners: set[str] = set()
-    unlinked_count = 0
-    for subscription in provider_subscriptions:
-        provider_id = subscription["id"]
-        signed_owner = _orb_signed_ref_owner(subscription["external_reference"])
-        # A stored link cannot override the owner cryptographically bound to
-        # the provider reference. Legacy payments remain unlinked if unknown.
-        owner = signed_owner or local_owners.get(provider_id)
-        if not owner:
-            # A legacy UUID-only reference is not sufficient to identify an
-            # Orb account. Count the verified distinct provider subscription
-            # without silently inventing a user ID or granting access.
-            owner = f"legacy-mp:{provider_id}"
-            unlinked_count += 1
-        paid_owners.add(owner)
-    return {
-        "userId": identity["id"],
-        "activePremiumUsers": len(set(courtesy_ids) | paid_owners),
-        "paidPremiumUsers": len(paid_owners),
-        "courtesyPremiumUsers": len(set(courtesy_ids)),
-        "unlinkedPaidSubscriptions": unlinked_count,
-    }
-
 
 async def _reconcile_mp_account(identity: dict[str, Any]) -> None:
     """Reconcile account-owned pending Mercado Pago preapprovals.
@@ -967,6 +1101,13 @@ async def subscription_for_identity(
     allow_legacy_recovery: bool = True,
 ) -> dict[str, Any]:
     """Resolve verified account access; keep slower legacy recovery off app startup."""
+    # A developer preview or a provider-verified active local subscription is
+    # already a known entitlement. A transient Supabase or Mercado Pago delay
+    # must not force a paid user (or the developer) through slow recovery.
+    known = _subscription_state(identity)
+    if known["premium"] and (identity["developer"] or known["billingActive"]):
+        known["nextRenewalAt"] = await _next_renewal_for_account(identity)
+        return known
     courtesy = await _verified_courtesy_entitlement(authorization)
 
     # A valid, unexpired courtesy grant is already verified by Supabase.
@@ -1586,3 +1727,4 @@ async def billing_return(provider: str, result: str | None = None):
         "result": result or "returned",
         "message": "Pagamento processado. Você já pode voltar ao Orb.",
     }
+
