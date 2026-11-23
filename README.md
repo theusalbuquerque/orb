@@ -1,6 +1,6 @@
 <div align="center">
 <p align="center">
-  <img src="app/src/main/assets/orb_banner.png" alt="Orb Music" width="100%">
+  <img src="docs/orb-banner-v1.8-brisa.jpg" alt="Orb Music" width="100%">
 </p>
 
 [![Latest release](https://img.shields.io/github/v/release/theusalbuquerque/orb?style=for-the-badge&labelColor=0d1117)](https://github.com/theusalbuquerque/orb/releases)
