@@ -224,10 +224,13 @@ class PremiumBackendTests(unittest.IsolatedAsyncioTestCase):
                 calls.append(params.copy())
                 return Response(params["offset"])
         e["httpx"] = SimpleNamespace(AsyncClient=lambda **_: Client(), HTTPError=OSError)
-        subs = await e["_provider_active_orb_subscriptions"]()
+        breakdown = {}
+        subs = await e["_provider_active_orb_subscriptions"](breakdown)
         self.assertEqual(calls, [{"limit": 20, "offset": 0}, {"limit": 20, "offset": 20}])
         self.assertEqual(len(subs), 22)
         self.assertIn("mp-23", {s["id"] for s in subs})
+        self.assertEqual(breakdown["canceledPaidSubscriptions"], 1)
+        self.assertEqual(breakdown["inactivePaidSubscriptions"], 0)
 
 
 if __name__ == "__main__":
