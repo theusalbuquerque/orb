@@ -177,6 +177,13 @@ class PremiumBackendTests(unittest.IsolatedAsyncioTestCase):
         ])
         e["_db"] = Connection
         e["_orb_signed_ref_owner"] = lambda _: None
+        # The backend's separate account aggregation is independently tested.
+        e["_premium_account_count_breakdown"] = lambda *args: {
+            "activePremiumUsers": 2, "paidPremiumUsers": 2,
+            "courtesyPremiumUsers": 1, "unlinkedPaidSubscriptions": 0,
+            "activePaidSubscriptions": 2, "linkedPaidUsers": 2,
+            "overlappingPremiumUsers": 1,
+        }
         e["_now"] = lambda: datetime.now(timezone.utc).isoformat()
         e["_save_persisted_owner_count"] = AsyncMock()
         count = await e["_refresh_verified_owner_count"]("Bearer owner")
@@ -192,6 +199,7 @@ class PremiumBackendTests(unittest.IsolatedAsyncioTestCase):
         e["MP_ACCESS_TOKEN"] = "test-provider-token"
         e["MP_API"] = "https://api.example.test"
         e["REQUEST_TIMEOUT"] = None
+        e["_orb_signed_ref_owner"] = lambda _: None
 
         def subscription(i: int):
             return {
