@@ -536,8 +536,11 @@ def _orb_signed_checkout_ref(user_id: str) -> str:
     user_hex = uuid.UUID(user_id).hex
     nonce = uuid.uuid4().hex
     body = f"orb2_{user_hex}_{nonce}"
+    # A dedicated signing secret survives Mercado Pago credential rotation.
+    # Existing orb2 references signed with the older MP token remain readable.
+    signing_key = os.getenv("ORB_BILLING_LINK_SECRET", "").strip() or MP_ACCESS_TOKEN
     signature = hmac.new(
-        MP_ACCESS_TOKEN.encode("utf-8"),
+        signing_key.encode("utf-8"),
         ("orb-checkout-v2:" + body).encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()[:32]
@@ -546,15 +549,18 @@ def _orb_signed_checkout_ref(user_id: str) -> str:
 
 def _orb_signed_ref_owner(reference: str) -> str | None:
     import re
-    if not MP_ACCESS_TOKEN or not re.fullmatch(r"orb2_[0-9a-f]{32}_[0-9a-f]{32}_[0-9a-f]{32}", reference):
+    if not re.fullmatch(r"orb2_[0-9a-f]{32}_[0-9a-f]{32}_[0-9a-f]{32}", reference):
         return None
     unsigned, actual = reference.rsplit("_", 1)
-    expected = hmac.new(
-        MP_ACCESS_TOKEN.encode("utf-8"),
-        ("orb-checkout-v2:" + unsigned).encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()[:32]
-    if not hmac.compare_digest(expected, actual):
+    stable_key = os.getenv("ORB_BILLING_LINK_SECRET", "").strip()
+    # Legacy checkouts were signed with MP_ACCESS_TOKEN; never invalidate
+    # them merely because newer checkouts use the permanent Orb secret.
+    keys = tuple(dict.fromkeys(key for key in (stable_key, MP_ACCESS_TOKEN) if key))
+    verified = any(hmac.compare_digest(
+        hmac.new(key.encode("utf-8"), ("orb-checkout-v2:" + unsigned).encode("utf-8"),
+                 hashlib.sha256).hexdigest()[:32], actual
+    ) for key in keys)
+    if not verified:
         return None
     try:
         return str(uuid.UUID(hex=reference.split("_")[1]))
