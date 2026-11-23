@@ -257,7 +257,7 @@ class PremiumBackendTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reconcile_canceled_replaced_by_active_plan(self):
         """Historical canceled contracts must not count a customer who renewed."""
-        e = load_functions("_provider_active_orb_subscriptions")
+        e = load_functions("_premium_current_status_breakdown", "_provider_active_orb_subscriptions")
         e["math"] = math
         e["_orb_signed_ref_owner"] = lambda ref: None
         e["MP_ACCESS_TOKEN"] = "test-token"
@@ -351,7 +351,7 @@ class PremiumBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(counts["canceledPaidSubscriptions"], 1)
 
     async def test_reconcile_missing_recurring_terms_fetches_contract_details(self):
-        e = load_functions("_provider_active_orb_subscriptions")
+        e = load_functions("_premium_current_status_breakdown", "_provider_active_orb_subscriptions")
         e["math"] = math
         e["_orb_signed_ref_owner"] = lambda ref: None
         e["MP_ACCESS_TOKEN"] = "test-token"
