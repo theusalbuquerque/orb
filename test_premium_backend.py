@@ -59,6 +59,7 @@ def snapshot(minutes_ago: int = 0) -> dict[str, Any]:
         "paidPremiumUsers": 2,
         "courtesyPremiumUsers": 1,
         "unlinkedPaidSubscriptions": 0,
+        "reconciliationRevision": 2,
         "updatedAt": (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).isoformat(),
     }
 
