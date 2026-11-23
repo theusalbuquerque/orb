@@ -677,40 +677,64 @@ async def _recover_persisted_mp_link(
 async def _provider_active_orb_subscriptions(
     status_breakdown: dict[str, int] | None = None,
 ) -> list[dict[str, str]]:
-    """Read active subscriptions from Mercado Pago, not Render's ephemeral DB."""
+    """Reconcile current Orb subscriptions with provider-side contract history.
+
+    One payer can have an old canceled preapproval and a newer authorized one.
+    Historical canceled contracts must not be reported as current customer
+    cancellations. Never infer a paying Orb user from payer_email alone.
+    """
     if not MP_ACCESS_TOKEN:
         raise HTTPException(status_code=503, detail="Mercado Pago is not configured")
-    accepted: dict[str, dict[str, str]] = {}
-    # These are provider subscription statuses, not payment-event counts.
-    inactive_ids: set[str] = set()
-    canceled_ids: set[str] = set()
-    # Aggregate diagnostics only. Never log payer information or provider IDs.
-    scan_stats = {
-        "returned": 0, "authorized": 0, "orb_product": 0,
-        "recurring_valid": 0, "accepted": 0,
-    }
 
-    def finish() -> list[dict[str, str]]:
-        if status_breakdown is not None:
-            status_breakdown.update({
-                "inactivePaidSubscriptions": len(inactive_ids),
-                "canceledPaidSubscriptions": len(canceled_ids),
-            })
-        scan_stats["accepted"] = len(accepted)
-        _billing_logger.info(
-            "Premium owner provider scan returned=%s authorized=%s orb_product=%s "
-            "recurring_valid=%s accepted=%s",
-            scan_stats["returned"], scan_stats["authorized"],
-            scan_stats["orb_product"], scan_stats["recurring_valid"],
-            scan_stats["accepted"],
+    def is_orb_product(sub: dict[str, Any]) -> bool:
+        return " ".join(str(sub.get("reason") or "").split()).casefold() == "orb premium"
+
+    def valid_recurring(sub: dict[str, Any]) -> bool:
+        if not is_orb_product(sub):
+            return False
+        terms = sub.get("auto_recurring") or {}
+        if not isinstance(terms, dict):
+            return False
+        # Mercado Pago may serialize recurrence numerically or as a string.
+        if str(terms.get("frequency")) not in ("1", "12"):
+            return False
+        if str(terms.get("frequency_type") or "").casefold() != "months":
+            return False
+        if str(terms.get("currency_id") or "").upper() != "BRL":
+            return False
+        try:
+            amount = float(terms.get("transaction_amount"))
+        except (ValueError, TypeError):
+            return False
+        return math.isfinite(amount) and amount > 0.0
+
+    def payer_tokens(sub: dict[str, Any]) -> list[str]:
+        tokens: list[str] = []
+        email = str(sub.get("payer_email") or "").strip().casefold()
+        if email and "@" in email:
+            tokens.append("email:" + email)
+        raw_payer_id = sub.get("payer_id")
+        if raw_payer_id is not None and str(raw_payer_id).strip():
+            tokens.append("mp:" + str(raw_payer_id).strip())
+        # This is a verified Orb checkout reference, not an untrusted email.
+        signed_owner = _orb_signed_ref_owner(
+            str(sub.get("external_reference") or "")
         )
-        return list(accepted.values())
-    # Mercado Pago's documented search response uses 20 items per page. Do not
-    # assume the requested page size was honored: that used to silently stop
-    # the scan after the first 20 results while reporting an incomplete count.
-    page_size = 20
-    offset = 0
+        if signed_owner:
+            tokens.append("orb:" + signed_owner)
+        if not tokens:
+            # Unknown identity: do not merge unrelated contracts just because
+            # their status, creation date, or plan name happens to match.
+            tokens.append("contract:" + str(sub.get("id") or ""))
+        return tokens
+
+    qualified: dict[str, dict[str, Any]] = {}
+    candidate_records: dict[str, dict[str, Any]] = {}
+    scan_stats = {"returned": 0, "authorized": 0, "orb_product": 0}
+
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+        page_size = 20
+        offset = 0
         for _ in range(50):
             try:
                 response = await client.get(
@@ -719,87 +743,173 @@ async def _provider_active_orb_subscriptions(
                     params={"limit": page_size, "offset": offset},
                 )
                 if response.status_code != 200:
-                    _billing_logger.warning(
-                        "Premium count Mercado Pago scan status=%s offset=%s",
-                        response.status_code, offset,
+                    raise HTTPException(
+                        status_code=503, detail="Premium count unavailable from provider"
                     )
-                    raise HTTPException(status_code=503, detail="Premium count unavailable from provider")
                 data = response.json()
                 entries = data.get("results") if isinstance(data, dict) else None
                 if not isinstance(entries, list):
-                    raise HTTPException(status_code=503, detail="Premium count unavailable from provider")
+                    raise HTTPException(
+                        status_code=503, detail="Premium count unavailable from provider"
+                    )
                 for sub in entries:
                     if not isinstance(sub, dict):
                         continue
                     scan_stats["returned"] += 1
-                    provider_status = str(sub.get("status") or "").lower().strip()
-                    # Only count non-active subscriptions that are verifiably
-                    # for Orb Premium and have actual positive recurring terms.
-                    # Pending checkouts are not former paying subscribers.
-                    if provider_status in ("past_due", "expired", "cancelled", "canceled"):
-                        terms = sub.get("auto_recurring") or {}
-                        if (str(sub.get("reason") or "").strip() == "Orb Premium"
-                                and isinstance(terms, dict)
-                                and terms.get("currency_id") == "BRL"
-                                and terms.get("frequency_type") == "months"
-                                and terms.get("frequency") in (1, 12)):
-                            provider_id = str(sub.get("id") or "").strip()
-                            try:
-                                amount = float(terms.get("transaction_amount"))
-                            except (TypeError, ValueError):
-                                amount = 0.0
-                            if provider_id and math.isfinite(amount) and amount > 0:
-                                if provider_status in ("cancelled", "canceled"):
-                                    canceled_ids.add(provider_id)
-                                else:
-                                    inactive_ids.add(provider_id)
-                    if provider_status != "authorized":
-                        continue
-                    scan_stats["authorized"] += 1
-                    if str(sub.get("reason") or "").strip() != "Orb Premium":
+                    if not is_orb_product(sub):
                         continue
                     scan_stats["orb_product"] += 1
-                    terms = sub.get("auto_recurring") or {}
-                    if not isinstance(terms, dict) or terms.get("currency_id") != "BRL":
+                    status = str(sub.get("status") or "").strip().lower()
+                    if status not in ("authorized", "canceled", "cancelled", "past_due", "expired"):
                         continue
-                    if terms.get("frequency_type") != "months" or terms.get("frequency") not in (1, 12):
-                        continue
-                    scan_stats["recurring_valid"] += 1
                     provider_id = str(sub.get("id") or "").strip()
-                    if not provider_id:
-                        continue
-                    try:
-                        amount = float(terms.get("transaction_amount"))
-                    except (TypeError, ValueError):
-                        continue
-                    if math.isfinite(amount) and amount > 0:
-                        accepted[provider_id] = {
-                            "id": provider_id,
-                            "external_reference": str(sub.get("external_reference") or ""),
-                        }
+                    if provider_id:
+                        candidate_records[provider_id] = sub
+
                 paging = data.get("paging") or {}
                 if not isinstance(paging, dict):
-                    raise HTTPException(status_code=503, detail="Premium count pagination unavailable")
+                    raise HTTPException(
+                        status_code=503, detail="Premium count pagination unavailable"
+                    )
                 total = paging.get("total")
                 returned_limit = paging.get("limit")
                 if type(returned_limit) is int and returned_limit > 0:
                     page_size = min(returned_limit, 100)
                 if not entries:
                     if type(total) is int and offset < total:
-                        raise HTTPException(status_code=503, detail="Premium count pagination incomplete")
-                    return finish()
+                        raise HTTPException(
+                            status_code=503, detail="Premium count pagination incomplete"
+                        )
+                    break
                 offset += len(entries)
                 if (type(total) is int and offset >= total) or (
                     total is None and len(entries) < page_size
                 ):
-                    return finish()
+                    break
             except (httpx.HTTPError, ValueError, TypeError) as exc:
                 _billing_logger.warning(
-                    "Premium count Mercado Pago scan error=%s offset=%s",
+                    "Premium Mercado Pago scan failure=%s offset=%s",
                     type(exc).__name__, offset,
                 )
-                raise HTTPException(status_code=503, detail="Premium count unavailable from provider") from exc
-    raise HTTPException(status_code=503, detail="Premium count temporarily exceeds scan capacity")
+                raise HTTPException(
+                    status_code=503, detail="Premium count unavailable from provider"
+                ) from exc
+        else:
+            raise HTTPException(
+                status_code=503, detail="Premium count temporarily exceeds scan capacity"
+            )
+
+        # Search results occasionally omit recurring terms or payer fields.
+        # Verify those records individually rather than silently losing paid
+        # subscriptions or merging canceled contracts with unrelated people.
+        missing_details = [
+            sub for sub in candidate_records.values()
+            if not valid_recurring(sub) or not (
+                sub.get("payer_email") or sub.get("payer_id") or
+                _orb_signed_ref_owner(str(sub.get("external_reference") or ""))
+            )
+        ]
+        if len(missing_details) > 48:
+            raise HTTPException(
+                status_code=503, detail="Premium reconciliation needs provider detail audit"
+            )
+        semaphore = asyncio.Semaphore(6)
+
+        async def fetch_complete(sub: dict[str, Any]) -> dict[str, Any]:
+            async with semaphore:
+                try:
+                    response = await client.get(
+                        f"{MP_API}/preapproval/{sub['id']}",
+                        headers={"Authorization": f"Bearer {MP_ACCESS_TOKEN}"},
+                    )
+                    if response.status_code != 200:
+                        raise HTTPException(
+                            status_code=503, detail="Premium contract detail unavailable"
+                        )
+                    body = response.json()
+                    if not isinstance(body, dict) or str(body.get("id") or "") != str(sub["id"]):
+                        raise HTTPException(
+                            status_code=503, detail="Premium contract detail mismatch"
+                        )
+                    return {**sub, **body}
+                except (httpx.HTTPError, ValueError, TypeError) as exc:
+                    raise HTTPException(
+                        status_code=503, detail="Premium contract detail unavailable"
+                    ) from exc
+
+        if missing_details:
+            resolved = await asyncio.gather(
+                *(fetch_complete(sub) for sub in missing_details)
+            )
+            for sub in resolved:
+                candidate_records[str(sub["id"])] = sub
+
+    for pid, sub in candidate_records.items():
+        if valid_recurring(sub):
+            qualified[pid] = sub
+
+    # Union payer_email, payer_id and signed Orb owner to detect renewals even
+    # when different records have different available identity fields.
+    parent: dict[str, str] = {}
+
+    def root(token: str) -> str:
+        parent.setdefault(token, token)
+        while parent[token] != token:
+            parent[token] = parent[parent[token]]
+            token = parent[token]
+        return token
+
+    def unite(a: str, b: str) -> None:
+        parent[root(a)] = root(b)
+
+    for sub in qualified.values():
+        tokens = payer_tokens(sub)
+        for token in tokens[1:]:
+            unite(tokens[0], token)
+
+    group_statuses: dict[str, set[str]] = {}
+    historical_canceled_ids: set[str] = set()
+    active: dict[str, dict[str, str]] = {}
+    for pid, sub in qualified.items():
+        status = str(sub.get("status") or "").strip().lower()
+        buyer = root(payer_tokens(sub)[0])
+        group_statuses.setdefault(buyer, set()).add(status)
+        if status == "authorized":
+            active[pid] = {
+                "id": pid,
+                "external_reference": str(sub.get("external_reference") or ""),
+            }
+        elif status in ("canceled", "cancelled"):
+            historical_canceled_ids.add(pid)
+
+    # Status canceled in historical contract records != a paying customer
+    # currently without an authorized plan. Two old cancellations by one
+    # payer represent one customer, and an active replacement excludes them.
+    current_cancellations = sum(
+        1 for statuses in group_statuses.values()
+        if ("canceled" in statuses or "cancelled" in statuses)
+        and "authorized" not in statuses
+    )
+    current_inactive = sum(
+        1 for statuses in group_statuses.values()
+        if "authorized" not in statuses
+        and "canceled" not in statuses and "cancelled" not in statuses
+        and ("past_due" in statuses or "expired" in statuses)
+    )
+
+    if status_breakdown is not None:
+        status_breakdown.update({
+            "inactivePaidSubscriptions": current_inactive,
+            "canceledPaidSubscriptions": current_cancellations,
+            "historicalCanceledSubscriptions": len(historical_canceled_ids),
+        })
+    _billing_logger.info(
+        "Premium provider reconciled scan=%s orb=%s active_contracts=%s "
+        "inactive_payers=%s canceled_payers=%s historical_canceled_contracts=%s",
+        scan_stats["returned"], scan_stats["orb_product"], len(active),
+        current_inactive, current_cancellations, len(historical_canceled_ids),
+    )
+    return list(active.values())
 
 
 def _normalize_owner_count_snapshot(value: Any) -> dict[str, Any] | None:
