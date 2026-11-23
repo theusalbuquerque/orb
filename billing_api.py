@@ -674,11 +674,16 @@ async def _recover_persisted_mp_link(
         raise HTTPException(503, detail={"code": "BILLING_RECOVERY_UNAVAILABLE"}) from exc
 
 
-async def _provider_active_orb_subscriptions() -> list[dict[str, str]]:
+async def _provider_active_orb_subscriptions(
+    status_breakdown: dict[str, int] | None = None,
+) -> list[dict[str, str]]:
     """Read active subscriptions from Mercado Pago, not Render's ephemeral DB."""
     if not MP_ACCESS_TOKEN:
         raise HTTPException(status_code=503, detail="Mercado Pago is not configured")
     accepted: dict[str, dict[str, str]] = {}
+    # These are provider subscription statuses, not payment-event counts.
+    inactive_ids: set[str] = set()
+    canceled_ids: set[str] = set()
     # Aggregate diagnostics only. Never log payer information or provider IDs.
     scan_stats = {
         "returned": 0, "authorized": 0, "orb_product": 0,
@@ -686,6 +691,11 @@ async def _provider_active_orb_subscriptions() -> list[dict[str, str]]:
     }
 
     def finish() -> list[dict[str, str]]:
+        if status_breakdown is not None:
+            status_breakdown.update({
+                "inactivePaidSubscriptions": len(inactive_ids),
+                "canceledPaidSubscriptions": len(canceled_ids),
+            })
         scan_stats["accepted"] = len(accepted)
         _billing_logger.info(
             "Premium owner provider scan returned=%s authorized=%s orb_product=%s "
@@ -722,7 +732,28 @@ async def _provider_active_orb_subscriptions() -> list[dict[str, str]]:
                     if not isinstance(sub, dict):
                         continue
                     scan_stats["returned"] += 1
-                    if sub.get("status") != "authorized":
+                    provider_status = str(sub.get("status") or "").lower().strip()
+                    # Only count non-active subscriptions that are verifiably
+                    # for Orb Premium and have actual positive recurring terms.
+                    # Pending checkouts are not former paying subscribers.
+                    if provider_status in ("paused", "past_due", "expired", "cancelled", "canceled"):
+                        terms = sub.get("auto_recurring") or {}
+                        if (str(sub.get("reason") or "").strip() == "Orb Premium"
+                                and isinstance(terms, dict)
+                                and terms.get("currency_id") == "BRL"
+                                and terms.get("frequency_type") == "months"
+                                and terms.get("frequency") in (1, 12)):
+                            provider_id = str(sub.get("id") or "").strip()
+                            try:
+                                amount = float(terms.get("transaction_amount"))
+                            except (TypeError, ValueError):
+                                amount = 0.0
+                            if provider_id and math.isfinite(amount) and amount > 0:
+                                if provider_status in ("cancelled", "canceled"):
+                                    canceled_ids.add(provider_id)
+                                else:
+                                    inactive_ids.add(provider_id)
+                    if provider_status != "authorized":
                         continue
                     scan_stats["authorized"] += 1
                     if str(sub.get("reason") or "").strip() != "Orb Premium":
@@ -914,6 +945,7 @@ async def _refresh_verified_owner_count(authorization: str) -> dict[str, Any]:
     """Only a fully verified provider scan may replace the last good snapshot."""
     global _owner_count_snapshot
     async with asyncio.timeout(55.0):
+        provider_status_counts: dict[str, int] = {}
         async def load_owners() -> tuple[list[Any], list[Any]]:
             async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
                 courtesy_response, links_response = await asyncio.gather(
@@ -936,7 +968,7 @@ async def _refresh_verified_owner_count(authorization: str) -> dict[str, Any]:
             return courtesy_ids, links
 
         (courtesy_ids, persisted_links), provider_subscriptions = await asyncio.gather(
-            load_owners(), _provider_active_orb_subscriptions()
+            load_owners(), _provider_active_orb_subscriptions(provider_status_counts)
         )
         with _db() as conn:
             local_owners = {
@@ -952,6 +984,9 @@ async def _refresh_verified_owner_count(authorization: str) -> dict[str, Any]:
         previous_snapshot = _owner_count_snapshot
         snapshot = {
             **counts,
+            # A missing field means the provider status scan did not return
+            # that metric; never present missing data as zero.
+            **provider_status_counts,
             "updatedAt": _now(),
             "countSource": "provider-verified",
             "providerVerified": True,
