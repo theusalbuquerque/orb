@@ -774,7 +774,10 @@ def _normalize_owner_count_snapshot(value: Any) -> dict[str, Any] | None:
     )
     if any(type(value.get(field)) is not int or value[field] < 0 for field in fields):
         return None
-    if not max(value["paidPremiumUsers"], value["courtesyPremiumUsers"]) <= value["activePremiumUsers"] <= (
+    # paidPremiumUsers is the number of confirmed subscriptions in the
+    # historical snapshot schema, not necessarily the number of identifiable
+    # accounts: one owner may have multiple subscriptions, or none may be linked.
+    if not value["courtesyPremiumUsers"] <= value["activePremiumUsers"] <= (
         value["paidPremiumUsers"] + value["courtesyPremiumUsers"]
     ):
         return None
@@ -837,6 +840,70 @@ async def _save_persisted_owner_count(authorization: str, snapshot: dict[str, An
         _billing_logger.warning("Premium owner count cache write unavailable")
 
 
+def _premium_account_count_breakdown(
+    courtesy_ids: list[str],
+    persisted_links: list[dict[str, Any]],
+    local_owners: dict[str, str],
+    provider_subscriptions: list[dict[str, str]],
+) -> dict[str, int]:
+    """Deduplicate verified Orb accounts without losing unlinked paid records.
+
+    Mercado Pago must confirm subscription status before any linked checkout
+    contributes. A persisted checkout mapping is owner-protected by Supabase.
+    Do not invent an account ID for a legacy unlinked payment.
+    """
+    def account_id(raw: Any) -> str | None:
+        try:
+            return str(uuid.UUID(str(raw)))
+        except (ValueError, TypeError, AttributeError):
+            return None
+
+    courtesy = {value for raw in courtesy_ids if (value := account_id(raw))}
+    persisted: dict[str, set[str]] = {}
+    for link in persisted_links:
+        if not isinstance(link, dict):
+            continue
+        pid = str(link.get("provider_subscription_id") or "").strip()
+        uid = account_id(link.get("user_id"))
+        if pid and uid:
+            persisted.setdefault(pid, set()).add(uid)
+
+    paid_accounts: set[str] = set()
+    payment_ids: set[str] = set()
+    unlinked: set[str] = set()
+    for subscription in provider_subscriptions:
+        pid = str(subscription.get("id") or "").strip()
+        if not pid or pid in payment_ids:
+            continue
+        payment_ids.add(pid)
+        signed = _orb_signed_ref_owner(str(subscription.get("external_reference") or ""))
+        mapped = persisted.get(pid, set())
+        linked = next(iter(mapped)) if len(mapped) == 1 else None
+        # A signed ref takes precedence; ambiguous persisted links cannot
+        # override it. Local SQLite is only fallback when there is no mapping.
+        owner = account_id(
+            signed or linked or (local_owners.get(pid) if not mapped else None)
+        )
+        if owner:
+            paid_accounts.add(owner)
+        else:
+            unlinked.add(pid)
+
+    return {
+        "activePremiumUsers": len(courtesy | paid_accounts),
+        # Legacy snapshot schema: this field counts verified paid subscription
+        # records, including unlinked purchases. Distinct paid user accounts
+        # are returned separately to avoid pretending a subscription is a user.
+        "paidPremiumUsers": len(payment_ids),
+        "linkedPaidUsers": len(paid_accounts),
+        "activePaidSubscriptions": len(payment_ids),
+        "courtesyPremiumUsers": len(courtesy),
+        "overlappingPremiumUsers": len(courtesy & paid_accounts),
+        "unlinkedPaidSubscriptions": len(unlinked),
+        "totalPremiumGrants": len(payment_ids) + len(courtesy),
+    }
+
+
 async def _refresh_verified_owner_count(authorization: str) -> dict[str, Any]:
     """Only a fully verified provider scan may replace the last good snapshot."""
     global _owner_count_snapshot
@@ -865,11 +932,6 @@ async def _refresh_verified_owner_count(authorization: str) -> dict[str, Any]:
         (courtesy_ids, persisted_links), provider_subscriptions = await asyncio.gather(
             load_owners(), _provider_active_orb_subscriptions()
         )
-        link_owners = {
-            str(item["provider_subscription_id"]): str(item["user_id"])
-            for item in persisted_links
-            if isinstance(item, dict) and item.get("provider_subscription_id") and item.get("user_id")
-        }
         with _db() as conn:
             local_owners = {
                 str(row["provider_subscription_id"]): str(row["customer_ref"])
@@ -878,25 +940,28 @@ async def _refresh_verified_owner_count(authorization: str) -> dict[str, Any]:
                     "WHERE provider='mercadopago' AND provider_subscription_id IS NOT NULL"
                 ).fetchall()
             }
-        paid_owners: set[str] = set()
-        unlinked_count = 0
-        for subscription in provider_subscriptions:
-            provider_id = subscription["id"]
-            # Signed checkout refs take priority over persisted account mappings.
-            owner = (_orb_signed_ref_owner(subscription["external_reference"])
-                     or link_owners.get(provider_id) or local_owners.get(provider_id))
-            if not owner:
-                # Count legacy provider subscriptions without granting account access.
-                owner = f"legacy-mp:{provider_id}"
-                unlinked_count += 1
-            paid_owners.add(owner)
+        counts = _premium_account_count_breakdown(
+            courtesy_ids, persisted_links, local_owners, provider_subscriptions
+        )
+        previous_snapshot = _owner_count_snapshot
         snapshot = {
-            "activePremiumUsers": len(set(courtesy_ids) | paid_owners),
-            "paidPremiumUsers": len(paid_owners),
-            "courtesyPremiumUsers": len(set(courtesy_ids)),
-            "unlinkedPaidSubscriptions": unlinked_count,
+            **counts,
             "updatedAt": _now(),
+            "countSource": "provider-verified",
+            "providerVerified": True,
+            "previousSnapshotUsers": (
+                previous_snapshot.get("activePremiumUsers")
+                if previous_snapshot else None
+            ),
         }
+        # Diagnostics expose only aggregates, never user IDs or MP references.
+        _billing_logger.info(
+            "Premium owner reconciled accounts=%s payments=%s paid_accounts=%s "
+            "courtesy=%s overlap=%s unlinked=%s",
+            counts["activePremiumUsers"], counts["activePaidSubscriptions"],
+            counts["linkedPaidUsers"], counts["courtesyPremiumUsers"],
+            counts["overlappingPremiumUsers"], counts["unlinkedPaidSubscriptions"],
+        )
     _owner_count_snapshot = snapshot
     # Durability is best-effort; the latest verified in-memory result remains valid.
     await _save_persisted_owner_count(authorization, snapshot)
@@ -949,7 +1014,16 @@ async def owner_active_premium_count(
                     "Premium owner count refresh scheduling failed: %s",
                     type(exc).__name__,
                 )
-        return {"userId": identity["id"], **snapshot, "stale": stale}
+        return {
+            "userId": identity["id"],
+            **snapshot,
+            "stale": stale,
+            "countSource": (
+                snapshot.get("countSource", "cached-snapshot")
+                if not stale else "cached-snapshot"
+            ),
+            "providerVerified": bool(snapshot.get("providerVerified", False)) and not stale,
+        }
 
     # No previously verified snapshot: give a first-time scan a short head start,
     # but leave it running after the Android request times out.
