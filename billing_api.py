@@ -674,6 +674,117 @@ async def _recover_persisted_mp_link(
         raise HTTPException(503, detail={"code": "BILLING_RECOVERY_UNAVAILABLE"}) from exc
 
 
+def _premium_current_status_breakdown(
+    contracts: list[dict[str, Any]],
+    persisted_links: list[dict[str, Any]] | None = None,
+    local_owners: dict[str, str] | None = None,
+) -> dict[str, int]:
+    """Count CURRENT canceled/inactive customers, never old preapprovals.
+
+    A payer that has any authorized Orb subscription is not canceled,
+    regardless of how many old contracts they canceled. Join identities
+    using the provider's payer id/email and verified Orb checkout ownership;
+    do not guess from name, date or plan. Unknown-identity canceled contracts
+    remain diagnostic-only instead of being called current cancellations.
+    """
+    def uuid_or_none(value: Any) -> str | None:
+        try:
+            return str(uuid.UUID(str(value)))
+        except (TypeError, ValueError, AttributeError):
+            return None
+
+    mapping: dict[str, set[str]] = {}
+    for link in persisted_links or []:
+        if not isinstance(link, dict):
+            continue
+        pid = str(link.get("provider_subscription_id") or "").strip()
+        uid = uuid_or_none(link.get("user_id"))
+        if pid and uid:
+            mapping.setdefault(pid, set()).add(uid)
+
+    parent: dict[str, str] = {}
+
+    def root(value: str) -> str:
+        parent.setdefault(value, value)
+        while parent[value] != value:
+            parent[value] = parent[parent[value]]
+            value = parent[value]
+        return value
+
+    def unite(first: str, second: str) -> None:
+        a, b = root(first), root(second)
+        if a != b:
+            parent[a] = b
+
+    def identity_tokens(contract: dict[str, Any]) -> list[str]:
+        pid = str(contract.get("id") or "").strip()
+        tokens: list[str] = []
+        payer_id = str(contract.get("payer_id") or "").strip()
+        if payer_id:
+            tokens.append("mp:" + payer_id)
+        payer_email = str(contract.get("payer_email") or "").strip().casefold()
+        if payer_email and "@" in payer_email:
+            tokens.append("email:" + payer_email)
+        owner = uuid_or_none(_orb_signed_ref_owner(
+            str(contract.get("external_reference") or "")
+        ))
+        linked_owners = mapping.get(pid, set())
+        if owner is None and len(linked_owners) == 1:
+            owner = next(iter(linked_owners))
+        if owner is None and not linked_owners:
+            owner = uuid_or_none((local_owners or {}).get(pid))
+        if owner:
+            tokens.append("orb:" + owner)
+        return tokens
+
+    grouped: dict[str, set[str]] = {}
+    unresolved_canceled = 0
+    historical_canceled = 0
+    seen: set[str] = set()
+    # First establish the equivalence classes across every verified identity
+    # before assigning contract statuses to a group.
+    indexed: list[tuple[dict[str, Any], list[str]]] = []
+    for contract in contracts:
+        if not isinstance(contract, dict):
+            continue
+        pid = str(contract.get("id") or "").strip()
+        if not pid or pid in seen:
+            continue
+        seen.add(pid)
+        tokens = identity_tokens(contract)
+        indexed.append((contract, tokens))
+        if tokens:
+            for token in tokens[1:]:
+                unite(tokens[0], token)
+
+    for contract, tokens in indexed:
+        status = str(contract.get("status") or "").strip().casefold()
+        if status in ("canceled", "cancelled"):
+            historical_canceled += 1
+        if not tokens:
+            if status in ("canceled", "cancelled"):
+                unresolved_canceled += 1
+            continue
+        grouped.setdefault(root(tokens[0]), set()).add(status)
+
+    canceled = sum(
+        1 for statuses in grouped.values()
+        if "authorized" not in statuses
+        and ("canceled" in statuses or "cancelled" in statuses)
+    )
+    inactive = sum(
+        1 for statuses in grouped.values()
+        if not statuses.intersection(("authorized", "canceled", "cancelled"))
+        and statuses.intersection(("past_due", "expired"))
+    )
+    return {
+        "canceledPaidSubscriptions": canceled,
+        "inactivePaidSubscriptions": inactive,
+        "historicalCanceledSubscriptions": historical_canceled,
+        "unresolvedCanceledSubscriptions": unresolved_canceled,
+    }
+
+
 async def _provider_active_orb_subscriptions(
     status_breakdown: dict[str, int] | None = None,
 ) -> list[dict[str, str]]:
@@ -707,26 +818,6 @@ async def _provider_active_orb_subscriptions(
         except (ValueError, TypeError):
             return False
         return math.isfinite(amount) and amount > 0.0
-
-    def payer_tokens(sub: dict[str, Any]) -> list[str]:
-        tokens: list[str] = []
-        email = str(sub.get("payer_email") or "").strip().casefold()
-        if email and "@" in email:
-            tokens.append("email:" + email)
-        raw_payer_id = sub.get("payer_id")
-        if raw_payer_id is not None and str(raw_payer_id).strip():
-            tokens.append("mp:" + str(raw_payer_id).strip())
-        # This is a verified Orb checkout reference, not an untrusted email.
-        signed_owner = _orb_signed_ref_owner(
-            str(sub.get("external_reference") or "")
-        )
-        if signed_owner:
-            tokens.append("orb:" + signed_owner)
-        if not tokens:
-            # Unknown identity: do not merge unrelated contracts just because
-            # their status, creation date, or plan name happens to match.
-            tokens.append("contract:" + str(sub.get("id") or ""))
-        return tokens
 
     qualified: dict[str, dict[str, Any]] = {}
     candidate_records: dict[str, dict[str, Any]] = {}
@@ -799,17 +890,11 @@ async def _provider_active_orb_subscriptions(
                 status_code=503, detail="Premium count temporarily exceeds scan capacity"
             )
 
-        # Search results occasionally omit recurring terms or payer fields.
-        # Verify those records individually rather than silently losing paid
-        # subscriptions or merging canceled contracts with unrelated people.
-        missing_details = [
-            sub for sub in candidate_records.values()
-            if not valid_recurring(sub) or not (
-                sub.get("payer_email") or sub.get("payer_id") or
-                _orb_signed_ref_owner(str(sub.get("external_reference") or ""))
-            )
-        ]
-        if len(missing_details) > 48:
+        # Query the CURRENT status and identity of each contract, rather than
+        # using a possibly stale search result. Search often omits payer_id
+        # or ownership fields, which can falsely inflate current cancellations.
+        missing_details = list(candidate_records.values())
+        if len(missing_details) > 80:
             raise HTTPException(
                 status_code=503, detail="Premium reconciliation needs provider detail audit"
             )
@@ -848,66 +933,27 @@ async def _provider_active_orb_subscriptions(
         if valid_recurring(sub):
             qualified[pid] = sub
 
-    # Union payer_email, payer_id and signed Orb owner to detect renewals even
-    # when different records have different available identity fields.
-    parent: dict[str, str] = {}
-
-    def root(token: str) -> str:
-        parent.setdefault(token, token)
-        while parent[token] != token:
-            parent[token] = parent[parent[token]]
-            token = parent[token]
-        return token
-
-    def unite(a: str, b: str) -> None:
-        parent[root(a)] = root(b)
-
-    for sub in qualified.values():
-        tokens = payer_tokens(sub)
-        for token in tokens[1:]:
-            unite(tokens[0], token)
-
-    group_statuses: dict[str, set[str]] = {}
-    historical_canceled_ids: set[str] = set()
+    # The scanner can reconcile Mercado Pago identity immediately. The owner
+    # endpoint refines that result with Supabase/SQLite checkout owners below,
+    # so an older cancellation with missing payer data cannot remain active.
+    status_counts = _premium_current_status_breakdown(list(qualified.values()))
     active: dict[str, dict[str, str]] = {}
     for pid, sub in qualified.items():
-        status = str(sub.get("status") or "").strip().lower()
-        buyer = root(payer_tokens(sub)[0])
-        group_statuses.setdefault(buyer, set()).add(status)
-        if status == "authorized":
+        if str(sub.get("status") or "").lower() == "authorized":
             active[pid] = {
                 "id": pid,
                 "external_reference": str(sub.get("external_reference") or ""),
             }
-        elif status in ("canceled", "cancelled"):
-            historical_canceled_ids.add(pid)
-
-    # Status canceled in historical contract records != a paying customer
-    # currently without an authorized plan. Two old cancellations by one
-    # payer represent one customer, and an active replacement excludes them.
-    current_cancellations = sum(
-        1 for statuses in group_statuses.values()
-        if ("canceled" in statuses or "cancelled" in statuses)
-        and "authorized" not in statuses
-    )
-    current_inactive = sum(
-        1 for statuses in group_statuses.values()
-        if "authorized" not in statuses
-        and "canceled" not in statuses and "cancelled" not in statuses
-        and ("past_due" in statuses or "expired" in statuses)
-    )
-
     if status_breakdown is not None:
-        status_breakdown.update({
-            "inactivePaidSubscriptions": current_inactive,
-            "canceledPaidSubscriptions": current_cancellations,
-            "historicalCanceledSubscriptions": len(historical_canceled_ids),
-        })
+        status_breakdown.update(status_counts)
+        # Internal ephemeral contracts; pop before constructing the response.
+        status_breakdown["_verifiedContracts"] = list(qualified.values())
     _billing_logger.info(
-        "Premium provider reconciled scan=%s orb=%s active_contracts=%s "
-        "inactive_payers=%s canceled_payers=%s historical_canceled_contracts=%s",
+        "Premium provider scan returned=%s orb=%s active_contracts=%s "
+        "historical_canceled=%s unresolved_identity=%s",
         scan_stats["returned"], scan_stats["orb_product"], len(active),
-        current_inactive, current_cancellations, len(historical_canceled_ids),
+        status_counts["historicalCanceledSubscriptions"],
+        status_counts["unresolvedCanceledSubscriptions"],
     )
     return list(active.values())
 
@@ -1088,6 +1134,13 @@ async def _refresh_verified_owner_count(authorization: str) -> dict[str, Any]:
                     "WHERE provider='mercadopago' AND provider_subscription_id IS NOT NULL"
                 ).fetchall()
             }
+        # Link the provider contracts to authenticated Orb checkout owners
+        # before calculating cancellations. Existing authorized plans always
+        # supersede historical canceled contracts for the same payer.
+        verified_contracts = provider_status_counts.pop("_verifiedContracts", [])
+        provider_status_counts.update(_premium_current_status_breakdown(
+            verified_contracts, persisted_links, local_owners
+        ))
         counts = _premium_account_count_breakdown(
             courtesy_ids, persisted_links, local_owners, provider_subscriptions
         )
