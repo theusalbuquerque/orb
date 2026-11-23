@@ -352,3 +352,14 @@ def test_developer_checkout_uses_same_real_monthly_provider_flow(service, monkey
     assert result.json()['amount'] == 6.97
     assert result.json()['requiresConfirmation'] is False
     assert len(state['created']) == 1
+
+
+def test_signed_checkout_owner_survives_mercado_pago_token_rotation(service, monkeypatch):
+    # The Orb account initiating checkout must remain identifiable when MP keys rotate.
+    monkeypatch.setenv('ORB_BILLING_LINK_SECRET', 'stable-orb-billing-test-secret')
+    ref = billing._orb_signed_checkout_ref(UID)
+    assert billing._orb_signed_ref_owner(ref) == UID
+    monkeypatch.setattr(billing, 'MP_ACCESS_TOKEN', 'rotated-mercado-pago-credential')
+    assert billing._orb_signed_ref_owner(ref) == UID
+    assert billing._orb_signed_ref_owner(ref.replace(UID.replace('-', ''), OTHER_UID.replace('-', ''))) is None
+
