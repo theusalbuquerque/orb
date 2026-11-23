@@ -23,11 +23,12 @@ MP_API = "https://api.mercadopago.com"
 ASAAS_API = os.getenv("ASAAS_API_BASE_URL", "https://api.asaas.com/v3").rstrip("/")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://orb-4mrh.onrender.com").rstrip("/")
 REQUEST_TIMEOUT = httpx.Timeout(25.0, connect=10.0)
-OWNER_COUNT_REFRESH_SECONDS = 300
+OWNER_COUNT_REFRESH_SECONDS = 120
 OWNER_COUNT_MAX_STALE_SECONDS = 86400
 OWNER_COUNT_INITIAL_WAIT_SECONDS = 7.0
 OWNER_COUNT_RPC_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
 _owner_count_snapshot: dict[str, Any] | None = None
+_owner_count_reconcile_dirty = False
 _owner_count_refresh_task: asyncio.Task[dict[str, Any]] | None = None
 _owner_count_refresh_lock = asyncio.Lock()
 _billing_logger = logging.getLogger("orb.billing")
@@ -1099,7 +1100,7 @@ def _premium_account_count_breakdown(
 
 async def _refresh_verified_owner_count(authorization: str) -> dict[str, Any]:
     """Only a fully verified provider scan may replace the last good snapshot."""
-    global _owner_count_snapshot
+    global _owner_count_snapshot, _owner_count_reconcile_dirty
     async with asyncio.timeout(55.0):
         provider_status_counts: dict[str, int] = {}
         async def load_owners() -> tuple[list[Any], list[Any]]:
@@ -1153,6 +1154,7 @@ async def _refresh_verified_owner_count(authorization: str) -> dict[str, Any]:
             "updatedAt": _now(),
             "countSource": "provider-verified",
             "providerVerified": True,
+            "reconciliationRevision": 2,
             "previousSnapshotUsers": (
                 previous_snapshot.get("activePremiumUsers")
                 if previous_snapshot else None
@@ -1167,6 +1169,7 @@ async def _refresh_verified_owner_count(authorization: str) -> dict[str, Any]:
             counts["overlappingPremiumUsers"], counts["unlinkedPaidSubscriptions"],
         )
     _owner_count_snapshot = snapshot
+    _owner_count_reconcile_dirty = False
     # Durability is best-effort; the latest verified in-memory result remains valid.
     await _save_persisted_owner_count(authorization, snapshot)
     return snapshot
@@ -1209,7 +1212,11 @@ async def owner_active_premium_count(
         # A previously verified count must survive a provider outage or a
         # Render restart. Age changes freshness, never the validity of the
         # last confirmed snapshot; the refresh runs without delaying the UI.
-        stale = _owner_count_snapshot_age(snapshot) >= OWNER_COUNT_REFRESH_SECONDS
+        stale = (
+            _owner_count_snapshot_age(snapshot) >= OWNER_COUNT_REFRESH_SECONDS
+            or snapshot.get("reconciliationRevision") != 2
+            or bool(globals().get("_owner_count_reconcile_dirty", False))
+        )
         if stale:
             try:
                 await _begin_owner_count_refresh(authorization)
@@ -1976,6 +1983,11 @@ async def mercado_pago_webhook(request: Request):
         raise HTTPException(503, detail={"code": "MP_WEBHOOK_VERIFY_UNAVAILABLE"}) from exc
 
     _event_once("mercadopago", event_id)
+    if event_type in ("subscription_preapproval", "payment"):
+        # Reconcile the owner metrics after any verified payment/subscription
+        # change, including resubscription after a cancellation.
+        global _owner_count_reconcile_dirty
+        _owner_count_reconcile_dirty = True
     return {"ok": True}
 
 
