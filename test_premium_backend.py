@@ -199,6 +199,7 @@ class PremiumBackendTests(unittest.IsolatedAsyncioTestCase):
                 "status": "canceled" if i == 2 else "authorized",
                 "reason": "Not Orb" if i == 3 else "Orb Premium",
                 "external_reference": f"owner-{i}",
+                "payer_email": f"subscriber{i}@example.test",
                 "auto_recurring": {
                     "frequency": 1, "frequency_type": "months",
                     "currency_id": "BRL", "transaction_amount": 6.97,
@@ -231,6 +232,79 @@ class PremiumBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("mp-23", {s["id"] for s in subs})
         self.assertEqual(breakdown["canceledPaidSubscriptions"], 1)
         self.assertEqual(breakdown["inactivePaidSubscriptions"], 0)
+
+    async def test_reconcile_canceled_replaced_by_active_plan(self):
+        """Historical canceled contracts must not count a customer who renewed."""
+        e = load_functions("_provider_active_orb_subscriptions")
+        e["math"] = math
+        e["_orb_signed_ref_owner"] = lambda ref: None
+        e["MP_ACCESS_TOKEN"] = "test-token"
+        e["MP_API"] = "https://api.example.test"
+        e["REQUEST_TIMEOUT"] = None
+        def contract(pid, email, status):
+            return {
+                "id": pid, "status": status, "reason": "Orb Premium",
+                "payer_email": email, "external_reference": "",
+                "auto_recurring": {"frequency": 1, "frequency_type": "months",
+                                   "currency_id": "BRL", "transaction_amount": 6.97},
+            }
+        subs = [
+            contract("old-a", "person1@example.test", "cancelled"),
+            contract("new-a", "person1@example.test", "authorized"),
+            contract("c1", "person2@example.test", "canceled"),
+            contract("c2", "person2@example.test", "cancelled"),
+            contract("active-1", "person3@example.test", "authorized"),
+            contract("active-2", "person4@example.test", "authorized"),
+            contract("active-3", "person5@example.test", "authorized"),
+        ]
+        # Four active contracts; one currently canceled customer, three
+        # historical canceled preapprovals.
+        class Response:
+            status_code = 200
+            def json(self):
+                return {"results": subs, "paging": {"limit": 20, "offset": 0, "total": len(subs)}}
+        class Client:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *_): return None
+            async def get(self, url, *, headers, params=None):
+                assert url.endswith("/preapproval/search")
+                return Response()
+        e["httpx"] = SimpleNamespace(AsyncClient=lambda **_: Client(), HTTPError=OSError)
+        breakdown = {}
+        active = await e["_provider_active_orb_subscriptions"](breakdown)
+        self.assertEqual(len(active), 4)
+        self.assertEqual(breakdown["canceledPaidSubscriptions"], 1)
+        self.assertEqual(breakdown["historicalCanceledSubscriptions"], 3)
+        self.assertEqual(breakdown["inactivePaidSubscriptions"], 0)
+
+    async def test_reconcile_missing_recurring_terms_fetches_contract_details(self):
+        e = load_functions("_provider_active_orb_subscriptions")
+        e["math"] = math
+        e["_orb_signed_ref_owner"] = lambda ref: None
+        e["MP_ACCESS_TOKEN"] = "test-token"
+        e["MP_API"] = "https://api.example.test"
+        e["REQUEST_TIMEOUT"] = None
+        class Response:
+            status_code = 200
+            def __init__(self, data): self.data = data
+            def json(self): return self.data
+        class Client:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *_): return None
+            async def get(self, url, *, headers, params=None):
+                if url.endswith("/preapproval/search"):
+                    return Response({"results": [{"id": "p1", "status": "authorized",
+                        "reason": "Orb Premium", "payer_email": "paid@example.test"}],
+                        "paging": {"limit": 20, "total": 1}})
+                return Response({"id": "p1", "status": "authorized", "reason": "Orb Premium",
+                    "payer_email": "paid@example.test", "auto_recurring": {
+                        "frequency": "1", "frequency_type": "months",
+                        "currency_id": "BRL", "transaction_amount": "6.97"}})
+        e["httpx"] = SimpleNamespace(AsyncClient=lambda **_: Client(), HTTPError=OSError)
+        counts = {}
+        active = await e["_provider_active_orb_subscriptions"](counts)
+        self.assertEqual(len(active), 1)
+        self.assertEqual(counts["canceledPaidSubscriptions"], 0)
 
 
 if __name__ == "__main__":
