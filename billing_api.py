@@ -736,7 +736,7 @@ async def _provider_active_orb_subscriptions(
                     # Only count non-active subscriptions that are verifiably
                     # for Orb Premium and have actual positive recurring terms.
                     # Pending checkouts are not former paying subscribers.
-                    if provider_status in ("paused", "past_due", "expired", "cancelled", "canceled"):
+                    if provider_status in ("past_due", "expired", "cancelled", "canceled"):
                         terms = sub.get("auto_recurring") or {}
                         if (str(sub.get("reason") or "").strip() == "Orb Premium"
                                 and isinstance(terms, dict)
