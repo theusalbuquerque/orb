@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import math
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,6 +35,7 @@ def load_functions(*names: str) -> dict[str, Any]:
     ast.fix_missing_locations(module)
     env: dict[str, Any] = {
         "Any": Any, "asyncio": asyncio, "HTTPException": HTTPException,
+        "uuid": uuid,
         "Header": lambda default=None: default,
         "datetime": datetime, "timezone": timezone,
         "httpx": SimpleNamespace(HTTPError=OSError),
@@ -140,7 +142,7 @@ class PremiumBackendTests(unittest.IsolatedAsyncioTestCase):
         e["_verified_courtesy_entitlement"].assert_not_awaited()
 
     async def test_verified_provider_and_courtesy_are_deduplicated(self):
-        e = load_functions("_refresh_verified_owner_count")
+        e = load_functions("_premium_current_status_breakdown", "_refresh_verified_owner_count")
         class Response:
             status_code = 200
             def __init__(self, data):
@@ -178,6 +180,12 @@ class PremiumBackendTests(unittest.IsolatedAsyncioTestCase):
         e["_db"] = Connection
         e["_orb_signed_ref_owner"] = lambda _: None
         # The backend's separate account aggregation is independently tested.
+        e["_premium_current_status_breakdown"] = lambda *args: {
+            "canceledPaidSubscriptions": 0,
+            "inactivePaidSubscriptions": 0,
+            "historicalCanceledSubscriptions": 0,
+            "unresolvedCanceledSubscriptions": 0,
+        }
         e["_premium_account_count_breakdown"] = lambda *args: {
             "activePremiumUsers": 2, "paidPremiumUsers": 2,
             "courtesyPremiumUsers": 1, "unlinkedPaidSubscriptions": 0,
@@ -194,7 +202,7 @@ class PremiumBackendTests(unittest.IsolatedAsyncioTestCase):
         e["_save_persisted_owner_count"].assert_awaited_once()
 
     async def test_provider_scan_reads_all_pages_and_filters_invalid_subscriptions(self):
-        e = load_functions("_provider_active_orb_subscriptions")
+        e = load_functions("_premium_current_status_breakdown", "_provider_active_orb_subscriptions")
         e["math"] = math
         e["MP_ACCESS_TOKEN"] = "test-provider-token"
         e["MP_API"] = "https://api.example.test"
@@ -229,9 +237,15 @@ class PremiumBackendTests(unittest.IsolatedAsyncioTestCase):
                 return self
             async def __aexit__(self, *_):
                 return None
-            async def get(self, _, *, headers, params):
-                calls.append(params.copy())
-                return Response(params["offset"])
+            async def get(self, url, *, headers, params=None):
+                if "/preapproval/search" in url:
+                    calls.append(params.copy())
+                    return Response(params["offset"])
+                index = int(url.rsplit("-", 1)[-1])
+                class Detail:
+                    status_code = 200
+                    def json(self): return subscription(index)
+                return Detail()
         e["httpx"] = SimpleNamespace(AsyncClient=lambda **_: Client(), HTTPError=OSError)
         breakdown = {}
         subs = await e["_provider_active_orb_subscriptions"](breakdown)
@@ -275,8 +289,14 @@ class PremiumBackendTests(unittest.IsolatedAsyncioTestCase):
             async def __aenter__(self): return self
             async def __aexit__(self, *_): return None
             async def get(self, url, *, headers, params=None):
-                assert url.endswith("/preapproval/search")
-                return Response()
+                if url.endswith("/preapproval/search"):
+                    return Response()
+                wanted = url.rsplit("/", 1)[-1]
+                class Detail:
+                    status_code = 200
+                    def json(self):
+                        return next(x for x in subs if x["id"] == wanted)
+                return Detail()
         e["httpx"] = SimpleNamespace(AsyncClient=lambda **_: Client(), HTTPError=OSError)
         breakdown = {}
         active = await e["_provider_active_orb_subscriptions"](breakdown)
@@ -284,6 +304,51 @@ class PremiumBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(breakdown["canceledPaidSubscriptions"], 1)
         self.assertEqual(breakdown["historicalCanceledSubscriptions"], 3)
         self.assertEqual(breakdown["inactivePaidSubscriptions"], 0)
+
+    def test_current_cancelation_zero_after_resubscribe_same_orb_account(self):
+        e = load_functions("_premium_current_status_breakdown")
+        e["_orb_signed_ref_owner"] = lambda _: None
+        owner = str(uuid.uuid4())
+        old = {"id": "old", "status": "canceled", "payer_email": "old@email.test"}
+        active = {"id": "new", "status": "authorized", "payer_email": "new@email.test"}
+        links = [
+            {"provider_subscription_id": "old", "user_id": owner},
+            {"provider_subscription_id": "new", "user_id": owner},
+        ]
+        counts = e["_premium_current_status_breakdown"]([old, active], links)
+        self.assertEqual(counts["canceledPaidSubscriptions"], 0)
+        self.assertEqual(counts["historicalCanceledSubscriptions"], 1)
+
+    def test_same_mp_payer_with_changed_email_suppresses_old_cancelation(self):
+        e = load_functions("_premium_current_status_breakdown")
+        e["_orb_signed_ref_owner"] = lambda _: None
+        old = {"id": "old", "status": "cancelled", "payer_id": "48371",
+               "payer_email": "original@email.test"}
+        active = {"id": "new", "status": "authorized", "payer_id": "48371",
+                  "payer_email": "new@email.test"}
+        counts = e["_premium_current_status_breakdown"]([old, active])
+        self.assertEqual(counts["canceledPaidSubscriptions"], 0)
+
+    def test_unknown_canceled_contract_is_not_a_current_canceled_user(self):
+        e = load_functions("_premium_current_status_breakdown")
+        e["_orb_signed_ref_owner"] = lambda _: None
+        counts = e["_premium_current_status_breakdown"](
+            [{"id": "old", "status": "canceled"}]
+        )
+        self.assertEqual(counts["canceledPaidSubscriptions"], 0)
+        self.assertEqual(counts["historicalCanceledSubscriptions"], 1)
+        self.assertEqual(counts["unresolvedCanceledSubscriptions"], 1)
+
+    def test_current_canceled_owner_is_counted_once_across_two_contracts(self):
+        e = load_functions("_premium_current_status_breakdown")
+        e["_orb_signed_ref_owner"] = lambda _: None
+        owner = str(uuid.uuid4())
+        contracts = [{"id": "old1", "status": "cancelled"},
+                     {"id": "old2", "status": "canceled"}]
+        links = [{"provider_subscription_id": c["id"], "user_id": owner}
+                 for c in contracts]
+        counts = e["_premium_current_status_breakdown"](contracts, links)
+        self.assertEqual(counts["canceledPaidSubscriptions"], 1)
 
     async def test_reconcile_missing_recurring_terms_fetches_contract_details(self):
         e = load_functions("_provider_active_orb_subscriptions")
