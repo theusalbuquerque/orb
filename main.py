@@ -13,6 +13,7 @@ from billing_api import router as billing_router
 from server_control import router as control_router
 from lastfm_api import router as lastfm_router
 from orb_owner_zero_auth_api import router as owner_zda_router
+from orb_sense_api import router as sense_router
 
 app = FastAPI(title="Orb Play Qobuz Module", version="2.0.0")
 
@@ -36,6 +37,7 @@ app.include_router(billing_router)
 app.include_router(control_router)
 app.include_router(lastfm_router)
 app.include_router(owner_zda_router)
+app.include_router(sense_router)
 
 QOBUZ_TOKEN = os.getenv("QOBUZ_TOKEN", "").strip()
 QOBUZ_APP_ID = os.getenv("QOBUZ_APP_ID", "243542385").strip()
