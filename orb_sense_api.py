@@ -1,6 +1,8 @@
 """Experimental Orb Sense ACRCloud proxy. Mount in the CURRENT Orb FastAPI app.
 No credentials in the Android application; no raw sample persisted by this module.
 """
+import asyncio
+import logging
 import base64
 import hashlib
 import hmac
@@ -16,6 +18,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 router = APIRouter(prefix="/api/sense", tags=["orb-sense"])
 MAX_BYTES = 44 + 16000 * 2 * 8
+_logger = logging.getLogger("orb.sense")
 
 
 def acr_credentials():
@@ -42,27 +45,50 @@ def configuration():
 
 
 async def premium_account(request: Request) -> str:
-    from server_control import bootstrap
+    # The app already gates Orb Lock. The paid proxy must independently
+    # authenticate its caller; it must not run the whole app bootstrap.
+    from billing_api import _verified_identity
     bearer = request.headers.get("Authorization", "")
     if not re.fullmatch(r"Bearer [A-Za-z0-9._-]{20,8192}", bearer):
         raise HTTPException(401, "Authentication required")
+    stage = "identity"
     try:
-        identity = None
-        if owner_only():
-            from billing_api import _verified_identity
+        async with asyncio.timeout(25.0):
             identity = await _verified_identity(bearer)
-            if identity.get("developer") is not True:
-                raise HTTPException(403, "Recognition pilot is restricted")
-        data = await bootstrap(authorization=bearer)
-        if identity is not None and str(data.get("userId")) != identity["id"]:
-            raise HTTPException(403, "Account mismatch")
-        if data.get("entitlement", {}).get("premium") is not True:
-            raise HTTPException(403, "Premium required")
-        return str(uuid.UUID(data["userId"]))
-    except HTTPException:
+            account = str(uuid.UUID(identity["id"]))
+            if owner_only():
+                # An explicitly enabled, owner-only test grant. No billing,
+                # account-hash synchronization or remote configuration lookup.
+                if identity.get("developer") is not True:
+                    raise HTTPException(403, "Recognition pilot is restricted")
+                return account
+
+            # Future public Premium mode still enforces the server entitlement.
+            from billing_api import subscription_for_identity
+            from server_control import _rpc, _resolve_entitlement
+            stage = "entitlement"
+            override = await _rpc("orb_my_entitlement", authorization=bearer)
+            if override is not None and not isinstance(override, dict):
+                raise ValueError("Invalid entitlement response")
+            stage = "billing"
+            subscription = await subscription_for_identity(
+                identity, bearer, allow_legacy_recovery=False
+            )
+            billing = {
+                "premium": subscription["premium"],
+                "plan": subscription.get("premiumPlan"),
+                "updatedAt": subscription.get("updatedAt"),
+                "renewsAt": subscription.get("nextRenewalAt"),
+            }
+            if _resolve_entitlement(billing, override)["premium"] is not True:
+                raise HTTPException(403, "Premium required")
+            return account
+    except HTTPException as exc:
+        _logger.info("Orb Sense authorization: stage=%s status=%s", stage, exc.status_code)
         raise
-    except (httpx.HTTPError, ValueError, TypeError, AttributeError, KeyError):
-        raise HTTPException(503, "Premium validation unavailable") from None
+    except (TimeoutError, httpx.HTTPError, ValueError, TypeError, AttributeError, KeyError) as exc:
+        _logger.warning("Orb Sense authorization unavailable: stage=%s type=%s", stage, type(exc).__name__)
+        raise HTTPException(503, "Recognition authorization unavailable") from None
 
 
 def validate_wav(sample: bytes):
@@ -117,7 +143,8 @@ async def quota_rpc(client, function, payload):
         if type(value) is not bool:
             raise ValueError("Invalid quota response")
         return value
-    except (httpx.HTTPError, ValueError, TypeError):
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        _logger.warning("Orb Sense quota unavailable: rpc=%s type=%s", function, type(exc).__name__)
         raise HTTPException(503, "Recognition quota unavailable") from None
 
 
@@ -181,6 +208,8 @@ async def sense_health():
         "ok": True,
         "audioBetaEnabled": audio_enabled(),
         "ownerOnly": owner_only(),
+        "authorizationMode": "verified_owner_pilot" if owner_only() else "scoped_premium",
+        "bootstrapRequired": False,
         "acrCredentialsConfigured": acr_credentials() is not None,
         "quotaBackend": "supabase",
         "quotaCredentialsConfigured": quota_credentials() is not None,
