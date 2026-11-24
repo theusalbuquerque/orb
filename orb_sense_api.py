@@ -18,15 +18,27 @@ router = APIRouter(prefix="/api/sense", tags=["orb-sense"])
 MAX_BYTES = 44 + 16000 * 2 * 8
 
 
-def configuration():
+def acr_credentials():
     host = os.getenv("ACRCLOUD_HOST", "").strip().lower()
     key = os.getenv("ACRCLOUD_ACCESS_KEY", "").strip()
     secret = os.getenv("ACRCLOUD_ACCESS_SECRET", "").strip()
-    enabled = os.getenv("ORB_SENSE_ENABLE_AUDIO_BETA", "").lower() == "true"
     # Prevent misconfigured host URLs, userinfo, redirects, or non-ACR domains.
-    if not enabled or not re.fullmatch(r"identify-[a-z0-9-]+\.acrcloud\.com", host) or not key or not secret:
+    if not re.fullmatch(r"identify-[a-z0-9-]+\.acrcloud\.com", host) or not key or not secret:
         return None
     return host, key, secret
+
+
+def audio_enabled():
+    return os.getenv("ORB_SENSE_ENABLE_AUDIO_BETA", "").lower() == "true"
+
+
+def owner_only():
+    # Fail closed: only an explicit false opens this experimental pilot to other Premium accounts.
+    return os.getenv("ORB_SENSE_BETA_OWNER_ONLY", "true").lower() != "false"
+
+
+def configuration():
+    return acr_credentials() if audio_enabled() else None
 
 
 async def premium_account(request: Request) -> str:
@@ -35,7 +47,15 @@ async def premium_account(request: Request) -> str:
     if not re.fullmatch(r"Bearer [A-Za-z0-9._-]{20,8192}", bearer):
         raise HTTPException(401, "Authentication required")
     try:
+        identity = None
+        if owner_only():
+            from billing_api import _verified_identity
+            identity = await _verified_identity(bearer)
+            if identity.get("developer") is not True:
+                raise HTTPException(403, "Recognition pilot is restricted")
         data = await bootstrap(authorization=bearer)
+        if identity is not None and str(data.get("userId")) != identity["id"]:
+            raise HTTPException(403, "Account mismatch")
         if data.get("entitlement", {}).get("premium") is not True:
             raise HTTPException(403, "Premium required")
         return str(uuid.UUID(data["userId"]))
@@ -138,9 +158,34 @@ def parse_match(data: dict):
     return None
 
 
+_quota_startup_ok = False
+
+
+@router.on_event("startup")
+async def check_quota_on_startup():
+    global _quota_startup_ok
+    _quota_startup_ok = False
+    if quota_credentials() is None:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=3.0), follow_redirects=False) as client:
+            _quota_startup_ok = await quota_rpc(client, "orb_sense_quota_health", {})
+    except HTTPException:
+        # The rest of Orb must still start. Recognition itself fails closed.
+        return
+
+
 @router.get("/health")
 async def sense_health():
-    return {"ok": True, "audioBetaEnabled": os.getenv("ORB_SENSE_ENABLE_AUDIO_BETA", "").lower() == "true", "quotaBackend": "supabase", "quotaCredentialsConfigured": quota_credentials() is not None}
+    return {
+        "ok": True,
+        "audioBetaEnabled": audio_enabled(),
+        "ownerOnly": owner_only(),
+        "acrCredentialsConfigured": acr_credentials() is not None,
+        "quotaBackend": "supabase",
+        "quotaCredentialsConfigured": quota_credentials() is not None,
+        "quotaStartupVerified": _quota_startup_ok,
+    }
 
 
 @router.get("/status")
