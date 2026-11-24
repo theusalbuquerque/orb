@@ -4,3 +4,4 @@ httpx
 numpy>=2.0,<3
 av>=13,<17
 python-multipart>=0.0.9
+PyJWT[crypto]==2.15.1
