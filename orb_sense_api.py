@@ -14,6 +14,7 @@ import uuid
 import wave
 
 import httpx
+import jwt
 from fastapi import APIRouter, HTTPException, Request
 
 router = APIRouter(prefix="/api/sense", tags=["orb-sense"])
@@ -44,6 +45,66 @@ def configuration():
     return acr_credentials() if audio_enabled() else None
 
 
+# SHA-256 of the confirmed developer account's immutable UUID. No secret key.
+_OWNER_SUB_HASH = "255dd8ade57c59161eb7e7fb4d4597f674fa819bd6b88bbc80ea81ddeb89ecc0"
+_PROJECT_ISSUER = "https://twhmhdqmbvogezofvfqg.supabase.co/auth/v1"
+_JWKS_TTL = 300.0
+_jwks = {}
+_jwks_until = 0.0
+_jwks_lock = asyncio.Lock()
+
+
+def is_pilot_owner(account: str) -> bool:
+    return hmac.compare_digest(hashlib.sha256(account.encode()).hexdigest(), _OWNER_SUB_HASH)
+
+
+async def _signing_key(kid: str):
+    global _jwks, _jwks_until
+    async with _jwks_lock:
+        now = time.monotonic()
+        if now >= _jwks_until:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(6.0, connect=4.0), follow_redirects=False) as client:
+                response = await client.get(_PROJECT_ISSUER + "/.well-known/jwks.json")
+                response.raise_for_status()
+                keys = response.json()["keys"]
+            if not isinstance(keys, list):
+                raise ValueError("Invalid JWKS")
+            _jwks = {k["kid"]: k for k in keys if isinstance(k, dict) and isinstance(k.get("kid"), str) and k.get("alg") == "ES256" and k.get("kty") == "EC" and k.get("crv") == "P-256" and "verify" in k.get("key_ops", [])}
+            _jwks_until = time.monotonic() + _JWKS_TTL
+        key = _jwks.get(kid)
+        if key is None:
+            raise HTTPException(401, "Unknown signing key; refresh session")
+        return jwt.PyJWK.from_dict(key, algorithm="ES256").key
+
+
+async def verify_pilot_identity(bearer: str) -> str:
+    token = bearer.split(" ", 1)[1]
+    try:
+        header = jwt.get_unverified_header(token)
+        if header.get("alg") == "HS256":
+            # Legacy access tokens still require the official remote Auth check.
+            from billing_api import _verified_identity
+            identity = await _verified_identity(bearer)
+            account = str(uuid.UUID(identity["id"]))
+            if identity.get("developer") is not True or not is_pilot_owner(account):
+                raise HTTPException(403, "Recognition pilot is restricted")
+            return account
+        if header.get("alg") != "ES256" or not isinstance(header.get("kid"), str):
+            raise HTTPException(401, "Unsupported session signing key")
+        key = await _signing_key(header["kid"])
+        claims = jwt.decode(token, key, algorithms=["ES256"], audience="authenticated", issuer=_PROJECT_ISSUER,
+                            options={"require": ["exp", "iat", "iss", "aud", "sub", "role", "session_id", "is_anonymous"]})
+        if claims["role"] != "authenticated" or claims["is_anonymous"] is not False:
+            raise HTTPException(403, "Authenticated account required")
+        account = str(uuid.UUID(claims["sub"]))
+        uuid.UUID(claims["session_id"])
+        if not is_pilot_owner(account):
+            raise HTTPException(403, "Recognition pilot is restricted")
+        return account
+    except jwt.InvalidTokenError:
+        raise HTTPException(401, "Invalid or expired session") from None
+
+
 async def premium_account(request: Request) -> str:
     # The app already gates Orb Lock. The paid proxy must independently
     # authenticate its caller; it must not run the whole app bootstrap.
@@ -54,14 +115,11 @@ async def premium_account(request: Request) -> str:
     stage = "identity"
     try:
         async with asyncio.timeout(25.0):
+            if owner_only():
+                stage = "pilot_token"
+                return await verify_pilot_identity(bearer)
             identity = await _verified_identity(bearer)
             account = str(uuid.UUID(identity["id"]))
-            if owner_only():
-                # An explicitly enabled, owner-only test grant. No billing,
-                # account-hash synchronization or remote configuration lookup.
-                if identity.get("developer") is not True:
-                    raise HTTPException(403, "Recognition pilot is restricted")
-                return account
 
             # Future public Premium mode still enforces the server entitlement.
             from billing_api import subscription_for_identity
@@ -86,7 +144,7 @@ async def premium_account(request: Request) -> str:
     except HTTPException as exc:
         _logger.info("Orb Sense authorization: stage=%s status=%s", stage, exc.status_code)
         raise
-    except (TimeoutError, httpx.HTTPError, ValueError, TypeError, AttributeError, KeyError) as exc:
+    except (TimeoutError, httpx.HTTPError, jwt.PyJWTError, ValueError, TypeError, AttributeError, KeyError) as exc:
         _logger.warning("Orb Sense authorization unavailable: stage=%s type=%s", stage, type(exc).__name__)
         raise HTTPException(503, "Recognition authorization unavailable") from None
 
@@ -208,7 +266,8 @@ async def sense_health():
         "ok": True,
         "audioBetaEnabled": audio_enabled(),
         "ownerOnly": owner_only(),
-        "authorizationMode": "verified_owner_pilot" if owner_only() else "scoped_premium",
+        "authorizationMode": "signed_token_owner_pilot" if owner_only() else "scoped_premium",
+        "statusMode": "configuration_only",
         "bootstrapRequired": False,
         "acrCredentialsConfigured": acr_credentials() is not None,
         "quotaBackend": "supabase",
@@ -218,12 +277,11 @@ async def sense_health():
 
 
 @router.get("/status")
-async def sense_status(request: Request):
-    await premium_account(request)
-    configured = False
-    if configuration() is not None and quota_credentials() is not None:
-        async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
-            configured = await quota_rpc(client, "orb_sense_quota_health", {})
+async def sense_status():
+    # Public configuration readiness, equivalent to the existing public health
+    # endpoint. Does not authorize uploads, consume quotas or call ACRCloud.
+    # Every identify request must still authenticate and reserve quota.
+    configured = configuration() is not None and quota_credentials() is not None
     return {"configured": configured, "mode": "audio_beta"}
 
 
