@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 router = APIRouter(prefix="/api/sense", tags=["orb-sense"])
 MAX_BYTES = 44 + 16000 * 2 * 8
-_logger = logging.getLogger("orb.sense")
+_logger = logging.getLogger("uvicorn.error.orb_sense")
 
 
 def acr_credentials():
@@ -48,9 +48,10 @@ def configuration():
 # SHA-256 of the confirmed developer account's immutable UUID. No secret key.
 _OWNER_SUB_HASH = "255dd8ade57c59161eb7e7fb4d4597f674fa819bd6b88bbc80ea81ddeb89ecc0"
 _PROJECT_ISSUER = "https://twhmhdqmbvogezofvfqg.supabase.co/auth/v1"
-_JWKS_TTL = 300.0
+_JWKS_TTL = 600.0  # hard limit from last successful HTTPS refresh
 _jwks = {}
 _jwks_until = 0.0
+_jwks_next_attempt = 0.0
 _jwks_lock = asyncio.Lock()
 
 
@@ -58,23 +59,85 @@ def is_pilot_owner(account: str) -> bool:
     return hmac.compare_digest(hashlib.sha256(account.encode()).hexdigest(), _OWNER_SUB_HASH)
 
 
-async def _signing_key(kid: str):
-    global _jwks, _jwks_until
+async def _refresh_signing_keys():
+    """Refresh proactively; retain the last successful set only within its hard TTL."""
+    global _jwks, _jwks_until, _jwks_next_attempt
     async with _jwks_lock:
         now = time.monotonic()
-        if now >= _jwks_until:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(6.0, connect=4.0), follow_redirects=False) as client:
-                response = await client.get(_PROJECT_ISSUER + "/.well-known/jwks.json")
-                response.raise_for_status()
-                keys = response.json()["keys"]
-            if not isinstance(keys, list):
-                raise ValueError("Invalid JWKS")
-            _jwks = {k["kid"]: k for k in keys if isinstance(k, dict) and isinstance(k.get("kid"), str) and k.get("alg") == "ES256" and k.get("kty") == "EC" and k.get("crv") == "P-256" and "verify" in k.get("key_ops", [])}
+        if now < _jwks_next_attempt:
+            return
+        _jwks_next_attempt = now + 30.0
+        try:
+            async with asyncio.timeout(10.0):
+                async with httpx.AsyncClient(timeout=httpx.Timeout(8.0, connect=5.0), follow_redirects=False) as client:
+                    response = await client.get(_PROJECT_ISSUER + "/.well-known/jwks.json")
+                    response.raise_for_status()
+                    keys = response.json()["keys"]
+                if not isinstance(keys, list) or len(keys) > 32:
+                    raise ValueError("Invalid JWKS")
+                fresh = {}
+                for k in keys:
+                    if not isinstance(k, dict):
+                        raise ValueError("Invalid JWK")
+                    if k.get("alg") != "ES256" or k.get("kty") != "EC" or k.get("crv") != "P-256":
+                        continue
+                    kid = k.get("kid")
+                    if not isinstance(kid, str) or not kid or kid in fresh or "verify" not in k.get("key_ops", []):
+                        raise ValueError("Invalid signing key")
+                    fresh[kid] = jwt.PyJWK.from_dict(k, algorithm="ES256").key
+            # Replace, never merge: keys removed by Supabase are no longer trusted.
+            _jwks = fresh
             _jwks_until = time.monotonic() + _JWKS_TTL
+            _jwks_next_attempt = time.monotonic() + 120.0
+            _logger.info("Orb Sense JWKS refreshed: keys=%d", len(fresh))
+        except (TimeoutError, httpx.HTTPError, jwt.PyJWTError, ValueError, TypeError, KeyError) as exc:
+            _logger.warning("Orb Sense JWKS refresh failed: type=%s cache_valid=%s",
+                            type(exc).__name__, time.monotonic() < _jwks_until)
+
+
+async def _signing_key(kid: str):
+    if time.monotonic() < _jwks_until:
         key = _jwks.get(kid)
-        if key is None:
+        if key is not None:
+            return key
+        # Unknown kids never use a different or expired key.
+        if time.monotonic() < _jwks_next_attempt:
             raise HTTPException(401, "Unknown signing key; refresh session")
-        return jwt.PyJWK.from_dict(key, algorithm="ES256").key
+    await _refresh_signing_keys()
+    if time.monotonic() >= _jwks_until:
+        raise HTTPException(503, "Recognition signing keys unavailable")
+    key = _jwks.get(kid)
+    if key is None:
+        raise HTTPException(401, "Unknown signing key; refresh session")
+    return key
+
+
+async def _refresh_jwks_loop():
+    while True:
+        if audio_enabled() and owner_only():
+            await _refresh_signing_keys()
+        await asyncio.sleep(30.0)
+
+
+_jwks_task = None
+
+
+@router.on_event("startup")
+async def start_jwks_refresh():
+    global _jwks_task
+    _jwks_task = asyncio.create_task(_refresh_jwks_loop())
+
+
+@router.on_event("shutdown")
+async def stop_jwks_refresh():
+    global _jwks_task
+    if _jwks_task is not None:
+        _jwks_task.cancel()
+        try:
+            await _jwks_task
+        except asyncio.CancelledError:
+            pass
+        _jwks_task = None
 
 
 async def verify_pilot_identity(bearer: str) -> str:
@@ -225,10 +288,15 @@ def signature(key: str, secret: str, timestamp: str) -> str:
 
 def parse_match(data: dict):
     code = data.get("status", {}).get("code")
+    if type(code) is not int:
+        raise ValueError("Invalid recognition status")
     if code == 1001:
         return None
     if code != 0:
-        raise HTTPException(502, "Recognition provider error")
+        _logger.warning("Orb Sense ACRCloud rejected: provider_code=%d", code)
+        if code in (3003, 3015):
+            raise HTTPException(429, {"code": "ACR_LIMIT", "providerCode": code})
+        raise HTTPException(502, {"code": "ACR_PROVIDER_ERROR", "providerCode": code})
     for item in data.get("metadata", {}).get("music", []):
         if not isinstance(item, dict):
             continue
@@ -269,6 +337,8 @@ async def sense_health():
         "authorizationMode": "signed_token_owner_pilot" if owner_only() else "scoped_premium",
         "statusMode": "configuration_only",
         "bootstrapRequired": False,
+        "recognitionRevision": "jwks-proactive-v1",
+        "signingKeysReady": bool(_jwks) and time.monotonic() < _jwks_until,
         "acrCredentialsConfigured": acr_credentials() is not None,
         "quotaBackend": "supabase",
         "quotaCredentialsConfigured": quota_credentials() is not None,
@@ -297,14 +367,26 @@ async def identify(request: Request):
         await reserve_quota(client, account)
         ts = str(int(time.time()))
         try:
-            res = await client.post(f"https://{host}/v1/identify", data={
+            started = time.monotonic()
+            res = await client.post(f"https://{host}/v1/identify", timeout=httpx.Timeout(20.0, connect=8.0, write=10.0, pool=5.0), data={
                 "access_key": key, "sample_bytes": str(len(sample)), "timestamp": ts,
                 "signature": signature(key, secret, ts), "data_type": "audio", "signature_version": "1",
             }, files={"sample": ("sense.wav", sample, "audio/wav")})
             res.raise_for_status()
-            track = parse_match(res.json())
+            payload = res.json()
+            track = parse_match(payload)
+            provider_code = payload["status"]["code"]
+            outcome = "match" if track is not None else ("no_match" if provider_code == 1001 else "below_confidence")
+            _logger.info("Orb Sense ACRCloud result: outcome=%s provider_code=%d elapsed_ms=%d",
+                         outcome, provider_code, int((time.monotonic() - started) * 1000))
         except HTTPException:
             raise
-        except (httpx.HTTPError, ValueError, TypeError, AttributeError, KeyError):
-            raise HTTPException(502, "Recognition provider unavailable") from None
-        return {"track": track}
+        except httpx.HTTPStatusError as exc:
+            _logger.warning("Orb Sense ACRCloud HTTP failure: status=%d", exc.response.status_code)
+            if exc.response.status_code == 429:
+                raise HTTPException(429, {"code": "ACR_LIMIT"}) from None
+            raise HTTPException(502, {"code": "ACR_HTTP_ERROR"}) from None
+        except (httpx.HTTPError, ValueError, TypeError, AttributeError, KeyError) as exc:
+            _logger.warning("Orb Sense ACRCloud failure: type=%s", type(exc).__name__)
+            raise HTTPException(502, {"code": "ACR_UNAVAILABLE"}) from None
+        return {"track": track, "outcome": outcome}
