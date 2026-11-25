@@ -5024,11 +5024,20 @@ async def plan(request: PlanRequest) -> dict[str, Any]:
     if request.version > API_VERSION:
         raise HTTPException(status_code=409, detail="unsupported Automix protocol version")
     account_hash = request.accountHash.strip().lower()
-    entitled = (
-        (account_hash in AUTOMIX25_BETA_HASHES and beta_preview_allowed(account_hash))
-        or premium_entitled_for_account_hash(account_hash)
-    )
-    if not request.preview or not entitled:
+    if not request.preview:
+        raise HTTPException(status_code=403, detail="Automix 2.5 entitlement required")
+
+    def check_entitlement() -> bool:
+        return (
+            (account_hash in AUTOMIX25_BETA_HASHES and beta_preview_allowed(account_hash))
+            or premium_entitled_for_account_hash(account_hash)
+        )
+
+    # The entitlement helper performs synchronous HTTP/SQLite I/O. Never run
+    # it on the ASGI event loop: a slow Supabase call otherwise stalls billing,
+    # checkout, authentication and every other request in this worker.
+    entitled = await asyncio.to_thread(check_entitlement)
+    if not entitled:
         raise HTTPException(status_code=403, detail="Automix 2.5 entitlement required")
     if request.compact:
         outgoing_id = str(request.outgoing.get("trackId") or "").strip()
